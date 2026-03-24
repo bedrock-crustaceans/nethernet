@@ -1,0 +1,172 @@
+name: Rust
+
+on:
+  push:
+    branches: ["master"]
+  pull_request_review:
+    types: [submitted]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-approval:
+    if: github.event_name != 'pull_request_review' || (github.event_name == 'pull_request_review' && github.event.review.state == 'approved')
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Approval OK"
+
+  fmt:
+    runs-on: ubuntu-latest
+    needs: check-approval
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    needs: check-approval
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2.8.2
+        with:
+          shared-key: rust-${{ hashFiles('**/Cargo.lock') }}
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
+          cache-on-failure: false
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - run: cargo clippy --workspace --tests --examples -- -D warnings
+
+  docs:
+    runs-on: ubuntu-latest
+    needs: check-approval
+    env:
+      RUSTDOCFLAGS: -Dwarnings
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-docs
+      - uses: Swatinem/rust-cache@v2.8.2
+        with:
+          shared-key: rust-${{ hashFiles('**/Cargo.lock') }}
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
+          cache-on-failure: false
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - run: cargo doc --workspace --no-deps
+
+  bench:
+    runs-on: ubuntu-latest
+    needs: check-approval
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2.8.2
+        with:
+          shared-key: rust-${{ hashFiles('**/Cargo.lock') }}
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
+          cache-on-failure: false
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Cache critcmp
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/critcmp
+          key: critcmp-${{ runner.os }}
+
+      - name: Install critcmp
+        run: |
+          if ! command -v critcmp &> /dev/null; then
+            cargo install critcmp
+          fi
+
+      - name: Restore benchmark baseline
+        uses: actions/cache@v4
+        with:
+          path: target/criterion
+          key: criterion-master-${{ github.sha }}
+          restore-keys: |
+            criterion-master-
+
+      - name: Run benchmarks
+        run: |
+          set -e
+          
+          BASELINE_NAME="after"
+          if [ "${{ github.ref }}" = "refs/heads/master" ]; then
+            BASELINE_NAME="master"
+          fi
+
+          cargo bench --workspace --benches -- --save-baseline "$BASELINE_NAME"
+
+      - name: Check performance regression
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review'
+        shell: python3 {0}
+        run: |
+          import subprocess
+          import sys
+          import re
+          import os
+
+          if not os.path.exists("target/criterion/master"):
+              print("Master baseline not found in target/criterion/master. Skipping regression check.")
+              # Not failing here because it might be the first run
+              sys.exit(0)
+
+          try:
+              output = subprocess.check_output(["critcmp", "master", "after"], text=True)
+              print("Benchmark Comparison Results:")
+              print(output)
+              
+              regression_found = False
+              threshold = 5.0 # 5% regression threshold
+              
+              for line in output.splitlines():
+                  # Example: "bench_name  100ns  110ns  +10.00%"
+                  match = re.search(r'\+([0-9]+\.[0-9]+)%', line)
+                  if match:
+                      percent = float(match.group(1))
+                      if percent >= threshold:
+                          print(f"::error::Performance regression detected: {line.strip()}")
+                          regression_found = True
+              
+              if regression_found:
+                  print(f"FAIL: Performance regressions exceeding {threshold}% detected.")
+                  sys.exit(1)
+                  
+          except FileNotFoundError:
+              print("critcmp command not found. Please ensure it is installed.")
+              sys.exit(1)
+          except subprocess.CalledProcessError as e:
+              print(f"Error running critcmp: {e}")
+              sys.exit(1)
+
+      - name: Upload benchmark report
+        if: github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report
+          path: target/criterion
+          retention-days: 14
+
+      - name: Update baseline cache
+        if: github.ref == 'refs/heads/master'
+        uses: actions/cache/save@v4
+        with:
+          path: target/criterion
+          key: criterion-master-${{ github.sha }}

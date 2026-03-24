@@ -1,0 +1,13 @@
+[env]
+CC_x86_64-linux-android = { value = "/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android35-clang", force = false, relative = false }
+AR_x86_64-linux-android = { value = "/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar", force = false, relative = false }
+CC_aarch64-linux-android = { value = "/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang", force = false, relative = false }
+AR_aarch64-linux-android = { value = "/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar", force = false, relative = false }
+
+[target.x86_64-linux-android]
+linker = "/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android35-clang"
+ar = "/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+
+[target.aarch64-linux-android]
+linker = "/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang"
+ar = "/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
