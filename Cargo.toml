@@ -6,7 +6,7 @@ readme = "README.md"
 rust-version = "1.85"
 
 [dependencies]
-tokio = { version = "1.49.0", features = ["net", "sync", "time", "rt-multi-thread", "macros"] }
+tokio = { version = "1.50.0", features = ["net", "sync", "time", "rt-multi-thread", "macros"] }
 tokio-util = { version = "0.7", features = ["io", "codec"] }
 tracing = "0.1.44"
 bitflags = "2.11.0"
@@ -22,7 +22,7 @@ rand = "0.10.0"
 serde_json = "1.0.149"
 
 [dev-dependencies]
-tracing-subscriber = "0.3.22"
+tracing-subscriber = "0.3.23"
 criterion = "0.8.2"
 
 [lib]
