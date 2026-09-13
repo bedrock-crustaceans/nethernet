@@ -168,11 +168,14 @@ impl Description {
             .map(parse_ice_candidate)
             .collect::<Result<Vec<_>>>()?;
 
-        let max_message_size = attribute(media, "max-message-size")?
-            .parse::<u32>()
-            .map_err(|e| {
+        // Vanilla hosts may omit max-message-size; fall back to the NetherNet
+        // default rather than failing the whole negotiation.
+        let max_message_size = match attribute(media, "max-message-size") {
+            Ok(value) => value.parse::<u32>().map_err(|e| {
                 NethernetError::Other(format!("parse max-message-size attribute: {}", e))
-            })?;
+            })?,
+            Err(_) => crate::protocol::constants::SCTP_MAX_MESSAGE_SIZE,
+        };
 
         Ok(Self {
             ice: RTCIceParameters {
