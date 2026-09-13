@@ -207,14 +207,23 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         let remote_address =
             signaling.remote_address(&Addr::new(signal.network_id.clone(), signal.connection_id));
 
+        let connection_id = signal.connection_id;
+        let network_id = signal.network_id;
+        let key = (network_id.clone(), connection_id);
+
+        let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+        signal_dispatchers
+            .lock()
+            .await
+            .insert(key.clone(), signal_tx);
         // A peer that cannot prove who it is has an offer anyone could have replayed
         let signaled_player =
-            signaling.player(&Addr::new(signal.network_id.clone(), signal.connection_id));
+            signaling.player(&Addr::new(network_id.clone(), connection_id));
         let player = match &config.token_trust {
             Some(trust) => match validate_sdp(&signal.data, trust, SystemTime::now()) {
                 Ok(claims) => Some(Arc::new(PlayerInfo::new(
                     claims,
-                    signal.network_id.clone(),
+                    network_id.clone(),
                     remote_address,
                 ))),
                 Err(e) => {
@@ -266,16 +275,6 @@ impl<S: Signaling + 'static> NethernetListener<S> {
             })?,
             None => answer,
         };
-
-        let connection_id = signal.connection_id;
-        let network_id = signal.network_id;
-        let key = (network_id.clone(), connection_id);
-
-        let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
-        signal_dispatchers
-            .lock()
-            .await
-            .insert(key.clone(), signal_tx);
 
         signaling
             .signal(Signal::answer(connection_id, answer, network_id.clone()))
