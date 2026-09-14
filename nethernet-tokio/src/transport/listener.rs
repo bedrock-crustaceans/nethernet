@@ -8,13 +8,15 @@ use crate::signaling::Signaling;
 use crate::transport::stream::parse_error_code;
 use crate::transport::{ConnectionConfig, Transports};
 use futures::{Stream, StreamExt};
+use nethernet::identity::{PlayerInfo, validate_sdp};
+use nethernet::util::candidate;
 use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -202,6 +204,29 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         let description = Description::parse(&signal.data)
             .map_err(|e| (Some(SignalErrorCode::FailedToSetRemoteDescription), e))?;
 
+        let remote_address = signaling.remote_address(&Addr::new(
+            signal.network_id.clone(),
+            signal.connection_id,
+        ));
+
+        // A peer that cannot prove who it is has an offer anyone could have replayed
+        let player = match &config.token_trust {
+            Some(trust) => match validate_sdp(&signal.data, trust, SystemTime::now()) {
+                Ok(claims) => Some(Arc::new(PlayerInfo::new(
+                    claims,
+                    signal.network_id.clone(),
+                    remote_address,
+                ))),
+                Err(e) => {
+                    return Err((
+                        Some(SignalErrorCode::NotLoggedIn),
+                        NethernetError::Identity(e),
+                    ));
+                }
+            },
+            None => None,
+        };
+
         let credentials = signaling
             .credentials()
             .await
@@ -229,6 +254,18 @@ impl<S: Signaling + 'static> NethernetListener<S> {
             )
             .and_then(|description| description.encode())
             .map_err(|e| (Some(SignalErrorCode::FailedToCreateAnswer), e))?;
+
+        // Clients pin the key an answer is signed with, so one that is not signed prompts
+        // the player on every join
+        let answer = match &config.identity {
+            Some(identity) => identity.augment_answer(&answer).map_err(|e| {
+                (
+                    Some(SignalErrorCode::FailedToCreateAnswer),
+                    NethernetError::Identity(e),
+                )
+            })?,
+            None => answer,
+        };
 
         let connection_id = signal.connection_id;
         let network_id = signal.network_id;
@@ -268,6 +305,10 @@ impl<S: Signaling + 'static> NethernetListener<S> {
             Addr::new(network_id.clone(), connection_id),
         ));
 
+        if let Some(player) = player {
+            session.set_player(player).await;
+        }
+
         let (candidate_tx, candidate_rx) = oneshot::channel();
         let candidate_tx = Arc::new(Mutex::new(Some(candidate_tx)));
 
@@ -278,6 +319,27 @@ impl<S: Signaling + 'static> NethernetListener<S> {
             }
             if let Some(tx) = candidate_tx.lock().await.take() {
                 let _ = tx.send(());
+            }
+        }
+
+        if config.infer_peer_candidates && !candidate::has_routable_host_candidate(&signal.data) {
+            for line in candidate::inferred_peer_candidates(&signal.data, remote_address) {
+                let candidate = match parse_ice_candidate(&line) {
+                    Ok(candidate) => candidate,
+                    Err(e) => {
+                        tracing::debug!("Failed to parse inferred candidate: {}", e);
+                        continue;
+                    }
+                };
+
+                tracing::debug!("Inferred candidate for the peer: {}", line);
+                if let Err(e) = session.add_remote_candidate(candidate).await {
+                    tracing::warn!("Failed to add inferred candidate: {}", e);
+                    continue;
+                }
+                if let Some(tx) = candidate_tx.lock().await.take() {
+                    let _ = tx.send(());
+                }
             }
         }
 

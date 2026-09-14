@@ -8,6 +8,8 @@ use crate::credentials::{Credentials, gather_options};
 use crate::error::{NethernetError, Result};
 use crate::protocol::constants::SCTP_MAX_MESSAGE_SIZE;
 use crate::protocol::webrtc::Description;
+use nethernet::identity::{ServerIdentity, TokenTrust};
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -25,7 +27,7 @@ use webrtc::sctp_transport::RTCSctpTransport;
 use webrtc::sctp_transport::sctp_transport_capabilities::SCTPTransportCapabilities;
 
 /// Options applied while negotiating and establishing a connection.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 pub struct ConnectionConfig {
     /// Timeouts of each negotiation step.
     pub timeouts: Timeouts,
@@ -33,6 +35,52 @@ pub struct ConnectionConfig {
     /// Cancels the negotiation when triggered. Connections that are already established
     /// are unaffected, as they are closed through the session itself.
     pub cancel_token: CancellationToken,
+
+    /// How many times a connection is negotiated before dialing gives up.
+    ///
+    /// A negotiation that times out is retried under a new connection ID, since a peer
+    /// that missed the first offer has nothing to answer and one that answered too late
+    /// would answer an ID this side no longer waits for.
+    pub attempts: u32,
+
+    /// The identity answers are signed with, or [`None`] to answer without one.
+    ///
+    /// A client pins the key of a server, so it should be kept between restarts rather
+    /// than generated on each start.
+    pub identity: Option<Arc<ServerIdentity>>,
+
+    /// Who is trusted to have signed the token of an offer, or [`None`] to accept offers
+    /// without validating the identity they carry.
+    pub token_trust: Option<TokenTrust>,
+
+    /// Whether the address a peer signaled from is checked when its offer holds nothing
+    /// routable. It does nothing for a peer that gathered a routable candidate itself.
+    pub infer_peer_candidates: bool,
+}
+
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            timeouts: Timeouts::default(),
+            cancel_token: CancellationToken::new(),
+            attempts: 3,
+            identity: None,
+            token_trust: None,
+            infer_peer_candidates: true,
+        }
+    }
+}
+
+impl fmt::Debug for ConnectionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectionConfig")
+            .field("timeouts", &self.timeouts)
+            .field("attempts", &self.attempts)
+            .field("identity", &self.identity.is_some())
+            .field("token_trust", &self.token_trust.is_some())
+            .field("infer_peer_candidates", &self.infer_peer_candidates)
+            .finish()
+    }
 }
 
 /// Timeouts applied while negotiating and establishing a connection.

@@ -3,6 +3,7 @@ use crate::error::{NethernetError, Result};
 use crate::protocol::constants::DEFAULT_PACKET_CHANNEL_CAPACITY;
 use crate::protocol::{Message, MessageSegment};
 use bytes::Bytes;
+use nethernet::identity::PlayerInfo;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -84,6 +85,7 @@ pub struct Session {
     unreliable_rx: Arc<Mutex<mpsc::Receiver<Bytes>>>,
     closed: Arc<RwLock<bool>>,
     close_token: CancellationToken,
+    player: Arc<RwLock<Option<Arc<PlayerInfo>>>>,
 }
 
 impl Session {
@@ -136,6 +138,7 @@ impl Session {
             unreliable_rx: Arc::new(Mutex::new(unreliable_rx)),
             closed: Arc::new(RwLock::new(false)),
             close_token: CancellationToken::new(),
+            player: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -333,6 +336,20 @@ impl Session {
             .await
             .map(|pair| pair.remote);
         addr
+    }
+
+    /// Records the identity the connection was accepted with.
+    pub async fn set_player(&self, player: Arc<PlayerInfo>) {
+        *self.player.write().await = Some(player);
+    }
+
+    /// The identity the connection was accepted with, or [`None`] when identities are not
+    /// validated or the connection was dialed rather than accepted.
+    ///
+    /// Everything it claims is only as trustworthy as the policy the offer was validated
+    /// with, and only its public key is bound to a key the peer had to hold.
+    pub async fn player(&self) -> Option<Arc<PlayerInfo>> {
+        self.player.read().await.clone()
     }
 
     /// Returns the current state of the ICE transport.

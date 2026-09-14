@@ -1,4 +1,5 @@
 use nethernet::error::ProtocolError;
+use nethernet::identity::error::IdentityError;
 use std::io;
 use thiserror::Error;
 
@@ -26,6 +27,10 @@ pub enum NethernetError {
     /// Protocol error
     #[error("Protocol error: {0}")]
     Protocol(#[from] ProtocolError),
+
+    /// The identity of a description did not hold up
+    #[error("Identity error: {0}")]
+    Identity(#[from] IdentityError),
 
     /// Signaling error
     #[error("Signaling error: {0}")]

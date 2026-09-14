@@ -96,36 +96,62 @@ impl NethernetStream {
     }
 
     /// Establishes a NethernetStream using the timeouts of the given configuration.
+    ///
+    /// A negotiation that runs out of time is retried until the configured number of
+    /// attempts is used up. Every attempt negotiates under a connection ID of its own,
+    /// since a remote connection that answers the previous offer too late would answer an
+    /// ID this side no longer waits for.
     pub async fn connect_with<S: Signaling + 'static>(
         signaling: Arc<S>,
         remote_network_id: String,
         config: ConnectionConfig,
     ) -> Result<Self> {
-        let mut connection_id_bytes = [0u8; 8];
-        rand::rng().fill_bytes(&mut connection_id_bytes);
-        let connection_id = u64::from_le_bytes(connection_id_bytes);
+        let attempts = config.attempts.max(1);
 
-        let cancel_token = config.cancel_token.clone();
-        let result = tokio::select! {
-            _ = cancel_token.cancelled() => Err((None, NethernetError::ConnectionClosed)),
-            result = Self::negotiate(&signaling, &remote_network_id, connection_id, config) => result,
-        };
+        for attempt in 1..=attempts {
+            let mut connection_id_bytes = [0u8; 8];
+            rand::rng().fill_bytes(&mut connection_id_bytes);
+            let connection_id = u64::from_le_bytes(connection_id_bytes);
 
-        match result {
-            Ok(stream) => Ok(stream),
-            Err((code, e)) => {
-                if let Some(code) = code {
-                    let _ = signaling
-                        .signal(Signal::error(
-                            connection_id,
-                            code,
-                            remote_network_id.clone(),
-                        ))
-                        .await;
-                }
-                Err(e)
+            let cancel_token = config.cancel_token.clone();
+            let result = tokio::select! {
+                _ = cancel_token.cancelled() => Err((None, NethernetError::ConnectionClosed)),
+                result = Self::negotiate(
+                    &signaling,
+                    &remote_network_id,
+                    connection_id,
+                    config.clone(),
+                ) => result,
+            };
+
+            let (code, error) = match result {
+                Ok(stream) => return Ok(stream),
+                Err(failure) => failure,
+            };
+
+            if let Some(code) = code {
+                let _ = signaling
+                    .signal(Signal::error(
+                        connection_id,
+                        code,
+                        remote_network_id.clone(),
+                    ))
+                    .await;
             }
+
+            // Anything else is an answer this side understood, so another offer changes nothing
+            if !matches!(error, NethernetError::Timeout) || attempt == attempts {
+                return Err(error);
+            }
+
+            tracing::debug!(
+                "negotiation attempt {} of {} timed out, offering again",
+                attempt,
+                attempts
+            );
         }
+
+        Err(NethernetError::Timeout)
     }
 
     /// Negotiates the connection, reporting the error code to be signaled back to the

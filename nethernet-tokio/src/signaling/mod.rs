@@ -1,7 +1,9 @@
+use crate::addr::Addr;
 use crate::credentials::Credentials;
 use crate::error::Result;
 use crate::protocol::Signal;
 use futures::Stream;
+use std::net::SocketAddr;
 use std::pin::Pin;
 
 pub mod http;
@@ -34,6 +36,14 @@ pub trait Signaling: Send + Sync {
     /// return [`None`] and only gather host candidates.
     fn credentials(&self) -> impl std::future::Future<Output = Result<Option<Credentials>>> + Send {
         async { Ok(None) }
+    }
+
+    /// Returns the address a connection signaled from, if the signaling can tell.
+    ///
+    /// It seeds a connection before ICE settles and is what candidates are inferred from
+    /// when a peer gathered nothing a host on another network could reach.
+    fn remote_address(&self, _addr: &Addr) -> Option<SocketAddr> {
+        None
     }
 
     /// Sets the server data advertised to clients from a RakNet pong response.
