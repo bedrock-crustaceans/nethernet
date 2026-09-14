@@ -87,6 +87,6 @@ impl NethernetMotd {
 
     /// Marshals the MOTD payload bytes for `Signaling::set_pong_data`.
     pub fn marshal(self) -> Result<Vec<u8>> {
-        self.server_data.marshal()
+        Ok(self.server_data.marshal()?)
     }
 }
