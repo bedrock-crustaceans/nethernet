@@ -108,6 +108,13 @@ impl LanSignaler {
         self.addresses.get(&network_id).map(|entry| entry.addr)
     }
 
+    /// The addresses every known network was last seen at.
+    pub fn addresses(&self) -> impl Iterator<Item = (u64, SocketAddr)> + '_ {
+        self.addresses
+            .iter()
+            .map(|(&network_id, entry)| (network_id, entry.addr))
+    }
+
     /// The signals that are still waiting to be answered.
     pub fn pending_signals(&self) -> usize {
         self.pending.len()

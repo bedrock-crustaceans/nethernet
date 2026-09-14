@@ -1,454 +1,237 @@
+//! Signaling over LAN discovery, driven on top of the sans-IO state machine.
+
+use crate::addr::Addr;
 use crate::error::{NethernetError, Result};
-use crate::protocol::packet::discovery::{
-    self, MessagePacket, RequestPacket, ResponsePacket, ServerData,
-};
-use crate::protocol::{Signal, constants};
+use crate::protocol::Signal;
 use crate::signaling::Signaling;
 use futures::Stream;
+use nethernet::prelude::{
+    LanSignaler, LanSignalerInput, LanSignalerOutput, RequestPacket, Sans, ServerData,
+};
+use nethernet::protocol::packet::discovery::marshal;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::sync::{RwLock as AsyncRwLock, broadcast};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-/// Options for LAN discovery.
-#[derive(Debug, Clone)]
-pub struct LanConfig {
-    /// Port servers listen on for discovery requests. Vanilla clients broadcast to
-    /// [`constants::LAN_DISCOVERY_PORT`], so it should only be changed for testing.
-    pub discovery_port: u16,
+pub use nethernet::signaling::lan::config::LanSignalerConfig as LanConfig;
 
-    /// Address discovery requests are broadcast to. If [`None`], requests are broadcast
-    /// to the discovery port, unless the socket is bound to that port itself, in which
-    /// case no requests are broadcast at all.
-    pub broadcast_address: Option<SocketAddr>,
+/// Largest datagram a discovery packet is read into.
+const BUFFER_SIZE: usize = 4096;
 
-    /// Interval between broadcasts of discovery requests.
-    pub broadcast_interval: Duration,
+/// Longest a driver sleeps when the state machine asks for nothing sooner.
+const MAX_IDLE: Duration = Duration::from_secs(1);
 
-    /// Time an address of a remote network is kept after its last packet.
-    pub address_timeout: Duration,
+enum Command {
+    Signal(Box<Signal>, oneshot::Sender<Result<()>>),
+    SetServerData(Box<ServerData>),
 }
 
-impl Default for LanConfig {
-    fn default() -> Self {
-        Self {
-            discovery_port: constants::LAN_DISCOVERY_PORT,
-            broadcast_address: None,
-            broadcast_interval: Duration::from_secs(2),
-            address_timeout: Duration::from_secs(15),
-        }
-    }
+/// A snapshot of the state the driver keeps, so callers can read it without stopping the
+/// state machine to ask.
+#[derive(Default)]
+struct Shared {
+    addresses: RwLock<HashMap<u64, SocketAddr>>,
+    discovered: RwLock<HashMap<u64, ServerData>>,
 }
 
-/// Protocol-defined ping token used for keepalive/discovery messages
-/// This is the exact wire format expected by the protocol
-const PING_TOKEN: &str = "Ping";
-
-/// LAN-based signaling implementation for peer discovery and WebRTC negotiation.
+/// LAN discovery signaling for a single NetherNet network.
 pub struct LanSignaling {
     network_id: u64,
-    socket: Arc<UdpSocket>,
-    addresses: Arc<AsyncRwLock<HashMap<u64, AddressEntry>>>,
-    /// Broadcast sender for fan-out signal distribution to multiple subscribers
+    commands: mpsc::UnboundedSender<Command>,
     signal_tx: broadcast::Sender<Signal>,
-    server_data: Arc<RwLock<Option<ServerData>>>,
-    discovered_servers: Arc<AsyncRwLock<HashMap<u64, ServerData>>>,
+    shared: Arc<Shared>,
     cancel_token: CancellationToken,
-    background_task: Option<JoinHandle<()>>,
-}
-
-struct AddressEntry {
-    addr: SocketAddr,
-    last_seen: Instant,
+    task: Option<JoinHandle<()>>,
 }
 
 impl LanSignaling {
-    /// Creates and starts a new LanSignaling instance bound to the given address.
-    ///
-    /// Binds a UDP socket to `bind_addr`, enables broadcast, initializes internal
-    /// shared state (address table, discovered servers, optional server pong data),
-    /// creates a broadcast channel for outbound signals, and spawns the background
-    /// task that handles incoming packets, periodic discovery, and cleanup.
-    ///
-    /// On success returns a configured `LanSignaling` instance ready to send and
-    /// receive LAN signaling messages; on failure returns the underlying I/O or
-    /// setup error.
+    /// Binds a discovery socket and starts the signaling on it.
     pub async fn new(network_id: u64, bind_addr: SocketAddr) -> Result<Self> {
         Self::with_config(network_id, bind_addr, LanConfig::default()).await
     }
 
-    /// Creates and starts a new LanSignaling instance using the given options.
+    /// Binds a discovery socket and starts the signaling using the given options.
+    ///
+    /// A socket bound to the discovery port answers the requests of other networks rather
+    /// than broadcasting its own, unless the configuration names an address to broadcast
+    /// to itself.
     pub async fn with_config(
         network_id: u64,
         bind_addr: SocketAddr,
-        config: LanConfig,
+        mut config: LanConfig,
     ) -> Result<Self> {
         let socket = UdpSocket::bind(bind_addr).await?;
         socket.set_broadcast(true)?;
 
-        // Use broadcast channel for fan-out to multiple subscribers
-        // Capacity of 100 should be sufficient for signal buffering
-        let (signal_tx, _signal_rx) = broadcast::channel(100);
-
-        // Servers bound to the discovery port answer requests instead of broadcasting them
-        let broadcast_addr = match config.broadcast_address {
-            Some(addr) => Some(addr),
-            None if bind_addr.port() != config.discovery_port => Some(SocketAddr::new(
+        if config.broadcast_address.is_none() && bind_addr.port() != config.discovery_port {
+            config.broadcast_address = Some(SocketAddr::new(
                 Ipv4Addr::BROADCAST.into(),
                 config.discovery_port,
-            )),
-            None => None,
-        };
+            ));
+        }
 
+        let (signal_tx, _) = broadcast::channel(100);
+        let (commands, command_rx) = mpsc::unbounded_channel();
+        let shared = Arc::new(Shared::default());
         let cancel_token = CancellationToken::new();
 
-        let socket = Arc::new(socket);
-        let addresses = Arc::new(AsyncRwLock::new(HashMap::new()));
-        let server_data = Arc::new(RwLock::new(None));
-        let discovered_servers = Arc::new(AsyncRwLock::new(HashMap::new()));
-
-        let background_task = Self::start_background_task(
-            network_id,
-            socket.clone(),
-            addresses.clone(),
+        let task = Self::drive(
+            LanSignaler::new(network_id, config),
+            Arc::new(socket),
+            command_rx,
             signal_tx.clone(),
-            server_data.clone(),
-            discovered_servers.clone(),
-            broadcast_addr,
+            shared.clone(),
             cancel_token.clone(),
-            config,
         );
 
-        let signaling = Self {
+        Ok(Self {
             network_id,
-            socket,
-            addresses,
+            commands,
             signal_tx,
-            server_data,
-            discovered_servers,
+            shared,
             cancel_token,
-            background_task: Some(background_task),
-        };
-
-        Ok(signaling)
+            task: Some(task),
+        })
     }
 
-    /// Gracefully shuts down the LAN signaling instance.
-    ///
-    /// Cancels the background task and waits for it to complete. This ensures
-    /// that all in-flight operations are finished and no packets will be
-    /// processed after this method returns.
-    ///
-    /// Use this method when you need guaranteed cleanup before proceeding,
-    /// such as before application shutdown or when transitioning to a different
-    /// signaling mechanism.
+    /// Stops the signaling and waits for its driver to finish.
     pub async fn shutdown(mut self) {
         self.cancel_token.cancel();
-        if let Some(task) = self.background_task.take() {
+        if let Some(task) = self.task.take() {
             let _ = task.await;
         }
     }
 
-    /// Sets the server data advertised in response to discovery requests.
+    /// Sets the data advertised in response to discovery requests.
     pub fn set_server_data(&self, server_data: ServerData) {
-        *self.server_data.write().unwrap_or_else(|e| e.into_inner()) = Some(server_data);
+        let _ = self
+            .commands
+            .send(Command::SetServerData(Box::new(server_data)));
     }
 
-    /// Returns a snapshot of discovered servers keyed by their network ID.
-    ///
-    /// Clones and returns the current internal map of discovered `ServerData` entries.
+    /// The servers that have answered a discovery request, keyed by their network ID.
     pub async fn discover(&self) -> HashMap<u64, ServerData> {
-        self.discovered_servers.read().await.clone()
-    }
-
-    /// Return the last-known socket address for the given network ID, if any.
-    pub async fn get_address(&self, network_id: u64) -> Option<SocketAddr> {
-        self.addresses
+        self.shared
+            .discovered
             .read()
-            .await
-            .get(&network_id)
-            .map(|entry| entry.addr)
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
-    /// Spawns a background Tokio task that maintains LAN signaling I/O and state.
-    ///
-    /// The spawned task receives and handles UDP packets, periodically removes stale peer addresses, optionally issues discovery requests to the provided broadcast address, and exits when `cancel_token` is triggered.
-    #[allow(clippy::too_many_arguments)]
-    fn start_background_task(
-        network_id: u64,
+    /// The address a remote network was last seen at.
+    pub async fn get_address(&self, network_id: u64) -> Option<SocketAddr> {
+        self.shared
+            .addresses
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&network_id)
+            .copied()
+    }
+
+    fn drive(
+        mut signaler: LanSignaler,
         socket: Arc<UdpSocket>,
-        addresses: Arc<AsyncRwLock<HashMap<u64, AddressEntry>>>,
+        mut commands: mpsc::UnboundedReceiver<Command>,
         signal_tx: broadcast::Sender<Signal>,
-        server_data: Arc<RwLock<Option<ServerData>>>,
-        discovered_servers: Arc<AsyncRwLock<HashMap<u64, ServerData>>>,
-        broadcast_addr: Option<SocketAddr>,
+        shared: Arc<Shared>,
         cancel_token: CancellationToken,
-        config: LanConfig,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let mut buf = vec![0u8; 4096];
-            let mut interval = tokio::time::interval(config.broadcast_interval);
+            let mut buf = vec![0u8; BUFFER_SIZE];
+            let mut wake = Instant::now();
 
             loop {
                 tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        break;
-                    }
-                    result = socket.recv_from(&mut buf) => {
-                        match result {
-                            Ok((n, addr)) => {
-                                let _ = Self::handle_packet(
-                                    &buf[..n],
-                                    addr,
-                                    network_id,
-                                    &addresses,
-                                    &signal_tx,
-                                    &socket,
-                                    &server_data,
-                                    &discovered_servers,
-                                ).await;
-                            }
-                            Err(e) => {
-                                tracing::debug!("Socket receive error: {}", e);
-                                continue;
+                    _ = cancel_token.cancelled() => break,
+                    received = socket.recv_from(&mut buf) => match received {
+                        Ok((len, addr)) => {
+                            let input = LanSignalerInput::Datagram(
+                                buf[..len].into(),
+                                addr,
+                                Instant::now(),
+                            );
+                            if let Err(e) = signaler.handle(input) {
+                                tracing::debug!("Failed to handle datagram from {}: {}", addr, e);
                             }
                         }
+                        Err(e) => tracing::debug!("Socket receive error: {}", e),
+                    },
+                    command = commands.recv() => match command {
+                        Some(Command::Signal(signal, reply)) => {
+                            let result = signaler
+                                .handle(LanSignalerInput::Signal(*signal, Instant::now()))
+                                .map_err(|e| NethernetError::Other(e.to_string()));
+                            let _ = reply.send(result);
+                        }
+                        Some(Command::SetServerData(data)) => {
+                            let _ = signaler.handle(LanSignalerInput::SetServerData(data));
+                        }
+                        None => break,
+                    },
+                    _ = tokio::time::sleep_until(wake.into()) => {
+                        let _ = signaler.handle(LanSignalerInput::Update(Instant::now()));
                     }
-                    _ = interval.tick() => {
-                        Self::cleanup_addresses(&addresses, config.address_timeout).await;
+                }
 
-                        // Send broadcast request if client
-                        if let Some(addr) = broadcast_addr {
-                            let _ = Self::send_request(&socket, network_id, addr).await;
+                while let Some(output) = signaler.poll() {
+                    match output {
+                        LanSignalerOutput::Datagram(buf, addr) => {
+                            if let Err(e) = socket.send_to(&buf, addr).await {
+                                tracing::debug!("Failed to send to {}: {}", addr, e);
+                            }
+                        }
+                        LanSignalerOutput::Signal(signal) => {
+                            let _ = signal_tx.send(signal);
+                        }
+                        LanSignalerOutput::ServerDiscovered(network_id, data) => {
+                            shared
+                                .discovered
+                                .write()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(network_id, *data);
+                        }
+                        LanSignalerOutput::Wait(wait) => {
+                            wake = Instant::now() + wait.min(MAX_IDLE);
                         }
                     }
                 }
+
+                *shared
+                    .addresses
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner()) = signaler.addresses().collect();
             }
         })
-    }
-
-    /// Sends a discovery request packet for the specified network to the given address.
-    ///
-    /// The function marshals a discovery request for `network_id` and sends it via `socket` to `addr`.
-    async fn send_request(socket: &UdpSocket, network_id: u64, addr: SocketAddr) -> Result<()> {
-        let request = RequestPacket;
-        let data = discovery::marshal(&request, network_id)?;
-        socket.send_to(&data, addr).await?;
-        tracing::trace!(
-            "Broadcast discovery request sent to {} (network_id: {})",
-            addr,
-            network_id
-        );
-        Ok(())
-    }
-
-    /// Handle an incoming discovery or message packet received over UDP.
-    ///
-    /// Updates the last-seen address for the packet's sender, ignores packets that originate
-    /// from this node, and processes packets by type:
-    /// - REQUEST: if local server data is configured, send a discovery response to the requester.
-    /// - RESPONSE: parse and store discovered ServerData into the discovered_servers map.
-    /// - MESSAGE: ignore ping tokens; if the message is addressed to this node, parse it into
-    ///   a Signal and broadcast it via the provided signal channel.
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_packet(
-        data: &[u8],
-        addr: SocketAddr,
-        own_network_id: u64,
-        addresses: &Arc<AsyncRwLock<HashMap<u64, AddressEntry>>>,
-        signal_tx: &broadcast::Sender<Signal>,
-        socket: &Arc<UdpSocket>,
-        server_data: &Arc<RwLock<Option<ServerData>>>,
-        discovered_servers: &Arc<AsyncRwLock<HashMap<u64, ServerData>>>,
-    ) -> Result<()> {
-        // Unmarshal the encrypted packet
-        let (packet, sender_id) = match discovery::unmarshal(data) {
-            Ok(result) => {
-                tracing::trace!(
-                    "Received packet from {} (sender_id: {}, packet_id: {})",
-                    addr,
-                    result.1,
-                    result.0.id()
-                );
-                result
-            }
-            Err(e) => {
-                tracing::trace!(
-                    "Ignoring unrecognized packet from {}: {} (likely from another service)",
-                    addr,
-                    e
-                );
-                return Ok(());
-            }
-        };
-
-        if sender_id == own_network_id {
-            tracing::trace!("Ignoring packet from self (network_id: {})", sender_id);
-            return Ok(());
-        }
-
-        // Update address mapping
-        {
-            let mut addrs = addresses.write().await;
-            addrs.insert(
-                sender_id,
-                AddressEntry {
-                    addr,
-                    last_seen: Instant::now(),
-                },
-            );
-        }
-
-        match packet.id() {
-            constants::ID_REQUEST_PACKET => {
-                tracing::trace!(
-                    "Received discovery REQUEST from {} (network_id: {})",
-                    addr,
-                    sender_id
-                );
-
-                // Request packet - send response if we have server data
-                let server_data_copy = server_data
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-
-                if let Some(data) = server_data_copy.as_ref() {
-                    let app_data = data.marshal()?;
-                    let response = ResponsePacket::new(app_data);
-                    let response_data = discovery::marshal(&response, own_network_id)?;
-                    let _ = socket.send_to(&response_data, addr).await;
-                } else {
-                    tracing::debug!(
-                        "No server data configured - cannot respond to discovery request from {}",
-                        addr
-                    );
-                }
-            }
-            constants::ID_RESPONSE_PACKET => {
-                // Response packet - parse and store server data
-                let response = packet
-                    .as_any()
-                    .downcast_ref::<ResponsePacket>()
-                    .ok_or_else(|| {
-                        NethernetError::Other("failed to downcast ResponsePacket".to_string())
-                    })?;
-
-                if let Ok(server_info) = ServerData::unmarshal(&response.application_data) {
-                    discovered_servers
-                        .write()
-                        .await
-                        .insert(sender_id, server_info);
-                }
-            }
-            constants::ID_MESSAGE_PACKET => {
-                // Message packet - parse signaling data
-                let message = packet
-                    .as_any()
-                    .downcast_ref::<MessagePacket>()
-                    .ok_or_else(|| {
-                        NethernetError::Other("failed to downcast MessagePacket".to_string())
-                    })?;
-
-                // Ignore Ping messages - these are not WebRTC negotiation signals
-                // Use protocol-aware check: match exact wire format to avoid false positives
-                if message.data == PING_TOKEN {
-                    tracing::trace!("Ignoring ping message from network_id: {}", sender_id);
-                    return Ok(());
-                }
-
-                // Only process WebRTC signals if message is for us
-                if message.recipient_id == own_network_id {
-                    tracing::debug!(
-                        "Received WebRTC signal from network_id: {} (recipient: {})",
-                        sender_id,
-                        message.recipient_id
-                    );
-                    if let Ok(signal) = Signal::from_string(&message.data, sender_id.to_string()) {
-                        let _ = signal_tx.send(signal);
-                    }
-                } else {
-                    tracing::trace!(
-                        "Ignoring message for different recipient (expected: {}, got: {})",
-                        own_network_id,
-                        message.recipient_id
-                    );
-                }
-            }
-            _ => {
-                tracing::debug!("Unknown packet type: {}", packet.id());
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Removes peer address entries whose `last_seen` timestamp is older than the timeout.
-    ///
-    /// This function acquires a write lock on the provided address map and retains only entries
-    /// observed within the configured timeout window, mutating the map in place.
-    async fn cleanup_addresses(
-        addresses: &Arc<AsyncRwLock<HashMap<u64, AddressEntry>>>,
-        timeout: Duration,
-    ) {
-        let mut addrs = addresses.write().await;
-        addrs.retain(|_, entry| entry.last_seen.elapsed() < timeout);
     }
 }
 
 impl Drop for LanSignaling {
-    /// Cancels the internal background task when the instance is dropped.
-    ///
-    /// Note: This only signals cancellation but does not wait for the task to complete.
-    /// For graceful shutdown, use the [`shutdown()`](Self::shutdown) method instead.
     fn drop(&mut self) {
         self.cancel_token.cancel();
-        // Abort the task to ensure it stops as soon as possible
-        if let Some(task) = self.background_task.take() {
+        if let Some(task) = self.task.take() {
             task.abort();
         }
     }
 }
 
 impl Signaling for LanSignaling {
-    /// Sends a signaling message to the peer identified by the signal's `network_id`.
-    ///
-    /// Looks up the last-known socket address for the target network ID, serializes the signal
-    /// into a `MessagePacket`, and transmits it over the internal UDP socket.
     async fn signal(&self, signal: Signal) -> Result<()> {
-        let network_id = signal
-            .network_id
-            .parse::<u64>()
-            .map_err(|e| NethernetError::Other(format!("Invalid network ID: {}", e)))?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.commands
+            .send(Command::Signal(Box::new(signal), reply_tx))
+            .map_err(|_| NethernetError::ConnectionClosed)?;
 
-        let addr = {
-            let addrs = self.addresses.read().await;
-            addrs
-                .get(&network_id)
-                .map(|entry| entry.addr)
-                .ok_or_else(|| {
-                    NethernetError::Other(format!("Address not found for network {}", network_id))
-                })?
-        };
-
-        let signal_str = signal.to_string();
-        let message = MessagePacket::new(network_id, signal_str);
-        let data = discovery::marshal(&message, self.network_id)?;
-
-        self.socket.send_to(&data, addr).await?;
-        Ok(())
+        reply_rx
+            .await
+            .map_err(|_| NethernetError::ConnectionClosed)?
     }
 
-    /// Create a stream that yields incoming Signals for a new subscriber.
-    ///
-    /// Each call produces an independent stream that receives all future broadcasted
-    /// signals. If the subscriber falls behind, missed signals are skipped and a
-    /// warning is emitted; the stream ends if the broadcaster is closed.
     fn signals(&self) -> Pin<Box<dyn Stream<Item = Signal> + Send>> {
         let rx = self.signal_tx.subscribe();
         Box::pin(futures::stream::unfold(rx, |mut rx| async move {
@@ -457,7 +240,7 @@ impl Signaling for LanSignaling {
                     Ok(signal) => return Some((signal, rx)),
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!("Signal receiver lagged, missed {} signals", n);
-                        continue; // Skip lost messages, keep receiving
+                        continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => return None,
                 }
@@ -465,16 +248,63 @@ impl Signaling for LanSignaling {
         }))
     }
 
-    /// Returns the local network identifier as a decimal string.
     fn network_id(&self) -> String {
         self.network_id.to_string()
     }
 
-    /// Update the stored server data from a RakNet pong response.
+    fn remote_address(&self, addr: &Addr) -> Option<SocketAddr> {
+        let network_id = addr.network_id.parse::<u64>().ok()?;
+        self.shared
+            .addresses
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&network_id)
+            .copied()
+    }
+
     fn set_pong_data(&self, data: &[u8]) {
         match ServerData::from_pong_data(data) {
             Ok(server_data) => self.set_server_data(server_data),
             Err(e) => tracing::error!("Failed to parse pong data: {}", e),
         }
     }
+}
+
+/// Broadcasts a single discovery request from a socket of its own, for callers that only
+/// want to find the servers on their network.
+///
+/// The socket is bound to an ephemeral port, so it is never mistaken for a server.
+pub async fn scan(network_id: u64, port: u16, timeout: Duration) -> Result<HashMap<u64, ServerData>> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    socket.set_broadcast(true)?;
+
+    let request = marshal(&RequestPacket, network_id)?;
+    socket
+        .send_to(
+            &request,
+            SocketAddr::new(Ipv4Addr::BROADCAST.into(), port),
+        )
+        .await?;
+
+    let mut signaler = LanSignaler::new(network_id, LanConfig::default());
+    let mut found = HashMap::new();
+    let mut buf = vec![0u8; BUFFER_SIZE];
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    while let Ok(Ok((len, addr))) =
+        tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await
+    {
+        let input = LanSignalerInput::Datagram(buf[..len].into(), addr, Instant::now());
+        if signaler.handle(input).is_err() {
+            continue;
+        }
+
+        while let Some(output) = signaler.poll() {
+            if let LanSignalerOutput::ServerDiscovered(network_id, data) = output {
+                found.insert(network_id, *data);
+            }
+        }
+    }
+
+    Ok(found)
 }
