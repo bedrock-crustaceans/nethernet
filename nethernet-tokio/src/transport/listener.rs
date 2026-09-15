@@ -217,8 +217,7 @@ impl<S: Signaling + 'static> NethernetListener<S> {
             .await
             .insert(key.clone(), signal_tx);
         // A peer that cannot prove who it is has an offer anyone could have replayed
-        let signaled_player =
-            signaling.player(&Addr::new(network_id.clone(), connection_id));
+        let signaled_player = signaling.player(&Addr::new(network_id.clone(), connection_id));
         let player = match &config.token_trust {
             Some(trust) => match validate_sdp(&signal.data, trust, SystemTime::now()) {
                 Ok(claims) => Some(Arc::new(PlayerInfo::new(
