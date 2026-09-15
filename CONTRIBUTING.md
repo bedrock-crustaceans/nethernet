@@ -19,22 +19,8 @@ Thank you for your interest in contributing to `nethernet`!
 Run the full test suite, including unit and integration tests:
 
 ```bash
-cargo test
+cargo test --workspace
 ```
-
-## Test Coverage
-
-To verify test coverage locally, we use `cargo-tarpaulin`.
-
-1.  Install `cargo-tarpaulin`:
-    ```bash
-    cargo install cargo-tarpaulin
-    ```
-2.  Run coverage:
-    ```bash
-    cargo tarpaulin --out Html
-    ```
-    This will generate a `tarpaulin-report.html` file in the root directory which you can open in your browser.
 
 ## Pull Requests
 
