@@ -88,14 +88,14 @@ pub fn marshal(packet: &dyn Packet, sender_id: u64) -> Result<Vec<u8>> {
     // Write packet data directly into buffer
     packet.write(&mut payload)?;
 
-    // Fill the actual length
-    let total_len = payload.len();
-    if total_len - 32 > u16::MAX as usize {
-        return Err(ProtocolError::MessageTooLarge(total_len - 32));
+    // Fill the actual length. The length prefix excludes itself, but includes
+    // the header and packet-specific data. The checksum is outside the payload.
+    let data_len = payload.len() - 2;
+    if data_len > u16::MAX as usize {
+        return Err(ProtocolError::MessageTooLarge(data_len));
     }
 
-    let data_len = (payload.len() - 2) as u16;
-    payload[..2].copy_from_slice(&data_len.to_le_bytes());
+    payload[..2].copy_from_slice(&(data_len as u16).to_le_bytes());
 
     // Compute HMAC-SHA256 checksum of the plaintext payload before encryption
     let checksum = compute_checksum(&payload);
