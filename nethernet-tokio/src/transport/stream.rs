@@ -275,12 +275,7 @@ impl NethernetStream {
         peer_connection
             .set_local_description(offer.clone())
             .await
-            .map_err(|e| {
-                (
-                    Some(SignalErrorCode::FailedToSetLocalDescription),
-                    e.into(),
-                )
-            })?;
+            .map_err(|e| (Some(SignalErrorCode::FailedToSetLocalDescription), e.into()))?;
 
         // Trickle connections signal every gathered candidate of their own
         let disable_trickle_ice = signaling.disable_trickle_ice();

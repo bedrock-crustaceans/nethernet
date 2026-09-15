@@ -10,6 +10,12 @@ use nethernet::prelude::{HttpSignalerConfig, IpRangeSet, ServerIdentity, TokenTr
 
 const NETWORK_ID: &str = "1234";
 
+/// Installs the process-wide TLS provider reqwest needs, as these tests build HTTP
+/// clients without going through `HttpSignaling::new`, which would install it.
+fn install_tls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 fn server_config() -> HttpServerConfig {
     HttpServerConfig {
         network_id: NETWORK_ID.to_string(),
@@ -96,6 +102,7 @@ async fn an_offer_without_an_identity_is_turned_away() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_status_endpoint_advertises_the_server_data() {
+    install_tls_provider();
     let (url, _listener) = serve(server_config()).await;
 
     let body = reqwest::get(format!("{url}/v1/join"))
@@ -111,6 +118,8 @@ async fn the_status_endpoint_advertises_the_server_data() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_peer_holding_too_many_connections_is_refused() {
+    install_tls_provider();
+
     let config = HttpServerConfig {
         signaler: HttpSignalerConfig {
             max_connections_per_address: 1,

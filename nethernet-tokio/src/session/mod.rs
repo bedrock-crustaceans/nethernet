@@ -83,7 +83,12 @@ pub struct Session {
 impl Session {
     /// Creates a Session using the default packet channel capacity.
     pub fn new(peer_connection: Arc<dyn PeerConnection>, local: Addr, remote: Addr) -> Self {
-        Self::with_capacity(peer_connection, local, remote, DEFAULT_PACKET_CHANNEL_CAPACITY)
+        Self::with_capacity(
+            peer_connection,
+            local,
+            remote,
+            DEFAULT_PACKET_CHANNEL_CAPACITY,
+        )
     }
 
     /// Creates a Session backed by the given peer connection and a bounded packet
@@ -185,9 +190,7 @@ impl Session {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-            .ok_or_else(|| {
-                NethernetError::DataChannel("Unreliable channel not set".to_string())
-            })?;
+            .ok_or_else(|| NethernetError::DataChannel("Unreliable channel not set".to_string()))?;
         for segment in Message::split_into_segments(data)? {
             channel
                 .send(BytesMut::from(segment.encode().as_ref()))

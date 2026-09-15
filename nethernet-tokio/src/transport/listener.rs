@@ -408,28 +408,13 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         let (reliable, unreliable) =
             wait_for_channels(&mut data_channel_rx, config.timeouts.channel)
                 .await
-                .map_err(|e| {
-                    (
-                        Some(SignalErrorCode::NegotiationTimeoutWaitingForAccept),
-                        e,
-                    )
-                })?;
+                .map_err(|e| (Some(SignalErrorCode::NegotiationTimeoutWaitingForAccept), e))?;
         wait_for_channel_open(reliable.clone(), config.timeouts.channel)
             .await
-            .map_err(|e| {
-                (
-                    Some(SignalErrorCode::NegotiationTimeoutWaitingForAccept),
-                    e,
-                )
-            })?;
+            .map_err(|e| (Some(SignalErrorCode::NegotiationTimeoutWaitingForAccept), e))?;
         wait_for_channel_open(unreliable.clone(), config.timeouts.channel)
             .await
-            .map_err(|e| {
-                (
-                    Some(SignalErrorCode::NegotiationTimeoutWaitingForAccept),
-                    e,
-                )
-            })?;
+            .map_err(|e| (Some(SignalErrorCode::NegotiationTimeoutWaitingForAccept), e))?;
 
         let session = Arc::new(Session::new(
             peer_connection,
