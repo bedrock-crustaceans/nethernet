@@ -1,6 +1,6 @@
-# Contributing to bedrock
+# Contributing to nethernet project
 
-Thank you for your interest in contributing to `bedrock`!
+Thank you for your interest in contributing to `nethernet`!
 
 ## Development Environment
 
