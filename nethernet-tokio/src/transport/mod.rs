@@ -4,27 +4,17 @@ pub mod stream;
 pub use listener::NethernetListener;
 pub use stream::NethernetStream;
 
-use crate::credentials::{Credentials, gather_options};
+use crate::credentials::Credentials;
 use crate::error::{NethernetError, Result};
-use crate::protocol::constants::SCTP_MAX_MESSAGE_SIZE;
-use crate::protocol::webrtc::Description;
 use nethernet::identity::{ServerIdentity, TokenTrust};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-use webrtc::api::media_engine::MediaEngine;
-use webrtc::api::setting_engine::SettingEngine;
-use webrtc::api::{API, APIBuilder};
-use webrtc::dtls_transport::RTCDtlsTransport;
-use webrtc::dtls_transport::dtls_role::DTLSRole;
-use webrtc::ice_transport::RTCIceTransport;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
-use webrtc::ice_transport::ice_gatherer::RTCIceGatherer;
-use webrtc::ice_transport::ice_parameters::RTCIceParameters;
-use webrtc::sctp_transport::RTCSctpTransport;
-use webrtc::sctp_transport::sctp_transport_capabilities::SCTPTransportCapabilities;
+use webrtc::peer_connection::{
+    PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
+    RTCIceServer,
+};
 
 /// Options applied while negotiating and establishing a connection.
 #[derive(Clone)]
@@ -111,92 +101,31 @@ impl Default for Timeouts {
     }
 }
 
-/// The transports backing a single connection.
-///
-/// NetherNet does not use a peer connection, as it does not allow signaling a session
-/// description with the exact layout expected by vanilla clients. The transports are
-/// therefore created and started directly.
-pub(crate) struct Transports {
-    pub(crate) api: API,
-    pub(crate) gatherer: Arc<RTCIceGatherer>,
-    pub(crate) ice: Arc<RTCIceTransport>,
-    pub(crate) dtls: Arc<RTCDtlsTransport>,
-    pub(crate) sctp: Arc<RTCSctpTransport>,
-}
-
-impl Transports {
-    pub(crate) fn new(
-        setting_engine: SettingEngine,
-        credentials: Option<&Credentials>,
-    ) -> Result<Self> {
-        let api = APIBuilder::new()
-            .with_media_engine(MediaEngine::default())
-            .with_setting_engine(setting_engine)
-            .build();
-
-        let gatherer = Arc::new(api.new_ice_gatherer(gather_options(credentials))?);
-        let ice = Arc::new(api.new_ice_transport(gatherer.clone()));
-        let dtls = Arc::new(api.new_dtls_transport(ice.clone(), vec![])?);
-        let sctp = Arc::new(api.new_sctp_transport(dtls.clone())?);
-
-        Ok(Self {
-            api,
-            gatherer,
-            ice,
-            dtls,
-            sctp,
+/// Builds a peer connection using the credentials returned by signaling.
+pub(crate) async fn build_peer_connection(
+    credentials: Option<&Credentials>,
+    handler: Arc<dyn PeerConnectionEventHandler>,
+) -> Result<Arc<dyn PeerConnection>> {
+    let ice_servers = credentials
+        .into_iter()
+        .flat_map(|credentials| credentials.ice_servers.iter())
+        .map(|server| RTCIceServer {
+            urls: server.urls.clone(),
+            username: server.username.clone(),
+            credential: server.password.clone(),
         })
-    }
+        .collect();
 
-    /// Gathers the local candidates and returns them along with the local ICE parameters.
-    pub(crate) async fn gather(&self) -> Result<(Vec<RTCIceCandidate>, RTCIceParameters)> {
-        let (finished_tx, finished_rx) = oneshot::channel();
-        let finished_tx = Arc::new(tokio::sync::Mutex::new(Some(finished_tx)));
+    let configuration = RTCConfigurationBuilder::new()
+        .with_ice_servers(ice_servers)
+        .build();
+    let peer_connection = PeerConnectionBuilder::new()
+        .with_configuration(configuration)
+        .with_handler(handler)
+        .with_udp_addrs(vec!["0.0.0.0:0"])
+        .build()
+        .await
+        .map_err(NethernetError::from)?;
 
-        self.gatherer
-            .on_local_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
-                let finished_tx = finished_tx.clone();
-                Box::pin(async move {
-                    if candidate.is_none()
-                        && let Some(tx) = finished_tx.lock().await.take()
-                    {
-                        let _ = tx.send(());
-                    }
-                })
-            }));
-
-        self.gatherer.gather().await?;
-        let _ = finished_rx.await;
-
-        Ok((
-            self.gatherer.get_local_candidates().await?,
-            self.gatherer.get_local_parameters().await?,
-        ))
-    }
-
-    /// Builds the description to be signaled as an offer or an answer. The DTLS role is
-    /// the role the local connection announces, not the role it ends up acting as.
-    pub(crate) fn local_description(
-        &self,
-        ice: RTCIceParameters,
-        role: DTLSRole,
-        candidates: Vec<RTCIceCandidate>,
-    ) -> Result<Description> {
-        let mut dtls = self.dtls.get_local_parameters()?;
-        if dtls.fingerprints.is_empty() {
-            return Err(NethernetError::Dtls(
-                "local DTLS parameters have no fingerprints".to_string(),
-            ));
-        }
-        dtls.role = role;
-
-        Ok(Description {
-            ice,
-            dtls,
-            sctp: SCTPTransportCapabilities {
-                max_message_size: SCTP_MAX_MESSAGE_SIZE,
-            },
-            candidates,
-        })
-    }
+    Ok(Arc::new(peer_connection))
 }

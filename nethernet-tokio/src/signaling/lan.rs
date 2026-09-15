@@ -284,6 +284,12 @@ pub async fn scan(
     socket
         .send_to(&request, SocketAddr::new(Ipv4Addr::BROADCAST.into(), port))
         .await?;
+    // Some sandboxed/containerized environments do not route the limited
+    // broadcast address back into the local network namespace. The loopback
+    // copy preserves discovery for same-host peers without changing LAN behavior.
+    socket
+        .send_to(&request, SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port))
+        .await?;
 
     let mut signaler = LanSignaler::new(network_id, LanConfig::default());
     let mut found = HashMap::new();

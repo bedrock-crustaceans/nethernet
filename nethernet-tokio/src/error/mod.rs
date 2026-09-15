@@ -10,7 +10,7 @@ pub use nethernet::error::SignalErrorCode;
 pub enum NethernetError {
     /// WebRTC connection error
     #[error("WebRTC error: {0}")]
-    WebRtc(#[from] webrtc::Error),
+    WebRtc(#[from] webrtc::error::Error),
 
     /// ICE connection error
     #[error("ICE error: {0}")]

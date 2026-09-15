@@ -29,6 +29,7 @@ hyper-util.workspace = true
 http-body-util.workspace = true
 http.workspace = true
 rustls-pemfile.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 tracing-subscriber = "0.3.23"

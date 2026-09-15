@@ -1,8 +1,6 @@
 //! ICE server credentials used for gathering relayed candidates.
 
 use serde::{Deserialize, Serialize};
-use webrtc::ice_transport::ice_gatherer::RTCIceGatherOptions;
-use webrtc::ice_transport::ice_server::RTCIceServer;
 
 /// Credentials for the ICE servers a connection may gather candidates from.
 ///
@@ -30,33 +28,13 @@ pub struct IceServer {
     pub urls: Vec<String>,
 }
 
-/// Transforms the credentials into the options used for gathering local candidates.
-///
-/// Returns the default options when no credentials are available, which gathers host
-/// candidates only.
-pub fn gather_options(credentials: Option<&Credentials>) -> RTCIceGatherOptions {
-    let mut options = RTCIceGatherOptions::default();
-    if let Some(credentials) = credentials {
-        options.ice_servers = credentials
-            .ice_servers
-            .iter()
-            .map(|server| RTCIceServer {
-                urls: server.urls.clone(),
-                username: server.username.clone(),
-                credential: server.password.clone(),
-            })
-            .collect();
-    }
-    options
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn no_credentials_gathers_host_candidates_only() {
-        assert!(gather_options(None).ice_servers.is_empty());
+        assert!(Credentials::default().ice_servers.is_empty());
     }
 
     #[test]
@@ -70,11 +48,10 @@ mod tests {
             }],
         };
 
-        let options = gather_options(Some(&credentials));
-        assert_eq!(options.ice_servers.len(), 1);
-        assert_eq!(options.ice_servers[0].username, "user");
-        assert_eq!(options.ice_servers[0].credential, "secret");
-        assert_eq!(options.ice_servers[0].urls, vec!["turn:127.0.0.1:3478"]);
+        assert_eq!(credentials.ice_servers.len(), 1);
+        assert_eq!(credentials.ice_servers[0].username, "user");
+        assert_eq!(credentials.ice_servers[0].password, "secret");
+        assert_eq!(credentials.ice_servers[0].urls, vec!["turn:127.0.0.1:3478"]);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Addressing of NetherNet networks and connections.
 
 use std::fmt;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
+use webrtc::peer_connection::RTCIceCandidate;
 
 /// The address of a NetherNet network, optionally referencing a single connection
 /// within it.

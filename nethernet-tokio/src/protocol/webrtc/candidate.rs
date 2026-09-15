@@ -6,11 +6,7 @@
 
 use crate::error::{NethernetError, Result};
 use std::fmt::Write;
-use std::sync::Arc;
-use webrtc::ice::candidate::Candidate;
-use webrtc::ice::candidate::candidate_base::unmarshal_candidate;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
-use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
+use webrtc::peer_connection::{RTCIceCandidate, RTCIceCandidateInit, RTCIceCandidateType};
 
 /// Formats a locally gathered candidate for a `CANDIDATEADD` signal. The index is
 /// the position of the candidate within the locally gathered candidates and the
@@ -46,19 +42,24 @@ pub fn format_ice_candidate(index: usize, candidate: &RTCIceCandidate, ufrag: &s
 }
 
 /// Parses a candidate signaled by a remote connection.
-pub fn parse_ice_candidate(data: &str) -> Result<RTCIceCandidate> {
-    let raw = data.strip_prefix("candidate:").unwrap_or(data);
-    let candidate: Arc<dyn Candidate + Send + Sync> = Arc::new(
-        unmarshal_candidate(raw)
-            .map_err(|e| NethernetError::Other(format!("decode candidate: {}", e)))?,
-    );
-    Ok(RTCIceCandidate::from(&candidate))
+pub fn parse_ice_candidate(data: &str) -> Result<RTCIceCandidateInit> {
+    let candidate = data.trim();
+    if candidate.is_empty() {
+        return Err(NethernetError::Other("empty ICE candidate".to_string()));
+    }
+    Ok(RTCIceCandidateInit {
+        candidate: candidate.to_string(),
+        sdp_mid: Some("0".to_string()),
+        sdp_mline_index: Some(0),
+        username_fragment: None,
+        url: None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use webrtc::ice_transport::ice_protocol::RTCIceProtocol;
+    use webrtc::peer_connection::RTCIceProtocol;
 
     #[test]
     fn host_candidate() {
