@@ -9,8 +9,35 @@ use crate::protocol::types::{
 };
 use std::io::Cursor;
 
-/// Current version of ServerData supported by the discovery module.
-const VERSION: u8 = 4;
+/// Versions of ServerData the discovery module can read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerDataVersion {
+    V4,
+    V6,
+}
+
+impl ServerDataVersion {
+    /// Current version written by the discovery module.
+    const CURRENT: Self = Self::V6;
+
+    fn from_byte(byte: u8) -> Result<Self> {
+        match byte {
+            4 => Ok(Self::V4),
+            6 => Ok(Self::V6),
+            _ => Err(ProtocolError::Other(format!(
+                "unsupported version: got {}, want 4 or 6",
+                byte
+            ))),
+        }
+    }
+
+    fn as_byte(self) -> u8 {
+        match self {
+            Self::V4 => 4,
+            Self::V6 => 6,
+        }
+    }
+}
 
 /// ServerData defines the binary structure representing worlds in Minecraft: Bedrock Edition.
 #[derive(Debug, Clone)]
@@ -29,6 +56,13 @@ pub struct ServerData {
     pub editor_world: bool,
     /// Whether hardcore mode is enabled
     pub hardcore: bool,
+    /// Unknown flag introduced in v6 (observed as `1` on vanilla worlds).
+    pub flag_a: bool,
+    /// Unknown flag introduced in v6 (observed as `1` on vanilla worlds).
+    pub flag_b: bool,
+    /// Session identifier string introduced in v6; a 16-character lowercase
+    /// hex string on vanilla worlds.
+    pub session_id: String,
     /// Transport layer (2 = NetherNet)
     pub transport_layer: u8,
     /// Connection type (4 = LAN)
@@ -43,8 +77,8 @@ impl ServerData {
     pub fn to_json(&self) -> String {
         format!(
             "{{\"ServerName\":{},\"LevelName\":{},\"GameType\":{},\"PlayerCount\":{},\
-             \"MaxPlayerCount\":{},\"EditorWorld\":{},\"Hardcore\":{},\"TransportLayer\":{},\
-             \"ConnectionType\":{}}}",
+             \"MaxPlayerCount\":{},\"EditorWorld\":{},\"Hardcore\":{},\"FlagA\":{},\"FlagB\":{},\
+             \"SessionID\":{},\"TransportLayer\":{},\"ConnectionType\":{}}}",
             escape(&self.server_name),
             escape(&self.level_name),
             self.game_type,
@@ -52,6 +86,9 @@ impl ServerData {
             self.max_player_count,
             self.editor_world,
             self.hardcore,
+            self.flag_a,
+            self.flag_b,
+            escape(&self.session_id),
             self.transport_layer,
             self.connection_type
         )
@@ -68,6 +105,9 @@ impl ServerData {
     /// - max_player_count = 8
     /// - editor_world = false
     /// - hardcore = false
+    /// - flag_a = true
+    /// - flag_b = true
+    /// - session_id = String
     /// - transport_layer = 2 (NetherNet)
     /// - connection_type = 4 (LAN)
     pub fn new(server_name: String, level_name: String) -> Self {
@@ -79,6 +119,9 @@ impl ServerData {
             max_player_count: 8,
             editor_world: false,
             hardcore: false,
+            flag_a: true,
+            flag_b: true,
+            session_id: String::new(),
             transport_layer: 2, // NetherNet
             connection_type: 4, // LAN
         }
@@ -113,6 +156,9 @@ impl ServerData {
             max_player_count: parts[5].parse().unwrap_or(0),
             editor_world: false,
             hardcore: false,
+            flag_a: true,
+            flag_b: true,
+            session_id: String::new(),
             transport_layer: 2,
             connection_type: 4,
         })
@@ -142,7 +188,7 @@ impl ServerData {
         let mut buf = Vec::new();
 
         // Write version
-        write_u8(&mut buf, VERSION)?;
+        write_u8(&mut buf, ServerDataVersion::CURRENT.as_byte())?;
 
         // Write server name (u8-prefixed string)
         write_bytes_u8(&mut buf, self.server_name.as_bytes())?;
@@ -160,6 +206,11 @@ impl ServerData {
         // Write booleans
         write_u8(&mut buf, if self.editor_world { 1 } else { 0 })?;
         write_u8(&mut buf, if self.hardcore { 1 } else { 0 })?;
+        write_u8(&mut buf, if self.flag_a { 1 } else { 0 })?;
+        write_u8(&mut buf, if self.flag_b { 1 } else { 0 })?;
+
+        // Write session identifier (u8-prefixed string, v6+)
+        write_bytes_u8(&mut buf, self.session_id.as_bytes())?;
 
         // Write transport layer and connection type (both shifted left by 1)
         write_u8(&mut buf, self.transport_layer << 1)?;
@@ -170,22 +221,16 @@ impl ServerData {
 
     /// Decode a ServerData value from its binary representation.
     ///
-    /// The function verifies the embedded version, reads each field in the expected
-    /// order (version, u8-prefixed server and level names, game type, player counts,
-    /// booleans, transport layer, connection type), validates UTF-8 for string
-    /// fields, and ensures no unread bytes remain. On success returns a populated
-    /// ServerData; on failure returns a ProtocolError describing the problem.
+    /// The function auto-detects versions 4 and 6 from the first byte, reads each
+    /// field in the expected order, validates UTF-8 for string fields, and ensures
+    /// no unread bytes remain. Missing v6 fields are populated with their defaults
+    /// when decoding v4 data. On success returns a populated ServerData; on failure
+    /// returns a ProtocolError describing the problem.
     pub fn unmarshal(data: &[u8]) -> Result<Self> {
         let mut cursor = Cursor::new(data);
 
-        // Read and verify version
-        let version = read_u8(&mut cursor)?;
-        if version != VERSION {
-            return Err(ProtocolError::Other(format!(
-                "version mismatch: got {}, want {}",
-                version, VERSION
-            )));
-        }
+        // Auto-detect the version
+        let version = ServerDataVersion::from_byte(read_u8(&mut cursor)?)?;
 
         // Read server name
         let server_name_bytes = read_bytes_u8(&mut cursor)?;
@@ -208,6 +253,17 @@ impl ServerData {
         let editor_world = read_u8(&mut cursor)? != 0;
         let hardcore = read_u8(&mut cursor)? != 0;
 
+        let (flag_a, flag_b, session_id) = if version == ServerDataVersion::V6 {
+            let flag_a = read_u8(&mut cursor)? != 0;
+            let flag_b = read_u8(&mut cursor)? != 0;
+            let session_id_bytes = read_bytes_u8(&mut cursor)?;
+            let session_id = String::from_utf8(session_id_bytes)
+                .map_err(|e| ProtocolError::Other(format!("invalid session id UTF-8: {}", e)))?;
+            (flag_a, flag_b, session_id)
+        } else {
+            (true, true, String::new())
+        };
+
         // Read transport layer and connection type (both shift right by 1)
         let transport_layer = read_u8(&mut cursor)? >> 1;
         let connection_type = read_u8(&mut cursor)? >> 1;
@@ -226,6 +282,9 @@ impl ServerData {
             max_player_count,
             editor_world,
             hardcore,
+            flag_a,
+            flag_b,
+            session_id,
             transport_layer,
             connection_type,
         })
@@ -275,11 +334,15 @@ mod tests {
             max_player_count: 10,
             editor_world: false,
             hardcore: false,
+            flag_a: true,
+            flag_b: true,
+            session_id: "97231188cae9fed6".to_string(),
             transport_layer: 2,
             connection_type: 4,
         };
 
         let encoded = original.marshal().unwrap();
+        assert_eq!(encoded[0], ServerDataVersion::CURRENT.as_byte());
         let decoded = ServerData::unmarshal(&encoded).unwrap();
 
         assert_eq!(original.server_name, decoded.server_name);
@@ -289,8 +352,41 @@ mod tests {
         assert_eq!(original.max_player_count, decoded.max_player_count);
         assert_eq!(original.editor_world, decoded.editor_world);
         assert_eq!(original.hardcore, decoded.hardcore);
+        assert_eq!(original.flag_a, decoded.flag_a);
+        assert_eq!(original.flag_b, decoded.flag_b);
+        assert_eq!(original.session_id, decoded.session_id);
         assert_eq!(original.transport_layer, decoded.transport_layer);
         assert_eq!(original.connection_type, decoded.connection_type);
+    }
+
+    #[test]
+    fn test_v4_is_auto_detected() {
+        let mut encoded = Vec::new();
+        write_u8(&mut encoded, ServerDataVersion::V4.as_byte()).unwrap();
+        write_bytes_u8(&mut encoded, b"Old Server").unwrap();
+        write_bytes_u8(&mut encoded, b"Old World").unwrap();
+        write_u8(&mut encoded, 1 << 1).unwrap();
+        write_i32_le(&mut encoded, 2).unwrap();
+        write_i32_le(&mut encoded, 20).unwrap();
+        write_u8(&mut encoded, 1).unwrap();
+        write_u8(&mut encoded, 0).unwrap();
+        write_u8(&mut encoded, 2 << 1).unwrap();
+        write_u8(&mut encoded, 4 << 1).unwrap();
+
+        let decoded = ServerData::unmarshal(&encoded).unwrap();
+
+        assert_eq!(decoded.server_name, "Old Server");
+        assert_eq!(decoded.level_name, "Old World");
+        assert_eq!(decoded.game_type, 1);
+        assert_eq!(decoded.player_count, 2);
+        assert_eq!(decoded.max_player_count, 20);
+        assert!(decoded.editor_world);
+        assert!(!decoded.hardcore);
+        assert!(decoded.flag_a);
+        assert!(decoded.flag_b);
+        assert_eq!(decoded.session_id, "");
+        assert_eq!(decoded.transport_layer, 2);
+        assert_eq!(decoded.connection_type, 4);
     }
 
     #[test]
