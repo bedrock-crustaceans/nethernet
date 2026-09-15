@@ -189,6 +189,17 @@ impl NethernetStream {
             .and_then(|description| description.encode())
             .map_err(|e| (Some(SignalErrorCode::FailedToCreateOffer), e))?;
 
+        // A server that validates identities has nothing to accept without one
+        let offer = match &config.identity {
+            Some(identity) => identity.augment(&offer).map_err(|e| {
+                (
+                    Some(SignalErrorCode::FailedToCreateOffer),
+                    NethernetError::Identity(e),
+                )
+            })?,
+            None => offer,
+        };
+
         let mut signals = signaling.signals();
 
         signaling

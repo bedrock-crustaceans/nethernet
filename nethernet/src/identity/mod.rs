@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn an_answer_validates_against_the_identity_it_carries() {
         let server = ServerIdentity::generate("example.com", NOW).unwrap();
-        let answer = server.augment_answer(&offer("")).unwrap();
+        let answer = server.augment(&offer("")).unwrap();
         let answer = answer.replace("a=identity:\r\n", "");
 
         let claims = validate_sdp(&answer, &TokenTrust::Any, NOW).unwrap();
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn an_assertion_over_other_fingerprints_is_refused() {
         let server = ServerIdentity::generate("example.com", NOW).unwrap();
-        let answer = server.augment_answer(&offer("")).unwrap();
+        let answer = server.augment(&offer("")).unwrap();
         let answer = answer
             .replace("a=identity:\r\n", "")
             .replace("AB:CD", "EF:01");
@@ -408,7 +408,7 @@ mod tests {
         let server =
             ServerIdentity::generate_with_expiry("example.com", NOW, Some(Duration::from_secs(10)))
                 .unwrap();
-        let answer = server.augment_answer(&offer("")).unwrap();
+        let answer = server.augment(&offer("")).unwrap();
         let answer = answer.replace("a=identity:\r\n", "");
 
         let error =
@@ -422,7 +422,7 @@ mod tests {
         let server = ServerIdentity::generate("example.com", NOW).unwrap();
         let other = ServerIdentity::generate("example.com", NOW).unwrap();
         let answer = server
-            .augment_answer(&offer(""))
+            .augment(&offer(""))
             .unwrap()
             .replace("a=identity:\r\n", "");
 

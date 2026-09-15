@@ -3,8 +3,10 @@ use crate::credentials::Credentials;
 use crate::error::Result;
 use crate::protocol::Signal;
 use futures::Stream;
+use nethernet::identity::PlayerInfo;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 
 pub mod http;
 pub mod lan;
@@ -43,6 +45,12 @@ pub trait Signaling: Send + Sync {
     /// It seeds a connection before ICE settles and is what candidates are inferred from
     /// when a peer gathered nothing a host on another network could reach.
     fn remote_address(&self, _addr: &Addr) -> Option<SocketAddr> {
+        None
+    }
+
+    /// Returns the identity a connection was accepted with, for signaling that validates
+    /// one itself before the transport is created.
+    fn player(&self, _addr: &Addr) -> Option<Arc<PlayerInfo>> {
         None
     }
 

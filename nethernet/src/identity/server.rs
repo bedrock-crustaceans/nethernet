@@ -123,7 +123,7 @@ impl ServerIdentity {
         &self.domain
     }
 
-    /// Builds the value of the `a=identity` attribute for an answer.
+    /// Builds the value of the `a=identity` attribute for a description.
     pub fn identity_value(&self, answer: &str) -> Result<String> {
         let fingerprints = canonical_fingerprint_json(answer)?;
         let signed = sign(&self.signing, &fingerprints)?;
@@ -149,8 +149,9 @@ impl ServerIdentity {
         .to_base64()
     }
 
-    /// Inserts the identity into an answer, directly above its first media description.
-    pub fn augment_answer(&self, answer: &str) -> Result<String> {
+    /// Inserts the identity into a description, directly above its first media
+    /// description, which is where the protocol expects to find it.
+    pub fn augment(&self, answer: &str) -> Result<String> {
         let attribute = format!("a=identity:{}", self.identity_value(answer)?);
         let eol = match answer.contains("\r\n") {
             true => "\r\n",
@@ -213,7 +214,7 @@ mod tests {
     #[test]
     fn the_identity_is_inserted_above_the_media_description() {
         let identity = ServerIdentity::generate("example.com", UNIX_EPOCH).unwrap();
-        let answer = identity.augment_answer(ANSWER).unwrap();
+        let answer = identity.augment(ANSWER).unwrap();
 
         let lines: Vec<&str> = answer.lines().collect();
         let index = lines

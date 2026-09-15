@@ -36,4 +36,5 @@ pub mod prelude {
     pub use crate::util::candidate;
     pub use crate::util::endpoint::{self, Scope};
     pub use crate::util::ip_range::IpRangeSet;
+    pub use crate::util::proxy_protocol;
 }

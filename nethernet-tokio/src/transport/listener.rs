@@ -210,6 +210,10 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         ));
 
         // A peer that cannot prove who it is has an offer anyone could have replayed
+        let signaled_player = signaling.player(&Addr::new(
+            signal.network_id.clone(),
+            signal.connection_id,
+        ));
         let player = match &config.token_trust {
             Some(trust) => match validate_sdp(&signal.data, trust, SystemTime::now()) {
                 Ok(claims) => Some(Arc::new(PlayerInfo::new(
@@ -224,7 +228,7 @@ impl<S: Signaling + 'static> NethernetListener<S> {
                     ));
                 }
             },
-            None => None,
+            None => signaled_player,
         };
 
         let credentials = signaling
@@ -258,7 +262,7 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         // Clients pin the key an answer is signed with, so one that is not signed prompts
         // the player on every join
         let answer = match &config.identity {
-            Some(identity) => identity.augment_answer(&answer).map_err(|e| {
+            Some(identity) => identity.augment(&answer).map_err(|e| {
                 (
                     Some(SignalErrorCode::FailedToCreateAnswer),
                     NethernetError::Identity(e),
