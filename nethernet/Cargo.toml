@@ -4,18 +4,18 @@ version = "0.0.1"
 edition = "2024"
 
 [dependencies]
-http = "1"
-thiserror = "2"
-bytes = "1.11.1"
-tracing = "0.1.44"
-aes = "0.9.3"
-sha2 = "0.11.0"
-hmac = "0.13.0"
-hex = "0.4.3"
-base64 = "0.23.1"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-p384 = { version = "0.14.0", features = ["ecdsa", "pkcs8", "pem"] }
-rand = "0.10.1"
-rsa = "0.9.10"
-sha2_rsa = { package = "sha2", version = "0.10", features = ["oid"] }
+http.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+aes.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+hex.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+p384.workspace = true
+rand.workspace = true
+rsa.workspace = true
+sha2_rsa.workspace = true

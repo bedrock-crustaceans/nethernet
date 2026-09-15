@@ -73,50 +73,39 @@ impl Header {
 pub fn marshal(packet: &dyn Packet, sender_id: u64) -> Result<Vec<u8>> {
     // Discovery packets are generally small (header 18 bytes + length 2 bytes + packet data)
     // We pre-allocate enough space for checksum (32), length (2), header (18), packet data, and potential padding (up to 16)
-    let mut buf = Vec::with_capacity(32 + 2 + 18 + 64 + 16);
-
-    // Placeholder for HMAC-SHA256 checksum (32 bytes)
-    buf.extend_from_slice(&[0u8; 32]);
+    let mut payload = Vec::with_capacity(2 + 18 + 64 + 16);
 
     // Placeholder for length (U16LE)
-    buf.extend_from_slice(&[0u8; 2]);
+    payload.extend_from_slice(&[0u8; 2]);
 
     // Write header directly into buffer
     let header = Header {
         packet_id: packet.id(),
         sender_id,
     };
-    header.write(&mut buf)?;
+    header.write(&mut payload)?;
 
     // Write packet data directly into buffer
-    packet.write(&mut buf)?;
+    packet.write(&mut payload)?;
 
-    // Fill the actual length
-    let total_len = buf.len();
-    if total_len - 32 > u16::MAX as usize {
-        return Err(ProtocolError::MessageTooLarge(total_len - 32));
+    // Fill the actual length. The length prefix excludes itself, but includes
+    // the header and packet-specific data. The checksum is outside the payload.
+    let data_len = payload.len() - 2;
+    if data_len > u16::MAX as usize {
+        return Err(ProtocolError::MessageTooLarge(data_len));
     }
 
-    let data_len = (total_len - 32 - 2) as u16;
-    buf[32..34].copy_from_slice(&data_len.to_le_bytes());
+    payload[..2].copy_from_slice(&(data_len as u16).to_le_bytes());
 
-    // Compute HMAC-SHA256 checksum of the payload (everything after the 32-byte checksum placeholder)
-    let checksum = compute_checksum(&buf[32..]);
-    buf[..32].copy_from_slice(&checksum);
+    // Compute HMAC-SHA256 checksum of the plaintext payload before encryption
+    let checksum = compute_checksum(&payload);
 
-    // Encrypt the payload in-place
-    // We need to extract the payload part to a temporary Vec or manage it carefully.
-    // Since encrypt() now takes &mut Vec<u8>, we can't easily pass a slice of it.
-    // However, we want to avoid double allocation.
-
-    // Let's modify encrypt slightly to take a slice or just handle the Vec here.
-    // Actually, the easiest way to achieve "zero copy" (or close to it) with the current API
-    // is to split the buffer or use a temporary Vec for the payload part then join.
-    // But the user asked for struct -> Vec -> encrypt -> Vec transition.
-
-    let mut payload = buf.split_off(32);
+    // Encrypt the payload in-place (pads to the AES block size)
     encrypt(&mut payload)?;
 
+    // Assemble the final frame: checksum followed by the encrypted payload
+    let mut buf = Vec::with_capacity(32 + payload.len());
+    buf.extend_from_slice(&checksum);
     buf.extend_from_slice(&payload);
 
     Ok(buf)

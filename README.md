@@ -62,10 +62,6 @@ token while still binding it to the certificate the peer presents.
 `nethernet_tokio::util::jwks::Jwks::minecraft` fetches the keys needed to require a token
 issued by the Minecraft authorization service instead.
 
-## Requirements
-
-- Rust 1.85 or higher
-
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

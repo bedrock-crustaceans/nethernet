@@ -88,7 +88,12 @@ mod tests {
 
     #[tokio::test]
     async fn the_key_is_kept_once_it_exists() {
-        let directory = std::env::temp_dir().join(format!("nethernet-pem-{}", std::process::id()));
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("nethernet-pem-{}-{}", std::process::id(), nonce));
         tokio::fs::create_dir_all(&directory).await.unwrap();
         let pem = directory.join("identity.pem");
 
