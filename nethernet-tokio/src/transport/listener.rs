@@ -204,16 +204,12 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         let description = Description::parse(&signal.data)
             .map_err(|e| (Some(SignalErrorCode::FailedToSetRemoteDescription), e))?;
 
-        let remote_address = signaling.remote_address(&Addr::new(
-            signal.network_id.clone(),
-            signal.connection_id,
-        ));
+        let remote_address =
+            signaling.remote_address(&Addr::new(signal.network_id.clone(), signal.connection_id));
 
         // A peer that cannot prove who it is has an offer anyone could have replayed
-        let signaled_player = signaling.player(&Addr::new(
-            signal.network_id.clone(),
-            signal.connection_id,
-        ));
+        let signaled_player =
+            signaling.player(&Addr::new(signal.network_id.clone(), signal.connection_id));
         let player = match &config.token_trust {
             Some(trust) => match validate_sdp(&signal.data, trust, SystemTime::now()) {
                 Ok(claims) => Some(Arc::new(PlayerInfo::new(

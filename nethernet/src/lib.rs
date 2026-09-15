@@ -14,7 +14,9 @@ pub mod util;
 pub mod prelude {
     pub use crate::error::{ProtocolError, SignalErrorCode};
     pub use crate::identity::{
-        Identity, PlayerInfo, ServerIdentity, TokenTrust, error::IdentityError, jwk::{Jwk, JwkSet},
+        Identity, PlayerInfo, ServerIdentity, TokenTrust,
+        error::IdentityError,
+        jwk::{Jwk, JwkSet},
         jwt::Claims,
     };
     pub use crate::protocol::packet::discovery::{

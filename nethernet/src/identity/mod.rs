@@ -349,7 +349,10 @@ mod tests {
 
     #[test]
     fn a_description_without_fingerprints_canonicalizes_to_an_empty_array() {
-        assert_eq!(canonical_fingerprint_json("v=0\r\n").unwrap(), EMPTY_FINGERPRINTS);
+        assert_eq!(
+            canonical_fingerprint_json("v=0\r\n").unwrap(),
+            EMPTY_FINGERPRINTS
+        );
     }
 
     #[test]

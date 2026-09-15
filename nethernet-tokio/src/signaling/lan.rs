@@ -202,10 +202,8 @@ impl LanSignaling {
                     }
                 }
 
-                *shared
-                    .addresses
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner()) = signaler.addresses().collect();
+                *shared.addresses.write().unwrap_or_else(|e| e.into_inner()) =
+                    signaler.addresses().collect();
             }
         })
     }
@@ -274,16 +272,17 @@ impl Signaling for LanSignaling {
 /// want to find the servers on their network.
 ///
 /// The socket is bound to an ephemeral port, so it is never mistaken for a server.
-pub async fn scan(network_id: u64, port: u16, timeout: Duration) -> Result<HashMap<u64, ServerData>> {
+pub async fn scan(
+    network_id: u64,
+    port: u16,
+    timeout: Duration,
+) -> Result<HashMap<u64, ServerData>> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
 
     let request = marshal(&RequestPacket, network_id)?;
     socket
-        .send_to(
-            &request,
-            SocketAddr::new(Ipv4Addr::BROADCAST.into(), port),
-        )
+        .send_to(&request, SocketAddr::new(Ipv4Addr::BROADCAST.into(), port))
         .await?;
 
     let mut signaler = LanSignaler::new(network_id, LanConfig::default());

@@ -138,8 +138,13 @@ impl HttpSignaler {
             return;
         }
 
-        self.connections
-            .insert(connection, Connection { addr, counted: true });
+        self.connections.insert(
+            connection,
+            Connection {
+                addr,
+                counted: true,
+            },
+        );
     }
 
     fn closed(&mut self, connection: u64) {
@@ -440,7 +445,6 @@ fn systemtime(now: Instant) -> std::time::SystemTime {
     std::time::SystemTime::now() - elapsed
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,8 +500,8 @@ mod tests {
     }
 
     fn signed_offer() -> String {
-        let identity = ServerIdentity::generate("example.com", std::time::SystemTime::now())
-            .unwrap();
+        let identity =
+            ServerIdentity::generate("example.com", std::time::SystemTime::now()).unwrap();
         identity.augment(OFFER).unwrap()
     }
 
@@ -546,7 +550,11 @@ mod tests {
     fn an_offer_without_an_identity_is_refused() {
         let mut signaler = signaler(HttpSignalerConfig::default());
         connect(&mut signaler, 1, "127.0.0.1:1000");
-        send(&mut signaler, 1, request(Method::POST, "/v1/join/1234", OFFER));
+        send(
+            &mut signaler,
+            1,
+            request(Method::POST, "/v1/join/1234", OFFER),
+        );
 
         let HttpSignalerOutput::Response { response, .. } = next(&mut signaler) else {
             panic!("expected a response");
@@ -635,7 +643,11 @@ mod tests {
         );
         let _ = next(&mut signaler);
 
-        send(&mut signaler, 2, request(Method::POST, "/v1/join/1234", OFFER));
+        send(
+            &mut signaler,
+            2,
+            request(Method::POST, "/v1/join/1234", OFFER),
+        );
         let HttpSignalerOutput::Response { response, .. } = next(&mut signaler) else {
             panic!("expected a response");
         };
@@ -719,7 +731,11 @@ mod tests {
             ..Default::default()
         });
         connect(&mut signaler, 1, "127.0.0.1:1000");
-        send(&mut signaler, 1, request(Method::POST, "/v1/join/1234", OFFER));
+        send(
+            &mut signaler,
+            1,
+            request(Method::POST, "/v1/join/1234", OFFER),
+        );
 
         let HttpSignalerOutput::Offer(offer) = next(&mut signaler) else {
             panic!("expected an offer");
@@ -750,7 +766,11 @@ mod tests {
             ..Default::default()
         });
         connect(&mut signaler, 1, "127.0.0.1:1000");
-        send(&mut signaler, 1, request(Method::POST, "/v1/join/1234", OFFER));
+        send(
+            &mut signaler,
+            1,
+            request(Method::POST, "/v1/join/1234", OFFER),
+        );
 
         let HttpSignalerOutput::Offer(offer) = next(&mut signaler) else {
             panic!("expected an offer");

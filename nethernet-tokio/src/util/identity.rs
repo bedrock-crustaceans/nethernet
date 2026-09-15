@@ -33,10 +33,7 @@ pub async fn from_pem_or_create(
 }
 
 /// Loads the identity from a PEM private key that has to exist already.
-pub async fn from_pem(
-    pem: impl AsRef<Path>,
-    domain: impl Into<String>,
-) -> Result<ServerIdentity> {
+pub async fn from_pem(pem: impl AsRef<Path>, domain: impl Into<String>) -> Result<ServerIdentity> {
     let contents = tokio::fs::read_to_string(pem.as_ref()).await?;
 
     Ok(ServerIdentity::from_pem(
@@ -48,7 +45,10 @@ pub async fn from_pem(
 
 #[cfg(unix)]
 async fn write(path: &Path, pem: &str) -> Result<()> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         tokio::fs::create_dir_all(parent).await?;
     }
 
@@ -65,7 +65,10 @@ async fn write(path: &Path, pem: &str) -> Result<()> {
 
 #[cfg(not(unix))]
 async fn write(path: &Path, pem: &str) -> Result<()> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         tokio::fs::create_dir_all(parent).await?;
     }
 
@@ -97,7 +100,11 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = tokio::fs::metadata(&pem).await.unwrap().permissions().mode();
+            let mode = tokio::fs::metadata(&pem)
+                .await
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
 

@@ -172,11 +172,9 @@ impl LanSignaler {
                 };
 
                 // The remote connection answered, so nothing has to be retransmitted for it
-                self.pending
-                    .retain(|pending| {
-                        pending.target != sender
-                            || pending.signal.connection_id != signal.connection_id
-                    });
+                self.pending.retain(|pending| {
+                    pending.target != sender || pending.signal.connection_id != signal.connection_id
+                });
 
                 self.output.push_back(LanSignalerOutput::Signal(signal));
             }
@@ -310,7 +308,9 @@ impl LanSignaler {
 
         if self.config.broadcast_address.is_some() {
             let next = match self.last_broadcast {
-                Some(last) => (last + self.config.broadcast_interval).saturating_duration_since(now),
+                Some(last) => {
+                    (last + self.config.broadcast_interval).saturating_duration_since(now)
+                }
                 None => Duration::ZERO,
             };
             wait = wait.min(next);
@@ -368,7 +368,9 @@ mod tests {
             ..Default::default()
         });
 
-        signaler.handle(LanSignalerInput::Update(Instant::now())).unwrap();
+        signaler
+            .handle(LanSignalerInput::Update(Instant::now()))
+            .unwrap();
 
         let sent = datagrams(&mut signaler);
         assert_eq!(sent.len(), 1);
@@ -383,11 +385,7 @@ mod tests {
 
         let request = marshal(&RequestPacket, CLIENT).unwrap();
         server
-            .handle(LanSignalerInput::Datagram(
-                request.into(),
-                addr(40000),
-                now,
-            ))
+            .handle(LanSignalerInput::Datagram(request.into(), addr(40000), now))
             .unwrap();
 
         let sent = datagrams(&mut server);
@@ -401,9 +399,7 @@ mod tests {
             ))
             .unwrap();
 
-        let discovered = client
-            .poll()
-            .expect("the response should be reported");
+        let discovered = client.poll().expect("the response should be reported");
         assert!(matches!(
             discovered,
             LanSignalerOutput::ServerDiscovered(SERVER, _)

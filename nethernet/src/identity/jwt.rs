@@ -164,9 +164,9 @@ impl Claims {
     /// this one and reject a mismatch, or a peer can present an identity it captured
     /// elsewhere and did not sign for.
     pub fn client_public_key(&self) -> Result<VerifyingKey> {
-        let cpk = self
-            .string("cpk")
-            .ok_or_else(|| IdentityError::ClientPublicKey("the token carries no cpk".to_string()))?;
+        let cpk = self.string("cpk").ok_or_else(|| {
+            IdentityError::ClientPublicKey("the token carries no cpk".to_string())
+        })?;
 
         let der = STANDARD
             .decode(cpk)
@@ -184,7 +184,9 @@ impl Claims {
 
         match now <= expiry + LEEWAY {
             true => Ok(()),
-            false => Err(IdentityError::Untrusted("the token has expired".to_string())),
+            false => Err(IdentityError::Untrusted(
+                "the token has expired".to_string(),
+            )),
         }
     }
 }
@@ -223,8 +225,16 @@ mod tests {
     fn an_expired_token_is_refused() {
         let claims = claims(json!({"exp": 1000}));
 
-        assert!(claims.check_expiry(UNIX_EPOCH + Duration::from_secs(900)).is_ok());
-        assert!(claims.check_expiry(UNIX_EPOCH + Duration::from_secs(2000)).is_err());
+        assert!(
+            claims
+                .check_expiry(UNIX_EPOCH + Duration::from_secs(900))
+                .is_ok()
+        );
+        assert!(
+            claims
+                .check_expiry(UNIX_EPOCH + Duration::from_secs(2000))
+                .is_err()
+        );
     }
 
     #[test]

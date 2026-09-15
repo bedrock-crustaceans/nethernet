@@ -98,7 +98,10 @@ mod tests {
         let path = directory.join("secret.txt");
         tokio::fs::write(&path, "hunter2\r\n").await.unwrap();
 
-        assert_eq!(resolve("file:secret.txt", &directory).await.unwrap(), "hunter2");
+        assert_eq!(
+            resolve("file:secret.txt", &directory).await.unwrap(),
+            "hunter2"
+        );
         assert_eq!(resolve("hunter2", &directory).await.unwrap(), "hunter2");
 
         tokio::fs::remove_dir_all(&directory).await.unwrap();
