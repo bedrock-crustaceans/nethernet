@@ -1,29 +1,24 @@
 use crate::addr::Addr;
 use crate::error::{NethernetError, Result, SignalErrorCode};
-use crate::protocol::constants::{RELIABLE_CHANNEL, SCTP_PORT, UNRELIABLE_CHANNEL};
-use crate::protocol::webrtc::{Description, format_ice_candidate, parse_ice_candidate};
 use crate::protocol::{Signal, SignalType};
-use crate::session::Session;
+use crate::session::{Command, Session};
 use crate::signaling::Signaling;
-use crate::transport::stream::parse_error_code;
-use crate::transport::{ConnectionConfig, Transports};
+use crate::transport::{ConnectionConfig, local_bind_addr};
 use futures::{Stream, StreamExt};
+use nethernet::connection::{Connection as SansConnection, IceMode};
 use nethernet::identity::{PlayerInfo, validate_sdp};
+use nethernet::session::Session as SansSession;
 use nethernet::util::candidate;
 use std::collections::HashMap;
-use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::{Duration, SystemTime};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use std::time::SystemTime;
+use tokio::net::UdpSocket;
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use webrtc::api::setting_engine::SettingEngine;
-use webrtc::data_channel::data_channel_parameters::DataChannelParameters;
-use webrtc::dtls_transport::dtls_role::DTLSRole;
-use webrtc::ice_transport::ice_role::RTCIceRole;
 
 /// Signals an error back to the remote connection referenced by the IDs.
 async fn signal_error<S: Signaling>(
@@ -40,32 +35,13 @@ async fn signal_error<S: Signaling>(
     }
 }
 
-/// Starts a transport, reporting the error code to be signaled back to the remote
-/// connection when it does not start in time.
-async fn start_transport(
-    start: impl Future<Output = std::result::Result<(), webrtc::Error>>,
-    timeout: Duration,
-) -> std::result::Result<(), (Option<SignalErrorCode>, NethernetError)> {
-    match tokio::time::timeout(timeout, start).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err((Some(SignalErrorCode::Ice), NethernetError::WebRtc(e))),
-        Err(_) => Err((
-            Some(SignalErrorCode::InactivityTimeout),
-            NethernetError::Timeout,
-        )),
-    }
-}
-
 /// Connections are referenced by both the remote network ID and the connection ID, as
 /// connection IDs are only unique within a single network.
 type ConnectionKey = (String, u64);
 
-/// Time the remote connection is given to open the unreliable data channel in band.
-const UNRELIABLE_GRACE: Duration = Duration::from_millis(250);
-
 type SignalDispatchers = Arc<Mutex<HashMap<ConnectionKey, mpsc::UnboundedSender<Signal>>>>;
 
-/// NetherNet listener - accepts WebRTC connections
+/// NetherNet listener - accepts NetherNet connections
 pub struct NethernetListener<S: Signaling> {
     incoming: mpsc::UnboundedReceiver<Arc<Session>>,
     local_addr: Addr,
@@ -78,8 +54,9 @@ pub struct NethernetListener<S: Signaling> {
 impl<S: Signaling + 'static> NethernetListener<S> {
     /// Create a new [`NethernetListener`] on the local network of the signaling implementation.
     ///
-    /// The returned listener is ready to accept inbound WebRTC sessions. It initializes internal queues and dispatch
-    /// structures, and spawns a background task to process signaling events; dropping the listener cancels that task.
+    /// The returned listener is ready to accept inbound sessions. It initializes internal
+    /// queues and dispatch structures, and spawns a background task to process signaling
+    /// events; dropping the listener cancels that task.
     pub async fn bind(signaling: S) -> Result<Self> {
         Self::bind_with(signaling, ConnectionConfig::default()).await
     }
@@ -163,8 +140,8 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         })
     }
 
-    /// Answers an offer signaled by a remote connection with the parameters of the local
-    /// transports and establishes them once the remote connection signals its candidates.
+    /// Answers an offer signaled by a remote connection and establishes the connection
+    /// once it is ready.
     async fn handle_offer(
         signal: Signal,
         signaling: &Arc<S>,
@@ -201,17 +178,22 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         signal_dispatchers: &SignalDispatchers,
         config: ConnectionConfig,
     ) -> std::result::Result<(), (Option<SignalErrorCode>, NethernetError)> {
-        let description = Description::parse(&signal.data)
-            .map_err(|e| (Some(SignalErrorCode::FailedToSetRemoteDescription), e))?;
+        let (remote_description, remote_candidates) = SansConnection::parse_offer(&signal)
+            .map_err(|e| {
+                (
+                    Some(SignalErrorCode::FailedToSetRemoteDescription),
+                    e.into(),
+                )
+            })?;
 
         let remote_address =
             signaling.remote_address(&Addr::new(signal.network_id.clone(), signal.connection_id));
 
         let connection_id = signal.connection_id;
-        let network_id = signal.network_id;
+        let network_id = signal.network_id.clone();
         let key = (network_id.clone(), connection_id);
 
-        let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+        let (signal_tx, signal_rx) = mpsc::unbounded_channel();
         signal_dispatchers
             .lock()
             .await
@@ -235,149 +217,96 @@ impl<S: Signaling + 'static> NethernetListener<S> {
             None => signaled_player,
         };
 
-        let credentials = signaling
-            .credentials()
-            .await
-            .map_err(|e| (Some(SignalErrorCode::SignalingTurnAuthFailed), e))?;
-        let transports = Transports::new(SettingEngine::default(), credentials.as_ref())
-            .map_err(|e| (Some(SignalErrorCode::FailedToCreatePeerConnection), e))?;
-        let (candidates, ice_parameters) = transports
-            .gather()
-            .await
-            .map_err(|e| (Some(SignalErrorCode::FailedToCreatePeerConnection), e))?;
+        let socket = Arc::new(UdpSocket::bind(local_bind_addr()).await.map_err(|e| {
+            (
+                Some(SignalErrorCode::FailedToCreatePeerConnection),
+                NethernetError::from(e),
+            )
+        })?);
+        let bound_addr = socket.local_addr().map_err(|e| {
+            (
+                Some(SignalErrorCode::FailedToCreatePeerConnection),
+                NethernetError::from(e),
+            )
+        })?;
+
+        let (session, description) = SansSession::new(bound_addr, false).map_err(|e| {
+            (
+                Some(SignalErrorCode::FailedToCreatePeerConnection),
+                NethernetError::from(e),
+            )
+        })?;
 
         // Non-trickle connections carry every local candidate in the answer itself
-        let disable_trickle_ice = signaling.disable_trickle_ice();
-        let answer_candidates = if disable_trickle_ice {
-            candidates.clone()
+        let ice_mode = if signaling.disable_trickle_ice() {
+            IceMode::Full
         } else {
-            Vec::new()
+            IceMode::Trickle
         };
 
-        let answer = transports
-            .local_description(
-                ice_parameters.clone(),
-                DTLSRole::Unspecified,
-                answer_candidates,
-            )
-            .and_then(|description| description.encode())
-            .map_err(|e| (Some(SignalErrorCode::FailedToCreateAnswer), e))?;
+        let (mut connection, signals) = SansConnection::accept(
+            session,
+            description,
+            &signal,
+            remote_description,
+            remote_candidates,
+            ice_mode,
+        )
+        .map_err(|e| (Some(SignalErrorCode::FailedToCreateAnswer), e.into()))?;
+
+        let mut signals_out = signals.into_iter();
+        let answer = signals_out
+            .next()
+            .expect("Connection::accept always returns an answer signal first");
 
         // Clients pin the key an answer is signed with, so one that is not signed prompts
         // the player on every join
-        let answer = match &config.identity {
-            Some(identity) => identity.augment(&answer).map_err(|e| {
+        let answer_data = match &config.identity {
+            Some(identity) => identity.augment(&answer.data).map_err(|e| {
                 (
                     Some(SignalErrorCode::FailedToCreateAnswer),
                     NethernetError::Identity(e),
                 )
             })?,
-            None => answer,
+            None => answer.data,
         };
 
         signaling
-            .signal(Signal::answer(connection_id, answer, network_id.clone()))
+            .signal(Signal::answer(
+                connection_id,
+                answer_data,
+                network_id.clone(),
+            ))
             .await
             .map_err(|e| (None, e))?;
-        if !disable_trickle_ice {
-            for (index, candidate) in candidates.iter().enumerate() {
-                signaling
-                    .signal(Signal::candidate(
-                        connection_id,
-                        format_ice_candidate(index, candidate, &ice_parameters.username_fragment),
-                        network_id.clone(),
-                    ))
-                    .await
-                    .map_err(|e| (None, e))?;
+        for trickled in signals_out {
+            signaling.signal(trickled).await.map_err(|e| (None, e))?;
+        }
+
+        if config.infer_peer_candidates && !candidate::has_routable_host_candidate(&signal.data) {
+            for line in candidate::inferred_peer_candidates(&signal.data, remote_address) {
+                tracing::debug!("Inferred candidate for the peer: {}", line);
+                if let Err(e) = connection.handle_signal(&Signal::candidate(
+                    connection_id,
+                    line,
+                    network_id.clone(),
+                )) {
+                    tracing::warn!("Failed to add inferred candidate: {}", e);
+                }
             }
         }
 
-        let mut local = Addr::new(signaling.network_id(), connection_id);
-        local.candidates = candidates;
+        let local = Addr::new(signaling.network_id(), connection_id);
+        let remote = Addr::new(network_id.clone(), connection_id);
 
-        let session = Arc::new(Session::new(
-            transports.ice.clone(),
-            transports.dtls.clone(),
-            transports.sctp.clone(),
-            local,
-            Addr::new(network_id.clone(), connection_id),
-        ));
+        let (session, ready_rx) = Session::spawn(socket, connection, local, remote);
+        let session = Arc::new(session);
 
         if let Some(player) = player {
             session.set_player(player).await;
         }
 
-        let (candidate_tx, candidate_rx) = oneshot::channel();
-        let candidate_tx = Arc::new(Mutex::new(Some(candidate_tx)));
-
-        for candidate in &description.candidates {
-            if let Err(e) = session.add_remote_candidate(candidate.clone()).await {
-                tracing::warn!("Failed to add remote candidate: {}", e);
-                continue;
-            }
-            if let Some(tx) = candidate_tx.lock().await.take() {
-                let _ = tx.send(());
-            }
-        }
-
-        if config.infer_peer_candidates && !candidate::has_routable_host_candidate(&signal.data) {
-            for line in candidate::inferred_peer_candidates(&signal.data, remote_address) {
-                let candidate = match parse_ice_candidate(&line) {
-                    Ok(candidate) => candidate,
-                    Err(e) => {
-                        tracing::debug!("Failed to parse inferred candidate: {}", e);
-                        continue;
-                    }
-                };
-
-                tracing::debug!("Inferred candidate for the peer: {}", line);
-                if let Err(e) = session.add_remote_candidate(candidate).await {
-                    tracing::warn!("Failed to add inferred candidate: {}", e);
-                    continue;
-                }
-                if let Some(tx) = candidate_tx.lock().await.take() {
-                    let _ = tx.send(());
-                }
-            }
-        }
-
-        let session_clone = session.clone();
-        let dispatchers = signal_dispatchers.clone();
-        tokio::spawn(async move {
-            loop {
-                let signal = tokio::select! {
-                    _ = session_clone.closed() => break,
-                    signal = signal_rx.recv() => match signal {
-                        Some(signal) => signal,
-                        None => break,
-                    },
-                };
-                if signal.signal_type == SignalType::Error {
-                    let code = parse_error_code(&signal.data);
-                    tracing::debug!("Remote connection signaled an error: {:?}", code);
-                    let _ = session_clone.close().await;
-                    break;
-                }
-                if signal.signal_type != SignalType::Candidate {
-                    continue;
-                }
-                let candidate = match parse_ice_candidate(&signal.data) {
-                    Ok(candidate) => candidate,
-                    Err(e) => {
-                        tracing::warn!("Failed to parse remote candidate: {}", e);
-                        continue;
-                    }
-                };
-                if let Err(e) = session_clone.add_remote_candidate(candidate).await {
-                    tracing::warn!("Failed to add remote candidate: {}", e);
-                    continue;
-                }
-                if let Some(tx) = candidate_tx.lock().await.take() {
-                    let _ = tx.send(());
-                }
-            }
-            dispatchers.lock().await.remove(&key);
-        });
+        spawn_late_signal_forwarder(signal_rx, session.signal_sender());
 
         let incoming_tx = incoming_tx.clone();
         let signaling = signaling.clone();
@@ -385,159 +314,23 @@ impl<S: Signaling + 'static> NethernetListener<S> {
             let cancel_token = config.cancel_token.clone();
             let result = tokio::select! {
                 _ = cancel_token.cancelled() => Err((None, NethernetError::ConnectionClosed)),
-                result = Self::start_transports(
-                    transports,
-                    session,
-                    description,
-                    candidate_rx,
-                    incoming_tx,
-                    config,
-                ) => result,
+                result = wait_ready(ready_rx, config.timeouts.channel) => result,
             };
 
-            if let Err((code, e)) = result {
-                tracing::debug!("Failed to establish incoming connection: {}", e);
-                if let Some(code) = code {
-                    signal_error(&signaling, connection_id, network_id, code).await;
+            match result {
+                Ok(()) => {
+                    let _ = incoming_tx.send(session);
+                }
+                Err((code, e)) => {
+                    tracing::debug!("Failed to establish incoming connection: {}", e);
+                    if let Some(code) = code {
+                        signal_error(&signaling, connection_id, network_id, code).await;
+                    }
                 }
             }
         });
 
         Ok(())
-    }
-
-    /// Starts the transports of an answered connection and queues the session once the
-    /// remote connection has created both data channels.
-    async fn start_transports(
-        transports: Transports,
-        session: Arc<Session>,
-        description: Description,
-        candidate_rx: oneshot::Receiver<()>,
-        incoming_tx: mpsc::UnboundedSender<Arc<Session>>,
-        config: ConnectionConfig,
-    ) -> std::result::Result<(), (Option<SignalErrorCode>, NethernetError)> {
-        tokio::time::timeout(config.timeouts.candidate, candidate_rx)
-            .await
-            .map_err(|_| {
-                (
-                    Some(SignalErrorCode::NegotiationTimeoutWaitingForAccept),
-                    NethernetError::Timeout,
-                )
-            })?
-            .map_err(|_| (None, NethernetError::ConnectionClosed))?;
-        tracing::debug!("Received first candidate");
-
-        // The remote connection allocates its stream IDs from the base of its DTLS role,
-        // so the unreliable channel follows its reliable channel.
-        let unreliable_id = if description.dtls.role == DTLSRole::Server {
-            3
-        } else {
-            2
-        };
-
-        let (opened_tx, opened_rx) = oneshot::channel();
-        let (unreliable_tx, unreliable_rx) = oneshot::channel();
-        let opened_tx = Arc::new(Mutex::new(Some(opened_tx)));
-        let unreliable_tx = Arc::new(Mutex::new(Some(unreliable_tx)));
-        let session_clone = session.clone();
-        transports
-            .sctp
-            .on_data_channel_opened(Box::new(move |channel| {
-                let session = session_clone.clone();
-                let opened_tx = opened_tx.clone();
-                let unreliable_tx = unreliable_tx.clone();
-                Box::pin(async move {
-                    let label = channel.label().to_string();
-                    match label.as_str() {
-                        RELIABLE_CHANNEL => {
-                            let _ = session.set_reliable_channel(channel).await;
-                            if let Some(tx) = opened_tx.lock().await.take() {
-                                let _ = tx.send(());
-                            }
-                        }
-                        UNRELIABLE_CHANNEL => {
-                            let _ = session.set_unreliable_channel(channel).await;
-                            if let Some(tx) = unreliable_tx.lock().await.take() {
-                                let _ = tx.send(());
-                            }
-                        }
-                        _ => {}
-                    }
-                })
-            }));
-
-        start_transport(
-            transports
-                .ice
-                .start(&description.ice, Some(RTCIceRole::Controlled)),
-            config.timeouts.start,
-        )
-        .await?;
-        start_transport(
-            transports.dtls.start(description.dtls),
-            config.timeouts.start,
-        )
-        .await?;
-        start_transport(
-            transports
-                .sctp
-                .start(description.sctp, SCTP_PORT, SCTP_PORT),
-            config.timeouts.start,
-        )
-        .await?;
-
-        tokio::time::timeout(config.timeouts.channel, opened_rx)
-            .await
-            .map_err(|_| {
-                (
-                    Some(SignalErrorCode::NegotiationTimeoutWaitingForAccept),
-                    NethernetError::Timeout,
-                )
-            })?
-            .map_err(|_| (None, NethernetError::ConnectionClosed))?;
-
-        Self::pair_unreliable_channel(&transports, &session, unreliable_rx, unreliable_id).await;
-
-        let _ = incoming_tx.send(session);
-        Ok(())
-    }
-
-    /// Opens the unreliable data channel out of band when the remote connection did not
-    /// create it in band.
-    ///
-    /// Remote connections that cannot allocate a second stream ID in band signal the
-    /// unreliable channel by opening it out of band on the stream following the reliable
-    /// channel, which is the layout vanilla clients use as well.
-    async fn pair_unreliable_channel(
-        transports: &Transports,
-        session: &Arc<Session>,
-        unreliable_rx: oneshot::Receiver<()>,
-        unreliable_id: u16,
-    ) {
-        if tokio::time::timeout(UNRELIABLE_GRACE, unreliable_rx)
-            .await
-            .is_ok()
-        {
-            return;
-        }
-        match transports
-            .api
-            .new_data_channel(
-                transports.sctp.clone(),
-                DataChannelParameters {
-                    label: UNRELIABLE_CHANNEL.to_string(),
-                    max_retransmits: Some(0),
-                    negotiated: Some(unreliable_id),
-                    ..Default::default()
-                },
-            )
-            .await
-        {
-            Ok(channel) => {
-                let _ = session.set_unreliable_channel(Arc::new(channel)).await;
-            }
-            Err(e) => tracing::debug!("Failed to open unreliable channel: {}", e),
-        }
     }
 
     /// Waits for and returns the next inbound session.
@@ -570,6 +363,42 @@ impl<S: Signaling + 'static> NethernetListener<S> {
     pub fn local_addr(&self) -> &Addr {
         &self.local_addr
     }
+}
+
+/// Keeps forwarding further signals (e.g. a late-trickled or redundant candidate, or a
+/// remote error) into the now-running connection, until either the dispatcher's route is
+/// exhausted or the connection stops (which drops the driver's command receiver, so
+/// `command_tx.send` starts failing).
+fn spawn_late_signal_forwarder(
+    mut signals: mpsc::UnboundedReceiver<Signal>,
+    command_tx: mpsc::UnboundedSender<Command>,
+) {
+    tokio::spawn(async move {
+        while let Some(signal) = signals.recv().await {
+            if signal.signal_type != SignalType::Candidate {
+                continue;
+            }
+            if command_tx.send(Command::Signal(signal)).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// Waits for the session to signal readiness (both data channels open), or times out.
+async fn wait_ready(
+    ready_rx: tokio::sync::oneshot::Receiver<()>,
+    timeout: std::time::Duration,
+) -> std::result::Result<(), (Option<SignalErrorCode>, NethernetError)> {
+    tokio::time::timeout(timeout, ready_rx)
+        .await
+        .map_err(|_| {
+            (
+                Some(SignalErrorCode::NegotiationTimeoutWaitingForAccept),
+                NethernetError::Timeout,
+            )
+        })?
+        .map_err(|_| (None, NethernetError::ConnectionClosed))
 }
 
 impl<S: Signaling> Drop for NethernetListener<S> {

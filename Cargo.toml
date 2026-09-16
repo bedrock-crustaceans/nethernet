@@ -19,10 +19,8 @@ p384 = { version = "0.14.0", features = ["ecdsa", "pkcs8", "pem"] }
 rand = "0.10.2"
 rsa = "0.9.10"
 sha2_rsa = { package = "sha2", version = "0.10", features = ["oid"] }
-tokio = { version = "1.53.1", features = ["net", "sync", "time", "rt-multi-thread", "macros"] }
+tokio = { version = "1.53.1", features = ["net", "sync", "time", "rt-multi-thread", "macros", "fs"] }
 tokio-util = { version = "0.7", features = ["io", "codec"] }
-bitflags = "2.13.2"
-webrtc = "0.17.2"
 futures = "0.3.34"
 url = "2.5.8"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2", "charset", "json"] }
@@ -32,3 +30,6 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 rustls-pemfile = "2"
+rtc = "0.20"
+ring = "0.17"
+byteorder = "1"

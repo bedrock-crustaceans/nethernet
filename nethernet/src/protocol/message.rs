@@ -159,6 +159,16 @@ impl Message {
 
         Ok(segments)
     }
+
+    /// Encodes a single-fragment message for the unreliable channel, which never
+    /// fragments (per the NetherNet HTTP signaling guide, section 6.1) and rejects
+    /// anything too large instead.
+    pub fn encode_unreliable(data: Bytes) -> Result<Bytes> {
+        if data.len() > MAX_MESSAGE_SIZE.saturating_sub(1) {
+            return Err(ProtocolError::MessageTooLarge(data.len()));
+        }
+        Ok(MessageSegment::new(0, data).encode())
+    }
 }
 
 impl Default for Message {

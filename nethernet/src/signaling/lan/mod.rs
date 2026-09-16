@@ -10,10 +10,11 @@ pub mod error;
 pub mod input;
 pub mod output;
 
+use crate::protocol::Signal;
+use crate::protocol::codec::NetherCodec;
 use crate::protocol::packet::discovery::{
-    MessagePacket, RequestPacket, ResponsePacket, ServerData, marshal, unmarshal,
+    MessagePacket, Packets, RequestPacket, ResponsePacket, ServerData, decode, encode,
 };
-use crate::protocol::{Signal, constants};
 use crate::sans::Sans;
 use config::LanSignalerConfig;
 use error::LanSignalerError;
@@ -127,7 +128,7 @@ impl LanSignaler {
         now: Instant,
     ) -> Result<(), LanSignalerError> {
         // Anything that is not a discovery packet belongs to another service on the port
-        let Ok((packet, sender)) = unmarshal(buf) else {
+        let Ok((packet, sender)) = decode(buf) else {
             tracing::trace!("ignoring unrecognized packet from {}", addr);
             return Ok(());
         };
@@ -144,24 +145,16 @@ impl LanSignaler {
             },
         );
 
-        match packet.id() {
-            constants::ID_REQUEST_PACKET => self.answer_request(addr)?,
-            constants::ID_RESPONSE_PACKET => {
-                let Some(response) = packet.as_any().downcast_ref::<ResponsePacket>() else {
-                    return Ok(());
-                };
-
-                if let Ok(data) = ServerData::unmarshal(&response.application_data) {
+        match packet {
+            Packets::Request(_) => self.answer_request(addr)?,
+            Packets::Response(response) => {
+                if let Ok(data) = ServerData::decode(&response.application_data) {
                     self.discovered.insert(sender, data.clone());
                     self.output
                         .push_back(LanSignalerOutput::ServerDiscovered(sender, Box::new(data)));
                 }
             }
-            constants::ID_MESSAGE_PACKET => {
-                let Some(message) = packet.as_any().downcast_ref::<MessagePacket>() else {
-                    return Ok(());
-                };
-
+            Packets::Message(message) => {
                 if message.data == PING || message.recipient_id != self.network_id {
                     return Ok(());
                 }
@@ -178,7 +171,6 @@ impl LanSignaler {
 
                 self.output.push_back(LanSignalerOutput::Signal(signal));
             }
-            id => tracing::debug!("unknown discovery packet {}", id),
         }
 
         Ok(())
@@ -190,8 +182,10 @@ impl LanSignaler {
             return Ok(());
         };
 
-        let response = ResponsePacket::new(data.marshal()?);
-        let buf = marshal(&response, self.network_id)?;
+        let mut application_data = Vec::new();
+        data.serialize(&mut application_data)?;
+        let response = ResponsePacket::new(application_data);
+        let buf = encode(&Packets::Response(response), self.network_id)?;
         self.output
             .push_back(LanSignalerOutput::Datagram(buf.into(), addr));
 
@@ -226,7 +220,7 @@ impl LanSignaler {
             .ok_or(LanSignalerError::UnknownNetwork(target))?;
 
         let message = MessagePacket::new(target, signal.to_string());
-        let buf = marshal(&message, self.network_id)?;
+        let buf = encode(&Packets::Message(message), self.network_id)?;
         self.output
             .push_back(LanSignalerOutput::Datagram(buf.into(), addr));
 
@@ -287,7 +281,7 @@ impl LanSignaler {
             return Ok(());
         }
 
-        let buf = marshal(&RequestPacket, self.network_id)?;
+        let buf = encode(&Packets::Request(RequestPacket), self.network_id)?;
         self.output
             .push_back(LanSignalerOutput::Datagram(buf.into(), addr));
         self.last_broadcast = Some(now);
@@ -383,7 +377,7 @@ mod tests {
         let mut client = client(LanSignalerConfig::default());
         let mut server = server();
 
-        let request = marshal(&RequestPacket, CLIENT).unwrap();
+        let request = encode(&Packets::Request(RequestPacket), CLIENT).unwrap();
         server
             .handle(LanSignalerInput::Datagram(request.into(), addr(40000), now))
             .unwrap();
@@ -413,7 +407,7 @@ mod tests {
         let mut client = client(LanSignalerConfig::default());
         let mut server = server();
 
-        let request = marshal(&RequestPacket, SERVER).unwrap();
+        let request = encode(&Packets::Request(RequestPacket), SERVER).unwrap();
         client
             .handle(LanSignalerInput::Datagram(request.into(), addr(7551), now))
             .unwrap();
@@ -469,7 +463,7 @@ mod tests {
         };
         let mut client = client(config);
 
-        let request = marshal(&RequestPacket, SERVER).unwrap();
+        let request = encode(&Packets::Request(RequestPacket), SERVER).unwrap();
         client
             .handle(LanSignalerInput::Datagram(request.into(), addr(7551), now))
             .unwrap();
@@ -505,7 +499,7 @@ mod tests {
         };
         let mut client = client(config);
 
-        let request = marshal(&RequestPacket, SERVER).unwrap();
+        let request = encode(&Packets::Request(RequestPacket), SERVER).unwrap();
         client
             .handle(LanSignalerInput::Datagram(request.into(), addr(7551), now))
             .unwrap();
@@ -523,7 +517,7 @@ mod tests {
             CLIENT,
             Signal::answer(42, "sdp".to_string(), CLIENT.to_string()).to_string(),
         );
-        let buf = marshal(&answer, SERVER).unwrap();
+        let buf = encode(&Packets::Message(answer), SERVER).unwrap();
         client
             .handle(LanSignalerInput::Datagram(buf.into(), addr(7551), now))
             .unwrap();
@@ -544,7 +538,7 @@ mod tests {
             ..Default::default()
         });
 
-        let request = marshal(&RequestPacket, SERVER).unwrap();
+        let request = encode(&Packets::Request(RequestPacket), SERVER).unwrap();
         client
             .handle(LanSignalerInput::Datagram(request.into(), addr(7551), now))
             .unwrap();
@@ -562,7 +556,7 @@ mod tests {
         let mut client = client(LanSignalerConfig::default());
 
         let ping = MessagePacket::new(CLIENT, PING.to_string());
-        let buf = marshal(&ping, SERVER).unwrap();
+        let buf = encode(&Packets::Message(ping), SERVER).unwrap();
         client
             .handle(LanSignalerInput::Datagram(buf.into(), addr(7551), now))
             .unwrap();

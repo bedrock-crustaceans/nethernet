@@ -8,10 +8,6 @@ pub use nethernet::error::SignalErrorCode;
 /// Errors related to the NetherNet protocol.
 #[derive(Debug, Error)]
 pub enum NethernetError {
-    /// WebRTC connection error
-    #[error("WebRTC error: {0}")]
-    WebRtc(#[from] webrtc::Error),
-
     /// ICE connection error
     #[error("ICE error: {0}")]
     Ice(String),

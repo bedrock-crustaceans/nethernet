@@ -4,10 +4,12 @@
 //! so it performs no IO of its own and can be embedded in any runtime. The
 //! `nethernet-tokio` crate drives these state machines on top of Tokio.
 
+pub mod connection;
 pub mod error;
 pub mod identity;
 pub mod protocol;
 pub mod sans;
+pub mod session;
 pub mod signaling;
 pub mod util;
 
@@ -20,9 +22,9 @@ pub mod prelude {
         jwt::Claims,
     };
     pub use crate::protocol::packet::discovery::{
-        MessagePacket, RequestPacket, ResponsePacket, ServerData,
+        MessagePacket, Packets, RequestPacket, ResponsePacket, ServerData,
     };
-    pub use crate::protocol::{Message, MessageSegment, Signal, SignalType};
+    pub use crate::protocol::{Message, MessageSegment, NetherCodec, Signal, SignalType};
     pub use crate::sans::Sans;
     pub use crate::signaling::http::{
         HttpSignaler,

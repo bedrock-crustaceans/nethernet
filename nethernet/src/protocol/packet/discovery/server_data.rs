@@ -4,10 +4,9 @@
 //! to RequestPacket broadcasted by clients on port 7551.
 
 use crate::error::{ProtocolError, Result};
-use crate::protocol::types::{
-    read_bytes_u8, read_i32_le, read_u8, write_bytes_u8, write_i32_le, write_u8,
-};
-use std::io::Cursor;
+use crate::protocol::codec::{NetherCodec, read_bytes_u8, write_bytes_u8};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use std::io::{Cursor, Read, Write};
 
 /// Versions of ServerData the discovery module can read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,7 +163,28 @@ impl ServerData {
         })
     }
 
-    pub fn marshal(&self) -> Result<Vec<u8>> {
+    /// Decodes a complete `ServerData` value from `data`, the way it arrives in
+    /// `ResponsePacket::application_data`, returning an error if any bytes remain
+    /// unconsumed afterward.
+    pub fn decode(data: &[u8]) -> Result<Self> {
+        let mut cursor = Cursor::new(data);
+        let value = Self::deserialize(&mut cursor)?;
+
+        // Ensure all data was read
+        let remaining = data.len() - cursor.position() as usize;
+        if remaining != 0 {
+            return Err(ProtocolError::Other(format!("unread {} bytes", remaining)));
+        }
+
+        Ok(value)
+    }
+}
+
+impl NetherCodec for ServerData {
+    /// Encode the ServerData into the binary format used for discovery ResponsePacket.ApplicationData.
+    ///
+    /// Returns an error if a field value would overflow its encoded form or an I/O write fails.
+    fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
         // Validate fields that will be shifted to prevent overflow
         if self.game_type >= 128 {
             return Err(ProtocolError::Other(format!(
@@ -185,78 +205,75 @@ impl ServerData {
             )));
         }
 
-        let mut buf = Vec::new();
-
         // Write version
-        write_u8(&mut buf, ServerDataVersion::CURRENT.as_byte())?;
+        writer.write_u8(ServerDataVersion::CURRENT.as_byte())?;
 
         // Write server name (u8-prefixed string)
-        write_bytes_u8(&mut buf, self.server_name.as_bytes())?;
+        write_bytes_u8(writer, self.server_name.as_bytes())?;
 
         // Write level name (u8-prefixed string)
-        write_bytes_u8(&mut buf, self.level_name.as_bytes())?;
+        write_bytes_u8(writer, self.level_name.as_bytes())?;
 
         // Write game type (shifted left by 1)
-        write_u8(&mut buf, self.game_type << 1)?;
+        writer.write_u8(self.game_type << 1)?;
 
         // Write player counts (i32 little-endian)
-        write_i32_le(&mut buf, self.player_count)?;
-        write_i32_le(&mut buf, self.max_player_count)?;
+        writer.write_i32::<LittleEndian>(self.player_count)?;
+        writer.write_i32::<LittleEndian>(self.max_player_count)?;
 
         // Write booleans
-        write_u8(&mut buf, if self.editor_world { 1 } else { 0 })?;
-        write_u8(&mut buf, if self.hardcore { 1 } else { 0 })?;
-        write_u8(&mut buf, if self.flag_a { 1 } else { 0 })?;
-        write_u8(&mut buf, if self.flag_b { 1 } else { 0 })?;
+        writer.write_u8(if self.editor_world { 1 } else { 0 })?;
+        writer.write_u8(if self.hardcore { 1 } else { 0 })?;
+        writer.write_u8(if self.flag_a { 1 } else { 0 })?;
+        writer.write_u8(if self.flag_b { 1 } else { 0 })?;
 
         // Write session identifier (u8-prefixed string, v6+)
-        write_bytes_u8(&mut buf, self.session_id.as_bytes())?;
+        write_bytes_u8(writer, self.session_id.as_bytes())?;
 
         // Write transport layer and connection type (both shifted left by 1)
-        write_u8(&mut buf, self.transport_layer << 1)?;
-        write_u8(&mut buf, self.connection_type << 1)?;
+        writer.write_u8(self.transport_layer << 1)?;
+        writer.write_u8(self.connection_type << 1)?;
 
-        Ok(buf)
+        Ok(())
     }
 
     /// Decode a ServerData value from its binary representation.
     ///
     /// The function auto-detects versions 4 and 6 from the first byte, reads each
-    /// field in the expected order, validates UTF-8 for string fields, and ensures
-    /// no unread bytes remain. Missing v6 fields are populated with their defaults
-    /// when decoding v4 data. On success returns a populated ServerData; on failure
-    /// returns a ProtocolError describing the problem.
-    pub fn unmarshal(data: &[u8]) -> Result<Self> {
-        let mut cursor = Cursor::new(data);
-
+    /// field in the expected order, and validates UTF-8 for string fields. Missing v6
+    /// fields are populated with their defaults when decoding v4 data. On success
+    /// returns a populated ServerData; on failure returns a ProtocolError describing
+    /// the problem. Use [`ServerData::decode`] instead when `reader` should be fully
+    /// consumed.
+    fn deserialize<R: Read>(reader: &mut R) -> Result<Self> {
         // Auto-detect the version
-        let version = ServerDataVersion::from_byte(read_u8(&mut cursor)?)?;
+        let version = ServerDataVersion::from_byte(reader.read_u8()?)?;
 
         // Read server name
-        let server_name_bytes = read_bytes_u8(&mut cursor)?;
+        let server_name_bytes = read_bytes_u8(reader)?;
         let server_name = String::from_utf8(server_name_bytes)
             .map_err(|e| ProtocolError::Other(format!("invalid server name UTF-8: {}", e)))?;
 
         // Read level name
-        let level_name_bytes = read_bytes_u8(&mut cursor)?;
+        let level_name_bytes = read_bytes_u8(reader)?;
         let level_name = String::from_utf8(level_name_bytes)
             .map_err(|e| ProtocolError::Other(format!("invalid level name UTF-8: {}", e)))?;
 
         // Read game type (shift right by 1)
-        let game_type = read_u8(&mut cursor)? >> 1;
+        let game_type = reader.read_u8()? >> 1;
 
         // Read player counts (i32 little-endian)
-        let player_count = read_i32_le(&mut cursor)?;
-        let max_player_count = read_i32_le(&mut cursor)?;
+        let player_count = reader.read_i32::<LittleEndian>()?;
+        let max_player_count = reader.read_i32::<LittleEndian>()?;
 
         // Read booleans
-        let editor_world = read_u8(&mut cursor)? != 0;
-        let hardcore = read_u8(&mut cursor)? != 0;
+        let editor_world = reader.read_u8()? != 0;
+        let hardcore = reader.read_u8()? != 0;
 
         let (flag_a, flag_b, session_id) = if version == ServerDataVersion::V6 {
-            let flag_a = read_u8(&mut cursor)? != 0;
-            let flag_b = read_u8(&mut cursor)? != 0;
-            let session_id_bytes = read_bytes_u8(&mut cursor)?;
+            let flag_a = reader.read_u8()? != 0;
+            let flag_b = reader.read_u8()? != 0;
+            let session_id_bytes = read_bytes_u8(reader)?;
             let session_id = String::from_utf8(session_id_bytes)
                 .map_err(|e| ProtocolError::Other(format!("invalid session id UTF-8: {}", e)))?;
             (flag_a, flag_b, session_id)
@@ -265,14 +282,8 @@ impl ServerData {
         };
 
         // Read transport layer and connection type (both shift right by 1)
-        let transport_layer = read_u8(&mut cursor)? >> 1;
-        let connection_type = read_u8(&mut cursor)? >> 1;
-
-        // Ensure all data was read
-        let remaining = data.len() - cursor.position() as usize;
-        if remaining != 0 {
-            return Err(ProtocolError::Other(format!("unread {} bytes", remaining)));
-        }
+        let transport_layer = reader.read_u8()? >> 1;
+        let connection_type = reader.read_u8()? >> 1;
 
         Ok(Self {
             server_name,
@@ -288,6 +299,17 @@ impl ServerData {
             transport_layer,
             connection_type,
         })
+    }
+
+    fn size_hint(&self) -> usize {
+        1 // version
+            + 1 + self.server_name.len()
+            + 1 + self.level_name.len()
+            + 1 // game_type
+            + 4 + 4 // player counts
+            + 4 // booleans
+            + 1 + self.session_id.len()
+            + 1 + 1 // transport layer, connection type
     }
 }
 
@@ -341,9 +363,10 @@ mod tests {
             connection_type: 4,
         };
 
-        let encoded = original.marshal().unwrap();
+        let mut encoded = Vec::new();
+        original.serialize(&mut encoded).unwrap();
         assert_eq!(encoded[0], ServerDataVersion::CURRENT.as_byte());
-        let decoded = ServerData::unmarshal(&encoded).unwrap();
+        let decoded = ServerData::decode(&encoded).unwrap();
 
         assert_eq!(original.server_name, decoded.server_name);
         assert_eq!(original.level_name, decoded.level_name);
@@ -362,18 +385,18 @@ mod tests {
     #[test]
     fn test_v4_is_auto_detected() {
         let mut encoded = Vec::new();
-        write_u8(&mut encoded, ServerDataVersion::V4.as_byte()).unwrap();
+        encoded.write_u8(ServerDataVersion::V4.as_byte()).unwrap();
         write_bytes_u8(&mut encoded, b"Old Server").unwrap();
         write_bytes_u8(&mut encoded, b"Old World").unwrap();
-        write_u8(&mut encoded, 1 << 1).unwrap();
-        write_i32_le(&mut encoded, 2).unwrap();
-        write_i32_le(&mut encoded, 20).unwrap();
-        write_u8(&mut encoded, 1).unwrap();
-        write_u8(&mut encoded, 0).unwrap();
-        write_u8(&mut encoded, 2 << 1).unwrap();
-        write_u8(&mut encoded, 4 << 1).unwrap();
+        encoded.write_u8(1 << 1).unwrap();
+        encoded.write_i32::<LittleEndian>(2).unwrap();
+        encoded.write_i32::<LittleEndian>(20).unwrap();
+        encoded.write_u8(1).unwrap();
+        encoded.write_u8(0).unwrap();
+        encoded.write_u8(2 << 1).unwrap();
+        encoded.write_u8(4 << 1).unwrap();
 
-        let decoded = ServerData::unmarshal(&encoded).unwrap();
+        let decoded = ServerData::decode(&encoded).unwrap();
 
         assert_eq!(decoded.server_name, "Old Server");
         assert_eq!(decoded.level_name, "Old World");
@@ -411,7 +434,7 @@ mod tests {
     #[test]
     fn test_version_mismatch() {
         let data = vec![5]; // Wrong version
-        let result = ServerData::unmarshal(&data);
+        let result = ServerData::decode(&data);
         assert!(result.is_err());
     }
 }

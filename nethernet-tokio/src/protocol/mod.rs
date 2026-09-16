@@ -6,6 +6,7 @@
 pub mod webrtc;
 
 pub use nethernet::protocol::{
-    Message, MessageSegment, Signal, SignalType, constants, message, packet, signal, types,
+    Message, MessageSegment, NetherCodec, Signal, SignalType, codec, constants, message, packet,
+    signal,
 };
 pub use webrtc::ConnectError;

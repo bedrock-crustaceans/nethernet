@@ -6,9 +6,9 @@ use crate::protocol::Signal;
 use crate::signaling::Signaling;
 use futures::Stream;
 use nethernet::prelude::{
-    LanSignaler, LanSignalerInput, LanSignalerOutput, RequestPacket, Sans, ServerData,
+    LanSignaler, LanSignalerInput, LanSignalerOutput, Packets, RequestPacket, Sans, ServerData,
 };
-use nethernet::protocol::packet::discovery::marshal;
+use nethernet::protocol::packet::discovery::encode;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
@@ -280,7 +280,7 @@ pub async fn scan(
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
 
-    let request = marshal(&RequestPacket, network_id)?;
+    let request = encode(&Packets::Request(RequestPacket), network_id)?;
     socket
         .send_to(&request, SocketAddr::new(Ipv4Addr::BROADCAST.into(), port))
         .await?;

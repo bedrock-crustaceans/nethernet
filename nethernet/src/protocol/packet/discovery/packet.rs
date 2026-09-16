@@ -1,25 +1,37 @@
-//! Discovery packet trait and marshaling/unmarshaling utilities.
+//! The [`Packets`] enum and the envelope `encode`/`decode` helpers for discovery packets.
 
 use super::crypto::{compute_checksum, decrypt, encrypt, verify_checksum};
 use super::{MessagePacket, RequestPacket, ResponsePacket};
 use crate::error::{ProtocolError, Result};
+use crate::protocol::codec::NetherCodec;
 use crate::protocol::constants::{ID_MESSAGE_PACKET, ID_REQUEST_PACKET, ID_RESPONSE_PACKET};
-use crate::protocol::types::{U16LE, U64LE};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Read, Write};
 
-/// Trait for discovery packets used in LAN discovery.
-pub trait Packet: Send + Sync {
+/// The concrete discovery packets carried inside the envelope.
+pub enum Packets {
+    Request(RequestPacket),
+    Response(ResponsePacket),
+    Message(MessagePacket),
+}
+
+impl Packets {
     /// Returns the unique ID of the packet.
-    fn id(&self) -> u16;
+    pub fn id(&self) -> u16 {
+        match self {
+            Packets::Request(_) => ID_REQUEST_PACKET,
+            Packets::Response(_) => ID_RESPONSE_PACKET,
+            Packets::Message(_) => ID_MESSAGE_PACKET,
+        }
+    }
 
-    /// Reads/decodes the packet data from the reader.
-    fn read(&mut self, r: &mut dyn Read) -> Result<()>;
-
-    /// Writes the packet data into the writer.
-    fn write(&self, w: &mut dyn Write) -> Result<()>;
-
-    /// Allows downcasting to concrete packet types.
-    fn as_any(&self) -> &dyn std::any::Any;
+    fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+        match self {
+            Packets::Request(packet) => packet.serialize(writer),
+            Packets::Response(packet) => packet.serialize(writer),
+            Packets::Message(packet) => packet.serialize(writer),
+        }
+    }
 }
 
 /// Header of a discovery packet.
@@ -31,18 +43,27 @@ pub struct Header {
     pub sender_id: u64,
 }
 
-impl Header {
-    /// Reads a discovery packet header from the provided reader.
+impl NetherCodec for Header {
+    /// Serialize the header into `writer` using little-endian encoding and fixed padding.
+    fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_u16::<LittleEndian>(self.packet_id)?;
+        writer.write_u64::<LittleEndian>(self.sender_id)?;
+        // 8-byte padding
+        writer.write_all(&[0u8; 8])?;
+        Ok(())
+    }
+
+    /// Reads a discovery packet header from `reader`.
     ///
     /// This reads a 16-bit little-endian packet ID, a 64-bit little-endian sender ID,
     /// then consumes and discards 8 bytes of padding.
-    pub fn read(r: &mut dyn Read) -> Result<Self> {
-        let packet_id = U16LE::read(r)?.0;
-        let sender_id = U64LE::read(r)?.0;
+    fn deserialize<R: Read>(reader: &mut R) -> Result<Self> {
+        let packet_id = reader.read_u16::<LittleEndian>()?;
+        let sender_id = reader.read_u64::<LittleEndian>()?;
 
         // Discard 8-byte padding
         let mut padding = [0u8; 8];
-        r.read_exact(&mut padding)?;
+        reader.read_exact(&mut padding)?;
 
         Ok(Self {
             packet_id,
@@ -50,13 +71,8 @@ impl Header {
         })
     }
 
-    /// Serialize the header into the provided writer using little-endian encoding and fixed padding.
-    pub fn write(&self, w: &mut dyn Write) -> Result<()> {
-        U16LE(self.packet_id).write(w)?;
-        U64LE(self.sender_id).write(w)?;
-        // 8-byte padding
-        w.write_all(&[0u8; 8])?;
-        Ok(())
+    fn size_hint(&self) -> usize {
+        std::mem::size_of::<u16>() + std::mem::size_of::<u64>() + 8
     }
 }
 
@@ -70,9 +86,9 @@ impl Header {
 /// # Returns
 ///
 /// A [`Vec<u8>`] containing the serialized packet: the 32-byte HMAC-SHA256 checksum followed by the AES-ECB encrypted payload.
-pub fn marshal(packet: &dyn Packet, sender_id: u64) -> Result<Vec<u8>> {
+pub fn encode(packet: &Packets, sender_id: u64) -> Result<Vec<u8>> {
     // Discovery packets are generally small (header 18 bytes + length 2 bytes + packet data)
-    // We pre-allocate enough space for checksum (32), length (2), header (18), packet data, and potential padding (up to 16)
+    // We pre-allocate enough space for length (2), header (18), packet data, and potential padding (up to 16)
     let mut payload = Vec::with_capacity(2 + 18 + 64 + 16);
 
     // Placeholder for length (U16LE)
@@ -83,10 +99,10 @@ pub fn marshal(packet: &dyn Packet, sender_id: u64) -> Result<Vec<u8>> {
         packet_id: packet.id(),
         sender_id,
     };
-    header.write(&mut payload)?;
+    header.serialize(&mut payload)?;
 
     // Write packet data directly into buffer
-    packet.write(&mut payload)?;
+    packet.serialize(&mut payload)?;
 
     // Fill the actual length. The length prefix excludes itself, but includes
     // the header and packet-specific data. The checksum is outside the payload.
@@ -115,14 +131,14 @@ pub fn marshal(packet: &dyn Packet, sender_id: u64) -> Result<Vec<u8>> {
 ///
 /// The function expects the input to be a checksum (32 bytes) followed by an AES-ECB encrypted payload. It
 /// decrypts the payload, verifies the HMAC-SHA256 checksum against the plaintext, reads the payload length and
-/// header, instantiates the concrete packet type based on the header's packet ID, and delegates parsing of the
-/// packet-specific fields to that packet's `read` implementation. Errors are returned for malformed data,
-/// checksum mismatches, oversized/unknown packet IDs, or trailing bytes after parsing.
+/// header, and deserializes the packet-specific fields for the concrete type named by the header's packet ID.
+/// Errors are returned for malformed data, checksum mismatches, oversized/unknown packet IDs, or trailing bytes
+/// after parsing.
 ///
 /// # Returns
 ///
-/// A tuple containing the boxed concrete packet and the sender's 64-bit network ID.
-pub fn unmarshal(data: &[u8]) -> Result<(Box<dyn Packet>, u64)> {
+/// A tuple containing the decoded packet and the sender's 64-bit network ID.
+pub fn decode(data: &[u8]) -> Result<(Packets, u64)> {
     if data.len() < 32 {
         return Err(ProtocolError::Other("packet too short".to_string()));
     }
@@ -142,26 +158,20 @@ pub fn unmarshal(data: &[u8]) -> Result<(Box<dyn Packet>, u64)> {
     let mut cursor = Cursor::new(payload);
 
     // Read length (2 bytes)
-    let _length = U16LE::read(&mut cursor)?;
+    let _length = cursor.read_u16::<LittleEndian>()?;
 
     // Read header
-    let header = Header::read(&mut cursor)?;
+    let header = Header::deserialize(&mut cursor)?;
 
-    // Create appropriate packet based on ID
-    let mut packet: Box<dyn Packet> = match header.packet_id {
-        ID_REQUEST_PACKET => Box::new(RequestPacket),
-        ID_RESPONSE_PACKET => Box::new(ResponsePacket::default()),
-        ID_MESSAGE_PACKET => Box::new(MessagePacket::default()),
-        _ => {
-            return Err(ProtocolError::Other(format!(
-                "unknown packet ID: {}",
-                header.packet_id
-            )));
+    // Deserialize the concrete packet named by the header's packet ID
+    let packet = match header.packet_id {
+        ID_REQUEST_PACKET => Packets::Request(RequestPacket::deserialize(&mut cursor)?),
+        ID_RESPONSE_PACKET => Packets::Response(ResponsePacket::deserialize(&mut cursor)?),
+        ID_MESSAGE_PACKET => Packets::Message(MessagePacket::deserialize(&mut cursor)?),
+        id => {
+            return Err(ProtocolError::Other(format!("unknown packet ID: {}", id)));
         }
     };
-
-    // Read packet data
-    packet.read(&mut cursor)?;
 
     // Validate that cursor has been fully consumed
     let cursor_position = cursor.position() as usize;
@@ -189,10 +199,10 @@ mod tests {
         };
 
         let mut buf = Vec::new();
-        header.write(&mut buf).unwrap();
+        header.serialize(&mut buf).unwrap();
 
         let mut cursor = Cursor::new(buf);
-        let decoded = Header::read(&mut cursor).unwrap();
+        let decoded = Header::deserialize(&mut cursor).unwrap();
 
         assert_eq!(header.packet_id, decoded.packet_id);
         assert_eq!(header.sender_id, decoded.sender_id);

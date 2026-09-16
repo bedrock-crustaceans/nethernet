@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::protocol::packet::discovery::ServerData;
+use nethernet::protocol::NetherCodec;
 
 /// Builder for server MOTD/discovery payload (`ServerData`).
 ///
@@ -85,8 +86,10 @@ impl NethernetMotd {
         self.server_data
     }
 
-    /// Marshals the MOTD payload bytes for `Signaling::set_pong_data`.
-    pub fn marshal(self) -> Result<Vec<u8>> {
-        Ok(self.server_data.marshal()?)
+    /// Encodes the MOTD payload bytes for `Signaling::set_pong_data`.
+    pub fn encode(self) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        self.server_data.serialize(&mut buf)?;
+        Ok(buf)
     }
 }

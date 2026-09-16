@@ -1,7 +1,7 @@
 //! Addressing of NetherNet networks and connections.
 
 use std::fmt;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
+use std::net::SocketAddr;
 
 /// The address of a NetherNet network, optionally referencing a single connection
 /// within it.
@@ -16,11 +16,12 @@ pub struct Addr {
     /// Unique ID of the connection, or zero when the address refers to the network itself.
     pub connection_id: u64,
 
-    /// ICE candidates gathered locally or signaled by the remote connection.
-    pub candidates: Vec<RTCIceCandidate>,
-
-    /// Candidate selected by the ICE transport, if it has selected a pair yet.
-    pub selected_candidate: Option<RTCIceCandidate>,
+    /// The address of the connection, once known.
+    ///
+    /// NetherNet only ever gathers or accepts a single UDP host candidate per side (see
+    /// the HTTP signaling guide, section 6), so unlike a generic WebRTC stack there is
+    /// never more than one address to track.
+    pub socket_addr: Option<SocketAddr>,
 }
 
 impl Addr {
@@ -29,8 +30,7 @@ impl Addr {
         Self {
             network_id,
             connection_id,
-            candidates: Vec::new(),
-            selected_candidate: None,
+            socket_addr: None,
         }
     }
 
@@ -46,8 +46,8 @@ impl fmt::Display for Addr {
         if self.connection_id != 0 {
             write!(f, " ({})", self.connection_id)?;
         }
-        if let Some(candidate) = &self.selected_candidate {
-            write!(f, " ({})", candidate)?;
+        if let Some(addr) = &self.socket_addr {
+            write!(f, " ({})", addr)?;
         }
         Ok(())
     }

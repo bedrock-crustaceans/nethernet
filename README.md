@@ -4,8 +4,8 @@ The WebRTC-based network protocol used in newer versions of Minecraft. It provid
 
 The workspace holds two crates:
 
-- `nethernet` is sans-IO. It owns the wire formats, the identity assertions and the signaling state machines, and performs no IO of its own, so it can be driven by any runtime.
-- `nethernet-tokio` drives those state machines on Tokio and adds the WebRTC transports, `NethernetListener` and `NethernetStream`.
+- `nethernet` is sans-IO. It owns the wire formats, the identity assertions, the signaling state machines, and the WebRTC session itself (ICE, DTLS, SCTP, data channels, driven directly rather than through a generic peer connection), and performs no IO of its own, so it can be driven by any runtime.
+- `nethernet-tokio` drives those state machines on Tokio over real sockets and exposes `NethernetListener` and `NethernetStream`.
 
 - **Features:**
   - Secure communication over WebRTC (DTLS/SCTP)

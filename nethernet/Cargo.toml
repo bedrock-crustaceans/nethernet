@@ -18,4 +18,6 @@ serde_json.workspace = true
 p384.workspace = true
 rand.workspace = true
 rsa.workspace = true
-sha2_rsa.workspace = true
+rtc.workspace = true
+ring.workspace = true
+byteorder.workspace = true
