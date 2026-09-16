@@ -1,0 +1,29 @@
+[package]
+name = "nethernet-tokio"
+version = "0.2.0"
+edition = "2024"
+readme = "../README.md"
+
+[dependencies]
+nethernet.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+futures.workspace = true
+rand.workspace = true
+serde.workspace = true
+url.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+http.workspace = true
+rustls-pemfile.workspace = true
+
+[dev-dependencies]
+tracing-subscriber = "0.3.23"
+serde_json = "1.0.151"

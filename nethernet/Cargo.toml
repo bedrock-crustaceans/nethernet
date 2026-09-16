@@ -1,0 +1,23 @@
+[package]
+name = "nethernet"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+http.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+aes.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+hex.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+p384.workspace = true
+rand.workspace = true
+rsa.workspace = true
+rtc.workspace = true
+ring.workspace = true
+byteorder.workspace = true
