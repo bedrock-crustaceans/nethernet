@@ -339,6 +339,23 @@ impl NethernetHttpClient {
     }
 }
 
+/// A non-blocking `connect()` reports that it hasn't completed yet as `EWOULDBLOCK` on
+/// Windows (mapped to [`ErrorKind::WouldBlock`]), but as `EINPROGRESS` on Unix, which
+/// `ErrorKind` has no variant for.
+fn connect_in_progress(e: &std::io::Error) -> bool {
+    if e.kind() == ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        e.raw_os_error() == Some(libc::EINPROGRESS)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 fn connect(addr: SocketAddr) -> std::io::Result<Socket> {
     let socket = Socket::new(
         Domain::for_address(addr),
@@ -348,7 +365,7 @@ fn connect(addr: SocketAddr) -> std::io::Result<Socket> {
     socket.set_nonblocking(true)?;
     match socket.connect(&addr.into()) {
         Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+        Err(e) if connect_in_progress(&e) => {}
         Err(e) => return Err(e),
     }
     Ok(socket)

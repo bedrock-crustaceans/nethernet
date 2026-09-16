@@ -194,6 +194,7 @@ dependencies = [
  "bevy_ecs",
  "http",
  "httparse",
+ "libc",
  "nethernet",
  "rand 0.10.2",
  "socket2",

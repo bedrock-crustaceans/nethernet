@@ -12,3 +12,6 @@ rand = "0.10"
 httparse = "1"
 socket2 = "0.6.5"
 http = "1.5.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
