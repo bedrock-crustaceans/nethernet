@@ -15,11 +15,12 @@ pub use dtls::ResolvedRole;
 use ice::IceLayer;
 use rtc::datachannel::message::Message as DcepMessage;
 use rtc::ice::candidate::Candidate;
+use rtc::ice::state::ConnectionState as IceConnectionState;
 use rtc::sctp::{Event as SctpEvent, PayloadProtocolIdentifier, StreamId};
 use sctp::SctpLayer;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const RELIABLE_STREAM_ID: StreamId = 0;
 const UNRELIABLE_STREAM_ID: StreamId = 1;
@@ -37,6 +38,10 @@ pub enum SessionEvent {
     /// Both data channels are open; [`Session::send`] and [`Session::poll`]'s
     /// [`SessionOutput::Message`] are now meaningful.
     Ready,
+    /// ICE or SCTP entered a state it cannot recover from - the peer vanished, the
+    /// association was lost, or similar. The session is done; the driver should close
+    /// it rather than wait on it further.
+    Failed,
 }
 
 /// Output produced by driving a [`Session`].
@@ -60,6 +65,7 @@ struct Channels {
     /// [`crate::protocol::message`]); the unreliable channel never fragments.
     reassembly: Framing,
     ready_emitted: bool,
+    failed_emitted: bool,
 }
 
 /// A single NetherNet peer-to-peer connection: ICE connectivity, a DTLS handshake, an
@@ -157,6 +163,11 @@ impl Session {
         self.ice
             .selected_remote_addr()
             .or_else(|| self.remote.as_ref().map(|r| r.addr))
+    }
+
+    /// The current round-trip-time estimate, once the SCTP association exists.
+    pub fn rtt(&self) -> Option<Duration> {
+        self.sctp.as_ref().and_then(|s| s.rtt())
     }
 
     /// Applies the remote's description once known (for the offerer: once the answer
@@ -341,14 +352,30 @@ impl Session {
         while let Some((data, to)) = self.ice.poll_write() {
             self.output.push_back(SessionOutput::Send(data, to));
         }
-        // Nothing currently reacts to ICE state-change/selected-pair events; drained
-        // here purely so the agent's internal event queue doesn't grow unbounded.
-        while self.ice.poll_event().is_some() {}
+        while let Some(event) = self.ice.poll_event() {
+            if let rtc::ice::agent::Event::ConnectionStateChange(state) = event
+                && matches!(
+                    state,
+                    IceConnectionState::Failed
+                        | IceConnectionState::Disconnected
+                        | IceConnectionState::Closed
+                )
+            {
+                self.fail();
+            }
+        }
 
+        let mut failed = false;
         if let (Some(sctp), Some(dtls)) = (&mut self.sctp, &mut self.dtls) {
             while let Some(event) = sctp.poll_event() {
-                if let SctpEvent::Connected = event {
-                    open_channels_if_controlling(self.is_controlling, sctp)?;
+                match event {
+                    SctpEvent::Connected => {
+                        open_channels_if_controlling(self.is_controlling, sctp)?
+                    }
+                    SctpEvent::HandshakeFailed { .. } | SctpEvent::AssociationLost { .. } => {
+                        failed = true;
+                    }
+                    _ => {}
                 }
             }
 
@@ -362,6 +389,9 @@ impl Session {
                 self.output.push_back(SessionOutput::Send(data, to));
             }
         }
+        if failed {
+            self.fail();
+        }
 
         if self.channels.reliable_open
             && self.channels.unreliable_open
@@ -373,6 +403,14 @@ impl Session {
         }
 
         Ok(())
+    }
+
+    fn fail(&mut self) {
+        if !self.channels.failed_emitted {
+            self.channels.failed_emitted = true;
+            self.output
+                .push_back(SessionOutput::Event(SessionEvent::Failed));
+        }
     }
 }
 
@@ -539,6 +577,9 @@ mod tests {
                 match output {
                     SessionOutput::Send(data, to) => offerer_outbox.push((data, to)),
                     SessionOutput::Event(SessionEvent::Ready) => offerer_ready = true,
+                    SessionOutput::Event(SessionEvent::Failed) => {
+                        panic!("session failed unexpectedly")
+                    }
                     SessionOutput::Message(..) => panic!("unexpected message before Ready"),
                 }
             }
@@ -553,6 +594,9 @@ mod tests {
                 match output {
                     SessionOutput::Send(data, to) => answerer_outbox.push((data, to)),
                     SessionOutput::Event(SessionEvent::Ready) => answerer_ready = true,
+                    SessionOutput::Event(SessionEvent::Failed) => {
+                        panic!("session failed unexpectedly")
+                    }
                     SessionOutput::Message(..) => panic!("unexpected message before Ready"),
                 }
             }

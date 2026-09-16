@@ -11,11 +11,10 @@ use std::sync::Arc;
 pub mod http;
 pub mod lan;
 
-/// Signaling trait for WebRTC signaling
-/// Abstract interface for WebRTC signaling
+/// Abstract interface for WebRTC signaling.
 pub trait Signaling: Send + Sync {
     /// Sends a signal
-    fn signal(&self, signal: Signal) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn signal(&self, signal: Signal) -> impl Future<Output = Result<()>> + Send;
 
     /// Returns the signal stream
     fn signals(&self) -> Pin<Box<dyn Stream<Item = Signal> + Send>>;
@@ -36,7 +35,7 @@ pub trait Signaling: Send + Sync {
     ///
     /// Signaling implementations that do not provide credentials, such as LAN discovery,
     /// return [`None`] and only gather host candidates.
-    fn credentials(&self) -> impl std::future::Future<Output = Result<Option<Credentials>>> + Send {
+    fn credentials(&self) -> impl Future<Output = Result<Option<Credentials>>> + Send {
         async { Ok(None) }
     }
 
@@ -44,14 +43,14 @@ pub trait Signaling: Send + Sync {
     ///
     /// It seeds a connection before ICE settles and is what candidates are inferred from
     /// when a peer gathered nothing a host on another network could reach.
-    fn remote_address(&self, _addr: &Addr) -> Option<SocketAddr> {
-        None
+    fn remote_address(&self, _addr: &Addr) -> impl Future<Output = Option<SocketAddr>> + Send {
+        async { None }
     }
 
     /// Returns the identity a connection was accepted with, for signaling that validates
     /// one itself before the transport is created.
-    fn player(&self, _addr: &Addr) -> Option<Arc<PlayerInfo>> {
-        None
+    fn player(&self, _addr: &Addr) -> impl Future<Output = Option<Arc<PlayerInfo>>> + Send {
+        async { None }
     }
 
     /// Sets the server data advertised to clients from a RakNet pong response.

@@ -14,12 +14,10 @@ pub struct RequestPacket;
 
 impl NetherCodec for RequestPacket {
     fn serialize<W: Write>(&self, _writer: &mut W) -> Result<()> {
-        // No data to write
         Ok(())
     }
 
     fn deserialize<R: Read>(_reader: &mut R) -> Result<Self> {
-        // No data to read
         Ok(RequestPacket)
     }
 

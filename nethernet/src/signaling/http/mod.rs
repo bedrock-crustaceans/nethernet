@@ -531,7 +531,11 @@ mod tests {
             panic!("expected a response");
         };
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(response.body().contains("Server"));
+        assert_eq!(
+            response.body(),
+            "{\"name\":\"Server\",\"protocol\":0,\"version\":\"\",\"level\":\"World\",\
+             \"players\":1,\"maxPlayers\":8,\"gameType\":0}"
+        );
     }
 
     #[test]

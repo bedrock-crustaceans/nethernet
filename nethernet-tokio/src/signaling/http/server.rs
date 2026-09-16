@@ -23,8 +23,8 @@ use nethernet::util::proxy_protocol;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
@@ -88,18 +88,13 @@ enum Command {
         reason: RejectReason,
     },
     SetServerData(Box<ServerData>),
+    Address(u64, oneshot::Sender<Option<SocketAddr>>),
+    Player(u64, oneshot::Sender<Option<Arc<PlayerInfo>>>),
 }
 
 struct Response {
     response: http::Response<String>,
     keep_alive: bool,
-}
-
-/// What the driver keeps about a join, for the listener to read while it negotiates.
-#[derive(Default)]
-struct Joins {
-    addresses: RwLock<HashMap<u64, SocketAddr>>,
-    players: RwLock<HashMap<u64, Arc<PlayerInfo>>>,
 }
 
 /// Signaling that answers offers posted to the HTTP endpoint of this server.
@@ -108,7 +103,6 @@ pub struct HttpSignalingServer {
     local_addr: SocketAddr,
     commands: mpsc::UnboundedSender<Command>,
     signal_tx: broadcast::Sender<Signal>,
-    joins: Arc<Joins>,
     cancel_token: CancellationToken,
     task: Option<JoinHandle<()>>,
 }
@@ -121,7 +115,6 @@ impl HttpSignalingServer {
 
         let (signal_tx, _) = broadcast::channel(64);
         let (commands, command_rx) = mpsc::unbounded_channel();
-        let joins = Arc::new(Joins::default());
         let cancel_token = CancellationToken::new();
 
         let accept = Self::accept(
@@ -134,7 +127,6 @@ impl HttpSignalingServer {
             HttpSignaler::new(config.signaler.clone()),
             command_rx,
             signal_tx.clone(),
-            joins.clone(),
             accept,
             cancel_token.clone(),
         );
@@ -144,7 +136,6 @@ impl HttpSignalingServer {
             local_addr,
             commands,
             signal_tx,
-            joins,
             cancel_token,
             task: Some(task),
         })
@@ -230,12 +221,13 @@ impl HttpSignalingServer {
         mut signaler: HttpSignaler,
         mut commands: mpsc::UnboundedReceiver<Command>,
         signal_tx: broadcast::Sender<Signal>,
-        joins: Arc<Joins>,
         accept: JoinHandle<()>,
         cancel_token: CancellationToken,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut waiting: HashMap<u64, oneshot::Sender<Response>> = HashMap::new();
+            let mut addresses: HashMap<u64, SocketAddr> = HashMap::new();
+            let mut players: HashMap<u64, Arc<PlayerInfo>> = HashMap::new();
             let mut wake = Instant::now() + MAX_IDLE;
 
             loop {
@@ -280,7 +272,8 @@ impl HttpSignalingServer {
                             {
                                 tracing::debug!("Failed to deliver an answer: {}", e);
                             }
-                            joins.forget(connection_id);
+                            addresses.remove(&connection_id);
+                            players.remove(&connection_id);
                         }
                         Some(Command::Reject { connection_id, reason }) => {
                             if let Err(e) = signaler
@@ -288,10 +281,17 @@ impl HttpSignalingServer {
                             {
                                 tracing::debug!("Failed to reject a join: {}", e);
                             }
-                            joins.forget(connection_id);
+                            addresses.remove(&connection_id);
+                            players.remove(&connection_id);
                         }
                         Some(Command::SetServerData(data)) => {
                             let _ = signaler.handle(HttpSignalerInput::SetServerData(data));
+                        }
+                        Some(Command::Address(connection_id, reply)) => {
+                            let _ = reply.send(addresses.get(&connection_id).copied());
+                        }
+                        Some(Command::Player(connection_id, reply)) => {
+                            let _ = reply.send(players.get(&connection_id).cloned());
                         }
                         None => break,
                     },
@@ -319,10 +319,10 @@ impl HttpSignalingServer {
                         }
                         HttpSignalerOutput::Offer(offer) => {
                             if let Some(address) = offer.client_address {
-                                joins.set_address(offer.connection_id, address);
+                                addresses.insert(offer.connection_id, address);
                             }
                             if let Some(player) = offer.player {
-                                joins.set_player(offer.connection_id, Arc::from(*player));
+                                players.insert(offer.connection_id, Arc::from(*player));
                             }
 
                             let _ = signal_tx.send(Signal::offer(
@@ -340,33 +340,6 @@ impl HttpSignalingServer {
 
             accept.abort();
         })
-    }
-}
-
-impl Joins {
-    fn set_address(&self, connection_id: u64, addr: SocketAddr) {
-        self.addresses
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(connection_id, addr);
-    }
-
-    fn set_player(&self, connection_id: u64, player: Arc<PlayerInfo>) {
-        self.players
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(connection_id, player);
-    }
-
-    fn forget(&self, connection_id: u64) {
-        self.addresses
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&connection_id);
-        self.players
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&connection_id);
     }
 }
 
@@ -433,22 +406,20 @@ impl Signaling for HttpSignalingServer {
         true
     }
 
-    fn remote_address(&self, addr: &Addr) -> Option<SocketAddr> {
-        self.joins
-            .addresses
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&addr.connection_id)
-            .copied()
+    async fn remote_address(&self, addr: &Addr) -> Option<SocketAddr> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.commands
+            .send(Command::Address(addr.connection_id, reply_tx))
+            .ok()?;
+        reply_rx.await.ok().flatten()
     }
 
-    fn player(&self, addr: &Addr) -> Option<Arc<PlayerInfo>> {
-        self.joins
-            .players
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&addr.connection_id)
-            .cloned()
+    async fn player(&self, addr: &Addr) -> Option<Arc<PlayerInfo>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.commands
+            .send(Command::Player(addr.connection_id, reply_tx))
+            .ok()?;
+        reply_rx.await.ok().flatten()
     }
 
     fn set_pong_data(&self, data: &[u8]) {

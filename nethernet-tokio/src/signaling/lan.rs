@@ -12,7 +12,7 @@ use nethernet::protocol::packet::discovery::encode;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -30,14 +30,8 @@ const MAX_IDLE: Duration = Duration::from_secs(1);
 enum Command {
     Signal(Box<Signal>, oneshot::Sender<Result<()>>),
     SetServerData(Box<ServerData>),
-}
-
-/// A snapshot of the state the driver keeps, so callers can read it without stopping the
-/// state machine to ask.
-#[derive(Default)]
-struct Shared {
-    addresses: RwLock<HashMap<u64, SocketAddr>>,
-    discovered: RwLock<HashMap<u64, ServerData>>,
+    Discovered(oneshot::Sender<HashMap<u64, ServerData>>),
+    Address(u64, oneshot::Sender<Option<SocketAddr>>),
 }
 
 /// LAN discovery signaling for a single NetherNet network.
@@ -45,7 +39,6 @@ pub struct LanSignaling {
     network_id: u64,
     commands: mpsc::UnboundedSender<Command>,
     signal_tx: broadcast::Sender<Signal>,
-    shared: Arc<Shared>,
     cancel_token: CancellationToken,
     task: Option<JoinHandle<()>>,
 }
@@ -78,7 +71,6 @@ impl LanSignaling {
 
         let (signal_tx, _) = broadcast::channel(100);
         let (commands, command_rx) = mpsc::unbounded_channel();
-        let shared = Arc::new(Shared::default());
         let cancel_token = CancellationToken::new();
 
         let task = Self::drive(
@@ -86,7 +78,6 @@ impl LanSignaling {
             Arc::new(socket),
             command_rx,
             signal_tx.clone(),
-            shared.clone(),
             cancel_token.clone(),
         );
 
@@ -94,7 +85,6 @@ impl LanSignaling {
             network_id,
             commands,
             signal_tx,
-            shared,
             cancel_token,
             task: Some(task),
         })
@@ -117,21 +107,20 @@ impl LanSignaling {
 
     /// The servers that have answered a discovery request, keyed by their network ID.
     pub async fn discover(&self) -> HashMap<u64, ServerData> {
-        self.shared
-            .discovered
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self.commands.send(Command::Discovered(reply_tx)).is_err() {
+            return HashMap::new();
+        }
+        reply_rx.await.unwrap_or_default()
     }
 
     /// The address a remote network was last seen at.
     pub async fn get_address(&self, network_id: u64) -> Option<SocketAddr> {
-        self.shared
-            .addresses
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&network_id)
-            .copied()
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.commands
+            .send(Command::Address(network_id, reply_tx))
+            .ok()?;
+        reply_rx.await.ok().flatten()
     }
 
     fn drive(
@@ -139,12 +128,13 @@ impl LanSignaling {
         socket: Arc<UdpSocket>,
         mut commands: mpsc::UnboundedReceiver<Command>,
         signal_tx: broadcast::Sender<Signal>,
-        shared: Arc<Shared>,
         cancel_token: CancellationToken,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut buf = vec![0u8; BUFFER_SIZE];
             let mut wake = Instant::now();
+            let mut discovered: HashMap<u64, ServerData> = HashMap::new();
+            let mut addresses: HashMap<u64, SocketAddr> = HashMap::new();
 
             loop {
                 tokio::select! {
@@ -172,6 +162,12 @@ impl LanSignaling {
                         Some(Command::SetServerData(data)) => {
                             let _ = signaler.handle(LanSignalerInput::SetServerData(data));
                         }
+                        Some(Command::Discovered(reply)) => {
+                            let _ = reply.send(discovered.clone());
+                        }
+                        Some(Command::Address(network_id, reply)) => {
+                            let _ = reply.send(addresses.get(&network_id).copied());
+                        }
                         None => break,
                     },
                     _ = tokio::time::sleep_until(wake.into()) => {
@@ -190,11 +186,7 @@ impl LanSignaling {
                             let _ = signal_tx.send(signal);
                         }
                         LanSignalerOutput::ServerDiscovered(network_id, data) => {
-                            shared
-                                .discovered
-                                .write()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .insert(network_id, *data);
+                            discovered.insert(network_id, *data);
                         }
                         LanSignalerOutput::Wait(wait) => {
                             wake = Instant::now() + wait.min(MAX_IDLE);
@@ -202,8 +194,7 @@ impl LanSignaling {
                     }
                 }
 
-                *shared.addresses.write().unwrap_or_else(|e| e.into_inner()) =
-                    signaler.addresses().collect();
+                addresses = signaler.addresses().collect();
             }
         })
     }
@@ -250,14 +241,9 @@ impl Signaling for LanSignaling {
         self.network_id.to_string()
     }
 
-    fn remote_address(&self, addr: &Addr) -> Option<SocketAddr> {
+    async fn remote_address(&self, addr: &Addr) -> Option<SocketAddr> {
         let network_id = addr.network_id.parse::<u64>().ok()?;
-        self.shared
-            .addresses
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&network_id)
-            .copied()
+        self.get_address(network_id).await
     }
 
     fn set_pong_data(&self, data: &[u8]) {

@@ -25,16 +25,13 @@ impl ResponsePacket {
 impl NetherCodec for ResponsePacket {
     /// Writes the packet's application_data as a hex-encoded byte sequence (prefixed with a 32-bit length) to `writer`.
     fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
-        // Encode to hex without intermediate allocation
+        // Hex-encoded in chunks rather than all at once, to avoid a large allocation
         let len = self.application_data.len();
         let hex_len = len * 2;
 
-        // Write length prefix (u32)
-        // We cast to u32, assuming it fits (checked by MAX_BYTES elsewhere usually, but for discovery it's small)
         writer.write_u32::<LittleEndian>(hex_len as u32)?;
 
-        // Write hex data in chunks to avoid large allocation
-        let mut buf = [0u8; 2048]; // 512 bytes of input -> 1024 bytes of hex
+        let mut buf = [0u8; 2048];
         for chunk in self.application_data.chunks(512) {
             let encoded_len = chunk.len() * 2;
             hex::encode_to_slice(chunk, &mut buf[..encoded_len])
@@ -46,10 +43,7 @@ impl NetherCodec for ResponsePacket {
 
     /// Reads hex-encoded application data from `reader` and decodes it into `application_data`.
     fn deserialize<R: Read>(reader: &mut R) -> Result<Self> {
-        // Read hex-encoded data
         let hex_data = read_bytes_u32(reader)?;
-
-        // Decode from hex
         let application_data = hex::decode(&hex_data)
             .map_err(|e| ProtocolError::Other(format!("hex decode error: {}", e)))?;
 

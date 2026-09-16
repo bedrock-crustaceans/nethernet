@@ -21,7 +21,7 @@ impl MessageSegment {
         }
     }
 
-    /// Serialize the segment into a byte buffer where the first byte is the remaining segment count and the rest is the payload.
+    /// Serializes the segment: the remaining-segment count followed by the payload.
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(1 + self.data.len());
         buf.put_u8(self.remaining_segments);
@@ -61,8 +61,6 @@ pub struct Message {
 
 impl Message {
     /// Creates a new, empty Message ready to receive segments.
-    ///
-    /// The returned Message is initialized to expect no segments and has an empty internal buffer.
     pub fn new() -> Self {
         Self {
             expected_segments: 0,
@@ -70,9 +68,9 @@ impl Message {
         }
     }
 
-    /// Adds a segment to the current message accumulator and returns the complete message when assembly finishes.
+    /// Adds a segment, returning the complete message once assembly finishes.
     ///
-    /// This validates segment sequencing, appends the segment payload to the internal buffer, and resets internal state when a complete message is produced. If a segment is out of the expected order the accumulator is cleared and a `MessageParse` error is returned.
+    /// An out-of-order segment clears the accumulator and returns a `MessageParse` error.
     pub fn add_segment(&mut self, segment: MessageSegment) -> Result<Option<Bytes>> {
         if self.expected_segments == 0 && segment.remaining_segments > 0 {
             self.expected_segments =
@@ -83,11 +81,10 @@ impl Message {
             self.data.reserve(estimated);
         }
 
-        // Check segment order
         if self.expected_segments > 0 {
             let expected_remaining = self.expected_segments - 1;
             if expected_remaining != segment.remaining_segments {
-                // Reset state before returning error to keep Message instance safe for reuse
+                // Reset so the instance is safe to reuse after this error
                 self.data.clear();
                 self.expected_segments = 0;
                 return Err(ProtocolError::MessageParse(format!(
@@ -98,10 +95,8 @@ impl Message {
             self.expected_segments -= 1;
         }
 
-        // Add data
         self.data.put(segment.data);
 
-        // Return message if this is the last segment
         if segment.remaining_segments == 0 {
             let data = self.data.split().freeze();
             self.expected_segments = 0;
@@ -123,10 +118,7 @@ impl Message {
         let len = data.len();
 
         if len <= MAX_MESSAGE_SIZE {
-            // Optimize for the common single-segment case to avoid div_ceil overhead
-            // and use direct Vec construction to avoid potential macro overhead.
-            let segments = vec![MessageSegment::new(0, data)];
-            return Ok(segments);
+            return Ok(vec![MessageSegment::new(0, data)]);
         }
 
         let segment_count = len.div_ceil(MAX_MESSAGE_SIZE);
@@ -135,13 +127,11 @@ impl Message {
             return Err(ProtocolError::MessageTooLarge(len));
         }
 
-        // PRE-ALLOC
         let mut segments = Vec::with_capacity(segment_count);
 
         let mut remaining = data;
         let mut left = segment_count as u8;
 
-        // Fast path
         while remaining.len() > MAX_MESSAGE_SIZE {
             left -= 1;
 
@@ -150,7 +140,6 @@ impl Message {
             segments.push(MessageSegment::new(left, chunk));
         }
 
-        // Last chunk
         if !remaining.is_empty() {
             left -= 1;
             segments.push(MessageSegment::new(left, remaining));
@@ -173,11 +162,6 @@ impl Message {
 }
 
 impl Default for Message {
-    /// Creates a new [`Message`] initialized for assembling messages.
-    ///
-    /// # Returns
-    ///
-    /// A [`Message`] with an empty buffer and no expected segments.
     fn default() -> Self {
         Self::new()
     }
@@ -227,27 +211,21 @@ mod tests {
 
     #[test]
     fn test_out_of_order_segments_error() {
-        // Create multiple segments from a large data
         let data = Bytes::from(vec![42u8; MAX_MESSAGE_SIZE * 2 + 100]);
         let segments = Message::split_into_segments(data.clone()).unwrap();
-
-        // Should have at least 3 segments
         assert!(segments.len() >= 3);
 
         let mut message = Message::new();
 
-        // Add segment 1 (middle segment) first - this should succeed
-        // because it's the first segment being added and sets expected_segments
+        // Adding the middle segment first is what sets expected_segments, so it succeeds
         let result = message.add_segment(segments[1].clone());
         assert!(result.is_ok());
-        assert!(result.unwrap().is_none()); // Not complete yet
+        assert!(result.unwrap().is_none());
 
-        // Now try to add segment 0 (earlier segment with higher remaining_segments)
-        // This should fail because we expect the next segment in sequence
+        // Segment 0 is out of sequence now that segment 1 already set the expectation
         let result = message.add_segment(segments[0].clone());
         assert!(result.is_err());
 
-        // Verify it's the right error type
         if let Err(ProtocolError::MessageParse(msg)) = result {
             assert!(msg.contains("Invalid segment sequence"));
         } else {
@@ -264,16 +242,12 @@ mod tests {
 
     #[test]
     fn test_memory_efficient_allocation() {
-        // Create 10 segments of 100 bytes each
         let segment_data = Bytes::from(vec![0u8; 100]);
         let mut message = Message::new();
 
-        // Add the first segment with remaining_segments = 9
         let segment = MessageSegment::new(9, segment_data.clone());
         message.add_segment(segment).unwrap();
 
-        // Capacity should be at least 10 * 100 = 1000
-        // and no more than the 10 * MAX_MESSAGE_SIZE reserve requested above.
         let capacity = message.data.capacity();
         assert!(capacity >= 1000, "Capacity {} too small", capacity);
         assert!(

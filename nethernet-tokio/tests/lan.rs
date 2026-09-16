@@ -1,7 +1,7 @@
 //! End-to-end negotiation over LAN discovery.
 
 use nethernet_tokio::signaling::lan::{LanConfig, LanSignaling};
-use nethernet_tokio::{NethernetListener, NethernetStream, ServerData};
+use nethernet_tokio::{AcceptedSession, NethernetListener, NethernetStream, ServerData};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,14 +63,18 @@ async fn lan_roundtrip() {
 
     let mut listener = NethernetListener::bind(server_signaling).await.unwrap();
     tokio::spawn(async move {
-        let session = listener.accept().await.unwrap();
-        let unreliable = session.clone();
+        let AcceptedSession {
+            session,
+            mut reliable,
+            mut unreliable,
+        } = listener.accept().await.unwrap();
+        let unreliable_session = session.clone();
         tokio::spawn(async move {
-            while let Ok(Some(data)) = unreliable.recv_unreliable().await {
-                unreliable.send_unreliable(data).await.unwrap();
+            while let Ok(Some(data)) = unreliable.recv().await {
+                unreliable_session.send_unreliable(data).await.unwrap();
             }
         });
-        while let Ok(Some(data)) = session.recv().await {
+        while let Ok(Some(data)) = reliable.recv().await {
             session.send(data).await.unwrap();
         }
     });
@@ -86,7 +90,7 @@ async fn lan_roundtrip() {
     assert_eq!(servers.len(), 1, "server not discovered");
     assert_eq!(servers[&1234].server_name, "test");
 
-    let stream = NethernetStream::connect(client_signaling, "1234".to_string())
+    let mut stream = NethernetStream::connect(client_signaling, "1234".to_string())
         .await
         .unwrap();
 
@@ -127,8 +131,12 @@ async fn non_trickle_roundtrip() {
         .await
         .unwrap();
     tokio::spawn(async move {
-        let session = listener.accept().await.unwrap();
-        while let Ok(Some(data)) = session.recv().await {
+        let AcceptedSession {
+            session,
+            mut reliable,
+            ..
+        } = listener.accept().await.unwrap();
+        while let Ok(Some(data)) = reliable.recv().await {
             session.send(data).await.unwrap();
         }
     });
@@ -140,7 +148,7 @@ async fn non_trickle_roundtrip() {
     let client_signaling = Arc::new(NonTrickle(client_signaling));
     tokio::time::sleep(Duration::from_millis(600)).await;
 
-    let stream = NethernetStream::connect(client_signaling, "4321".to_string())
+    let mut stream = NethernetStream::connect(client_signaling, "4321".to_string())
         .await
         .unwrap();
 

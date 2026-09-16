@@ -52,7 +52,10 @@ pub struct ConnectionConfig {
 
     /// The identity answers are signed with, or [`None`] to answer without one.
     ///
-    /// A client pins the key of a server, so it should be kept between restarts rather
+    /// A real Minecraft client refuses every connection whose answer lacks an
+    /// `a=identity` assertion, over HTTP signaling or otherwise - this is required, not
+    /// optional, for interop (see the NetherNet HTTP signaling guide, section 5.2). A
+    /// client pins the key of a server, so it should be kept between restarts rather
     /// than generated on each start.
     pub identity: Option<Arc<ServerIdentity>>,
 

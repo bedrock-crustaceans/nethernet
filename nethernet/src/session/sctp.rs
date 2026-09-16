@@ -15,7 +15,7 @@ use rtc::shared::TransportProtocol;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The SCTP port NetherNet always announces, per the HTTP signaling guide's SDP example.
 pub const SCTP_PORT: u16 = 5000;
@@ -90,6 +90,11 @@ impl SctpLayer {
     /// first inbound packet for the server role).
     pub fn association_mut(&mut self) -> Option<&mut Association> {
         self.association.as_mut().map(|(_, assoc)| assoc)
+    }
+
+    /// The current round-trip-time estimate, once an association exists.
+    pub fn rtt(&self) -> Option<Duration> {
+        self.association.as_ref().map(|(_, assoc)| assoc.rtt())
     }
 
     /// Returns the next outbound SCTP packet to hand to the DTLS layer, if any.

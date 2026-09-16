@@ -50,17 +50,25 @@ let signaling = HttpSignalingServer::bind(
 )
 .await?;
 
-let mut listener = NethernetListener::bind(signaling).await?;
+// Required: a real client refuses any answer that carries no a=identity assertion.
+let identity = nethernet_tokio::util::identity::from_pem_or_create("identity.pem", "example.com").await?;
+let config = ConnectionConfig {
+    identity: Some(Arc::new(identity)),
+    ..Default::default()
+};
+
+let mut listener = NethernetListener::bind_with(signaling, config).await?;
 let session = listener.accept().await?;
 ```
 
 Answers are signed with the identity in `ConnectionConfig::identity`, which
 `nethernet_tokio::util::identity::from_pem_or_create` loads from a PEM and creates on first
-use. Clients pin that key, so it should be kept between restarts. Offers are validated
-against `HttpSignalerConfig::token_trust`, which defaults to accepting any self-signed
-token while still binding it to the certificate the peer presents.
-`nethernet_tokio::util::jwks::Jwks::minecraft` fetches the keys needed to require a token
-issued by the Minecraft authorization service instead.
+use. Clients pin that key, so it should be kept between restarts, and **every answer must
+carry one** - a client refuses the connection otherwise, whether signaling ran over HTTPS
+or plaintext HTTP. Offers are validated against `HttpSignalerConfig::token_trust`, which
+defaults to accepting any self-signed token while still binding it to the certificate the
+peer presents. `nethernet_tokio::util::jwks::Jwks::minecraft` fetches the keys needed to
+require a token issued by the Minecraft authorization service instead.
 
 ## License
 

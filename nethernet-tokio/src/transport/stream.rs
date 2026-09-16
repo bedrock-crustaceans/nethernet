@@ -1,7 +1,7 @@
 use crate::addr::Addr;
 use crate::error::{NethernetError, Result, SignalErrorCode};
 use crate::protocol::{Signal, SignalType};
-use crate::session::{Command, Session};
+use crate::session::{Command, Session, SessionReceiver};
 use crate::signaling::Signaling;
 use crate::transport::{ConnectionConfig, local_bind_addr};
 use bytes::Bytes;
@@ -54,32 +54,21 @@ fn spawn_late_signal_forwarder<St>(
 
 /// NetherNet stream - data transmission over a NetherNet session.
 struct SessionStream {
-    session: Arc<Session>,
-    recv_future: ReusableBoxFuture<'static, Result<Option<Bytes>>>,
+    receiver: SessionReceiver,
 }
 
 impl Stream for SessionStream {
     type Item = io::Result<Bytes>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.recv_future.poll(cx) {
-            Poll::Ready(result) => {
-                let session = self.session.clone();
-                self.recv_future.set(async move { session.recv().await });
-                match result {
-                    Ok(Some(data)) => Poll::Ready(Some(Ok(data))),
-                    Ok(None) => Poll::Ready(None),
-                    Err(e) => Poll::Ready(Some(Err(io::Error::other(e)))),
-                }
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        self.receiver.poll_recv(cx).map(|data| data.map(Ok))
     }
 }
 
 /// NetherNet stream - data transmission over a NetherNet session.
 pub struct NethernetStream {
-    session: Arc<Session>,
+    session: Session,
+    unreliable: SessionReceiver,
     reader: StreamReader<SessionStream, Bytes>,
     send_future: Option<ReusableBoxFuture<'static, Result<()>>>,
     shutdown_future: Option<ReusableBoxFuture<'static, Result<()>>>,
@@ -290,8 +279,8 @@ impl NethernetStream {
         let local = Addr::new(signaling.network_id(), connection_id);
         let remote = Addr::new(remote_network_id.to_string(), connection_id);
 
-        let (session, ready_rx) = Session::spawn(socket, connection, local, remote);
-        let session = Arc::new(session);
+        let (session, reliable, unreliable, ready_rx) =
+            Session::spawn(socket, connection, local, remote);
 
         spawn_late_signal_forwarder(
             signals,
@@ -310,22 +299,20 @@ impl NethernetStream {
             })?
             .map_err(|_| (None, NethernetError::ConnectionClosed))?;
 
-        Ok(Self::from_session(session))
+        Ok(Self::from_session(session, reliable, unreliable))
     }
 
-    /// Constructs a NethernetStream from an existing Session.
-    pub(crate) fn from_session(session: Arc<Session>) -> Self {
-        let session_clone = session.clone();
-        let recv_future = ReusableBoxFuture::new(async move { session_clone.recv().await });
-
-        let stream = SessionStream {
-            session: session.clone(),
-            recv_future,
-        };
-
+    /// Constructs a NethernetStream from an existing Session and its two channel
+    /// receivers.
+    pub(crate) fn from_session(
+        session: Session,
+        reliable: SessionReceiver,
+        unreliable: SessionReceiver,
+    ) -> Self {
         Self {
             session,
-            reader: StreamReader::new(stream),
+            unreliable,
+            reader: StreamReader::new(SessionStream { receiver: reliable }),
             send_future: None,
             shutdown_future: None,
         }
@@ -342,13 +329,13 @@ impl NethernetStream {
     }
 
     /// Receive the next available data frame from the unreliable data channel.
-    pub async fn recv_unreliable(&self) -> Result<Option<Bytes>> {
-        self.session.recv_unreliable().await
+    pub async fn recv_unreliable(&mut self) -> Result<Option<Bytes>> {
+        self.unreliable.recv().await
     }
 
     /// Receive the next available data frame from this stream.
-    pub async fn recv(&self) -> Result<Option<Bytes>> {
-        self.session.recv().await
+    pub async fn recv(&mut self) -> Result<Option<Bytes>> {
+        self.reader.get_mut().receiver.recv().await
     }
 
     /// Close the stream and its underlying session.
@@ -366,8 +353,13 @@ impl NethernetStream {
         self.session.local_addr().await
     }
 
+    /// The current round-trip-time estimate, once the data channels are open.
+    pub async fn rtt(&self) -> Option<std::time::Duration> {
+        self.session.rtt().await
+    }
+
     /// Access the underlying session.
-    pub fn session(&self) -> Arc<Session> {
+    pub fn session(&self) -> Session {
         self.session.clone()
     }
 }
@@ -388,34 +380,26 @@ impl AsyncWrite for NethernetStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        // If there's an active send future, poll it first
         if let Some(mut fut) = self.send_future.take() {
             match fut.poll(cx) {
-                Poll::Ready(Ok(())) => {
-                    // Previous send completed
-                }
+                Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(e)) => {
                     return Poll::Ready(Err(io::Error::other(e)));
                 }
                 Poll::Pending => {
-                    // Still sending
                     self.send_future = Some(fut);
                     return Poll::Pending;
                 }
             }
         }
 
-        // Start new send
         let data = Bytes::copy_from_slice(buf);
         let len = data.len();
         let session = self.session.clone();
         let mut fut = ReusableBoxFuture::new(async move { session.send(data).await });
 
-        // Poll immediately to start the future
         match fut.poll(cx) {
-            Poll::Ready(Ok(())) => {
-                // Completed immediately
-            }
+            Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(e)) => {
                 return Poll::Ready(Err(io::Error::other(e)));
             }
@@ -443,7 +427,6 @@ impl AsyncWrite for NethernetStream {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // First flush any pending writes
         match self.as_mut().poll_flush(cx) {
             Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),

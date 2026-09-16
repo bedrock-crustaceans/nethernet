@@ -66,37 +66,32 @@ pub struct ServerData {
     pub transport_layer: u8,
     /// Connection type (4 = LAN)
     pub connection_type: u8,
+    /// Bedrock protocol version, for the HTTP `GET /v1/join` capability check (guide
+    /// section 4) only - not part of the binary LAN discovery format.
+    pub protocol_version: u32,
+    /// Bedrock game version string (e.g. `"1.26.50"`), for the same endpoint.
+    pub game_version: String,
 }
 
 impl ServerData {
-    /// The server data as the JSON the status endpoint of a server answers with.
-    ///
-    /// The keys mirror the fields of the binary form, which is what the discovery
-    /// response carries on a local network.
+    /// The server data as the JSON the `GET /v1/join` capability-check endpoint answers
+    /// with (guide section 4), which the client uses to decide whether to attempt a
+    /// connection at all and to display server details beforehand.
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"ServerName\":{},\"LevelName\":{},\"GameType\":{},\"PlayerCount\":{},\
-             \"MaxPlayerCount\":{},\"EditorWorld\":{},\"Hardcore\":{},\"FlagA\":{},\"FlagB\":{},\
-             \"SessionID\":{},\"TransportLayer\":{},\"ConnectionType\":{}}}",
+            "{{\"name\":{},\"protocol\":{},\"version\":{},\"level\":{},\"players\":{},\
+             \"maxPlayers\":{},\"gameType\":{}}}",
             escape(&self.server_name),
+            self.protocol_version,
+            escape(&self.game_version),
             escape(&self.level_name),
-            self.game_type,
             self.player_count,
             self.max_player_count,
-            self.editor_world,
-            self.hardcore,
-            self.flag_a,
-            self.flag_b,
-            escape(&self.session_id),
-            self.transport_layer,
-            self.connection_type
+            self.game_type
         )
     }
 
     /// Constructs a ServerData for the given server and level names using sensible defaults.
-    ///
-    /// server_name: the server owner or player name.
-    /// level_name: the world or level name.
     ///
     /// Defaults:
     /// - game_type = 0 (Survival)
@@ -106,7 +101,7 @@ impl ServerData {
     /// - hardcore = false
     /// - flag_a = true
     /// - flag_b = true
-    /// - session_id = String
+    /// - session_id = "" (empty)
     /// - transport_layer = 2 (NetherNet)
     /// - connection_type = 4 (LAN)
     pub fn new(server_name: String, level_name: String) -> Self {
@@ -123,14 +118,11 @@ impl ServerData {
             session_id: String::new(),
             transport_layer: 2, // NetherNet
             connection_type: 4, // LAN
+            protocol_version: 0,
+            game_version: String::new(),
         }
     }
 
-    /// Encode the ServerData into the binary format used for discovery ResponsePacket.ApplicationData.
-    ///
-    /// Returns a vector of bytes on success or a ProtocolError if encoding fails (for example,
-    /// if a field value would overflow its encoded form or an I/O write fails).
-    ///
     /// Parses a RakNet pong response as sent by Minecraft listeners.
     ///
     /// The pong is a `;` separated list, of which the server name, level name, player
@@ -160,6 +152,8 @@ impl ServerData {
             session_id: String::new(),
             transport_layer: 2,
             connection_type: 4,
+            protocol_version: 0,
+            game_version: String::new(),
         })
     }
 
@@ -170,7 +164,6 @@ impl ServerData {
         let mut cursor = Cursor::new(data);
         let value = Self::deserialize(&mut cursor)?;
 
-        // Ensure all data was read
         let remaining = data.len() - cursor.position() as usize;
         if remaining != 0 {
             return Err(ProtocolError::Other(format!("unread {} bytes", remaining)));
@@ -185,7 +178,7 @@ impl NetherCodec for ServerData {
     ///
     /// Returns an error if a field value would overflow its encoded form or an I/O write fails.
     fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
-        // Validate fields that will be shifted to prevent overflow
+        // Each is shifted left by 1 below, so must fit in 7 bits
         if self.game_type >= 128 {
             return Err(ProtocolError::Other(format!(
                 "game_type must be less than 128 to avoid overflow, got {}",
@@ -205,32 +198,17 @@ impl NetherCodec for ServerData {
             )));
         }
 
-        // Write version
         writer.write_u8(ServerDataVersion::CURRENT.as_byte())?;
-
-        // Write server name (u8-prefixed string)
         write_bytes_u8(writer, self.server_name.as_bytes())?;
-
-        // Write level name (u8-prefixed string)
         write_bytes_u8(writer, self.level_name.as_bytes())?;
-
-        // Write game type (shifted left by 1)
         writer.write_u8(self.game_type << 1)?;
-
-        // Write player counts (i32 little-endian)
         writer.write_i32::<LittleEndian>(self.player_count)?;
         writer.write_i32::<LittleEndian>(self.max_player_count)?;
-
-        // Write booleans
         writer.write_u8(if self.editor_world { 1 } else { 0 })?;
         writer.write_u8(if self.hardcore { 1 } else { 0 })?;
         writer.write_u8(if self.flag_a { 1 } else { 0 })?;
         writer.write_u8(if self.flag_b { 1 } else { 0 })?;
-
-        // Write session identifier (u8-prefixed string, v6+)
         write_bytes_u8(writer, self.session_id.as_bytes())?;
-
-        // Write transport layer and connection type (both shifted left by 1)
         writer.write_u8(self.transport_layer << 1)?;
         writer.write_u8(self.connection_type << 1)?;
 
@@ -246,27 +224,21 @@ impl NetherCodec for ServerData {
     /// the problem. Use [`ServerData::decode`] instead when `reader` should be fully
     /// consumed.
     fn deserialize<R: Read>(reader: &mut R) -> Result<Self> {
-        // Auto-detect the version
         let version = ServerDataVersion::from_byte(reader.read_u8()?)?;
 
-        // Read server name
         let server_name_bytes = read_bytes_u8(reader)?;
         let server_name = String::from_utf8(server_name_bytes)
             .map_err(|e| ProtocolError::Other(format!("invalid server name UTF-8: {}", e)))?;
 
-        // Read level name
         let level_name_bytes = read_bytes_u8(reader)?;
         let level_name = String::from_utf8(level_name_bytes)
             .map_err(|e| ProtocolError::Other(format!("invalid level name UTF-8: {}", e)))?;
 
-        // Read game type (shift right by 1)
         let game_type = reader.read_u8()? >> 1;
 
-        // Read player counts (i32 little-endian)
         let player_count = reader.read_i32::<LittleEndian>()?;
         let max_player_count = reader.read_i32::<LittleEndian>()?;
 
-        // Read booleans
         let editor_world = reader.read_u8()? != 0;
         let hardcore = reader.read_u8()? != 0;
 
@@ -281,7 +253,6 @@ impl NetherCodec for ServerData {
             (true, true, String::new())
         };
 
-        // Read transport layer and connection type (both shift right by 1)
         let transport_layer = reader.read_u8()? >> 1;
         let connection_type = reader.read_u8()? >> 1;
 
@@ -298,6 +269,8 @@ impl NetherCodec for ServerData {
             session_id,
             transport_layer,
             connection_type,
+            protocol_version: 0,
+            game_version: String::new(),
         })
     }
 
@@ -313,7 +286,6 @@ impl NetherCodec for ServerData {
     }
 }
 
-/// Returns the game type for the game mode name of a RakNet pong response.
 /// Quotes a string as a JSON value, escaping what the grammar does not allow raw.
 fn escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
@@ -333,6 +305,7 @@ fn escape(value: &str) -> String {
     out
 }
 
+/// Returns the game type for the game mode name of a RakNet pong response.
 fn game_type(mode: &str) -> u8 {
     match mode.trim().to_ascii_lowercase().as_str() {
         "creative" => 1,
@@ -361,6 +334,8 @@ mod tests {
             session_id: "97231188cae9fed6".to_string(),
             transport_layer: 2,
             connection_type: 4,
+            protocol_version: 2177,
+            game_version: "1.26.50".to_string(),
         };
 
         let mut encoded = Vec::new();

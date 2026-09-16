@@ -81,6 +81,20 @@ impl NethernetMotd {
         self
     }
 
+    /// Sets the Bedrock protocol version reported by the HTTP `GET /v1/join`
+    /// capability check. Has no effect on LAN discovery.
+    pub fn protocol_version(mut self, protocol_version: u32) -> Self {
+        self.server_data.protocol_version = protocol_version;
+        self
+    }
+
+    /// Sets the Bedrock game version string (e.g. `"1.26.50"`) reported by the same
+    /// endpoint. Has no effect on LAN discovery.
+    pub fn game_version(mut self, game_version: impl Into<String>) -> Self {
+        self.server_data.game_version = game_version.into();
+        self
+    }
+
     /// Builds and returns the underlying `ServerData`.
     pub fn build(self) -> ServerData {
         self.server_data

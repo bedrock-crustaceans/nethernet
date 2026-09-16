@@ -2,16 +2,13 @@ use crate::error::{ProtocolError, SignalErrorCode};
 use std::fmt;
 use std::str::FromStr;
 
-/// Signal types
+/// The type of a [`Signal`], named on the wire as `CONNECTREQUEST`, `CONNECTRESPONSE`,
+/// `CANDIDATEADD` and `CONNECTERROR` respectively.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalType {
-    /// CONNECTREQUEST - Connection request (offer)
     Offer,
-    /// CONNECTRESPONSE - Connection response (answer)
     Answer,
-    /// CANDIDATEADD - ICE candidate addition
     Candidate,
-    /// CONNECTERROR - Connection error
     Error,
 }
 
@@ -29,11 +26,6 @@ impl SignalType {
 impl FromStr for SignalType {
     type Err = ProtocolError;
 
-    /// Parses a signal type from its wire string representation.
-    ///
-    /// Recognizes the following exact strings: `"CONNECTREQUEST"`, `"CONNECTRESPONSE"`,
-    /// `"CANDIDATEADD"`, and `"CONNECTERROR"`. For any other input, returns
-    /// `ProtocolError::Other` with an "Unknown signal type" message.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "CONNECTREQUEST" => Ok(SignalType::Offer),
@@ -46,7 +38,6 @@ impl FromStr for SignalType {
 }
 
 impl fmt::Display for SignalType {
-    /// Formats the signal type as its canonical protocol string.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_str())
     }
@@ -55,13 +46,10 @@ impl fmt::Display for SignalType {
 /// NetherNet signal message
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signal {
-    /// Signal type
     pub signal_type: SignalType,
-    /// Connection ID
     pub connection_id: u64,
-    /// Signal data (SDP, ICE candidate, etc.)
+    /// The SDP, ICE candidate, or error code, depending on `signal_type`.
     pub data: String,
-    /// Network ID (receiver/sender)
     pub network_id: String,
 }
 
@@ -81,22 +69,18 @@ impl Signal {
         }
     }
 
-    /// Constructs a Signal with type Offer (CONNECTREQUEST) using the given connection ID, SDP payload, and network ID.
     pub fn offer(connection_id: u64, sdp: String, network_id: String) -> Self {
         Self::new(SignalType::Offer, connection_id, sdp, network_id)
     }
 
-    /// Creates a [`Signal`] with type [`SignalType::Answer`] for the specified connection, SDP payload, and network.
     pub fn answer(connection_id: u64, sdp: String, network_id: String) -> Self {
         Self::new(SignalType::Answer, connection_id, sdp, network_id)
     }
 
-    /// Creates a [`Signal`] with type [`SignalType::Candidate`] for the given connection and network.
     pub fn candidate(connection_id: u64, candidate: String, network_id: String) -> Self {
         Self::new(SignalType::Candidate, connection_id, candidate, network_id)
     }
 
-    /// Create a [`Signal`] representing a connection error.
     pub fn error(connection_id: u64, error_code: SignalErrorCode, network_id: String) -> Self {
         Self::new(
             SignalType::Error,
@@ -106,13 +90,7 @@ impl Signal {
         )
     }
 
-    /// Parses a Signal from a space-separated string and assigns the provided network ID.
-    ///
-    /// The input string must contain exactly three space-separated tokens in the form:
-    /// `TYPE CONNECTION_ID DATA`
-    /// - `TYPE` is the signal type token (e.g., `CONNECTREQUEST`, `CONNECTRESPONSE`, `CANDIDATEADD`, `CONNECTERROR`).
-    /// - `CONNECTION_ID` is a base-10 unsigned integer.
-    /// - `DATA` is the remaining token (signal payload such as SDP or ICE candidate).
+    /// Parses a `TYPE CONNECTION_ID DATA` string and assigns the given network ID.
     pub fn from_string(s: &str, network_id: String) -> Result<Self, ProtocolError> {
         let parts: Vec<&str> = s.splitn(3, ' ').collect();
         if parts.len() != 3 {

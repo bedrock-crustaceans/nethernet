@@ -23,7 +23,7 @@ pub use error::{NethernetError, Result};
 pub use nethernet::identity::{PlayerInfo, ServerIdentity, TokenTrust};
 pub use protocol::packet::discovery::{MessagePacket, RequestPacket, ResponsePacket, ServerData};
 pub use protocol::{ConnectError, Message, MessageSegment, Signal, SignalType};
-pub use session::Session;
+pub use session::{AcceptedSession, Session, SessionReceiver};
 pub use signaling::Signaling;
 pub use signaling::http::{HttpServerConfig, HttpSignaling, HttpSignalingServer};
 pub use signaling::lan::{LanConfig, LanSignaling};

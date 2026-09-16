@@ -2,7 +2,9 @@
 
 use bytes::Bytes;
 use nethernet_tokio::signaling::http::{HttpServerConfig, HttpSignaling, HttpSignalingServer};
-use nethernet_tokio::{ConnectionConfig, NethernetListener, NethernetStream, ServerData};
+use nethernet_tokio::{
+    AcceptedSession, ConnectionConfig, NethernetListener, NethernetStream, ServerData,
+};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,16 +49,20 @@ async fn offer_is_negotiated_over_the_endpoint() {
     let (url, mut listener) = serve(server_config()).await;
 
     tokio::spawn(async move {
-        let session = listener.accept().await.unwrap();
+        let AcceptedSession {
+            session,
+            mut reliable,
+            ..
+        } = listener.accept().await.unwrap();
         assert!(session.player().await.is_some());
 
-        while let Ok(Some(data)) = session.recv().await {
+        while let Ok(Some(data)) = reliable.recv().await {
             session.send(data).await.unwrap();
         }
     });
 
     let signaling = Arc::new(HttpSignaling::new(NETWORK_ID.to_string()).unwrap());
-    let stream = tokio::time::timeout(
+    let mut stream = tokio::time::timeout(
         Duration::from_secs(20),
         NethernetStream::connect_with(signaling, url, client_config()),
     )
@@ -105,8 +111,8 @@ async fn the_status_endpoint_advertises_the_server_data() {
         .await
         .unwrap();
 
-    assert!(body.contains("\"ServerName\":\"test\""), "{body}");
-    assert!(body.contains("\"LevelName\":\"world\""), "{body}");
+    assert!(body.contains("\"name\":\"test\""), "{body}");
+    assert!(body.contains("\"level\":\"world\""), "{body}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

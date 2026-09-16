@@ -1,7 +1,7 @@
 use crate::addr::Addr;
 use crate::error::{NethernetError, Result, SignalErrorCode};
 use crate::protocol::{Signal, SignalType};
-use crate::session::{Command, Session};
+use crate::session::{AcceptedSession, Command, Session};
 use crate::signaling::Signaling;
 use crate::transport::{ConnectionConfig, local_bind_addr};
 use futures::{Stream, StreamExt};
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::SystemTime;
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -39,15 +39,17 @@ async fn signal_error<S: Signaling>(
 /// connection IDs are only unique within a single network.
 type ConnectionKey = (String, u64);
 
-type SignalDispatchers = Arc<Mutex<HashMap<ConnectionKey, mpsc::UnboundedSender<Signal>>>>;
+/// Per-connection dispatch table, owned entirely by the signal handler task; dropping it
+/// (when that task ends) drops every sender in it, which is what lets a forwarder task
+/// waiting on the matching receiver see the channel close.
+type SignalDispatchers = HashMap<ConnectionKey, mpsc::UnboundedSender<Signal>>;
 
 /// NetherNet listener - accepts NetherNet connections
 pub struct NethernetListener<S: Signaling> {
-    incoming: mpsc::UnboundedReceiver<Arc<Session>>,
+    incoming: mpsc::UnboundedReceiver<AcceptedSession>,
     local_addr: Addr,
-    signal_dispatchers: SignalDispatchers,
     cancel_token: CancellationToken,
-    _signal_handler_task: JoinHandle<()>,
+    signal_handler_task: Option<JoinHandle<()>>,
     _phantom: PhantomData<S>,
 }
 
@@ -66,24 +68,16 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         let signaling = Arc::new(signaling);
         let local_addr = Addr::network(signaling.network_id());
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let signal_dispatchers = Arc::new(Mutex::new(HashMap::new()));
         let cancel_token = CancellationToken::new();
 
-        // Start signal handler task
-        let signal_handler_task = Self::start_signal_handler(
-            signaling,
-            incoming_tx,
-            signal_dispatchers.clone(),
-            cancel_token.clone(),
-            config,
-        );
+        let signal_handler_task =
+            Self::start_signal_handler(signaling, incoming_tx, cancel_token.clone(), config);
 
         let listener = Self {
             incoming: incoming_rx,
             local_addr,
-            signal_dispatchers,
             cancel_token,
-            _signal_handler_task: signal_handler_task,
+            signal_handler_task: Some(signal_handler_task),
             _phantom: PhantomData,
         };
 
@@ -92,12 +86,12 @@ impl<S: Signaling + 'static> NethernetListener<S> {
 
     fn start_signal_handler(
         signaling: Arc<S>,
-        incoming_tx: mpsc::UnboundedSender<Arc<Session>>,
-        signal_dispatchers: SignalDispatchers,
+        incoming_tx: mpsc::UnboundedSender<AcceptedSession>,
         cancel_token: CancellationToken,
         config: ConnectionConfig,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
+            let mut dispatchers: SignalDispatchers = HashMap::new();
             let mut signals = signaling.signals();
 
             loop {
@@ -114,7 +108,7 @@ impl<S: Signaling + 'static> NethernetListener<S> {
                                             signal,
                                             &signaling,
                                             &incoming_tx,
-                                            &signal_dispatchers,
+                                            &mut dispatchers,
                                             config.clone(),
                                         )
                                         .await
@@ -124,7 +118,6 @@ impl<S: Signaling + 'static> NethernetListener<S> {
                                     }
                                     SignalType::Answer | SignalType::Candidate | SignalType::Error => {
                                         // Dispatch to per-connection channel
-                                        let dispatchers = signal_dispatchers.lock().await;
                                         let key = (signal.network_id.clone(), signal.connection_id);
                                         if let Some(tx) = dispatchers.get(&key) {
                                             let _ = tx.send(signal);
@@ -145,8 +138,8 @@ impl<S: Signaling + 'static> NethernetListener<S> {
     async fn handle_offer(
         signal: Signal,
         signaling: &Arc<S>,
-        incoming_tx: &mpsc::UnboundedSender<Arc<Session>>,
-        signal_dispatchers: &SignalDispatchers,
+        incoming_tx: &mpsc::UnboundedSender<AcceptedSession>,
+        dispatchers: &mut SignalDispatchers,
         config: ConnectionConfig,
     ) -> Result<()> {
         let connection_id = signal.connection_id;
@@ -155,7 +148,7 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         let cancel_token = config.cancel_token.clone();
         let result = tokio::select! {
             _ = cancel_token.cancelled() => Err((None, NethernetError::ConnectionClosed)),
-            result = Self::answer_offer(signal, signaling, incoming_tx, signal_dispatchers, config.clone()) => result,
+            result = Self::answer_offer(signal, signaling, incoming_tx, dispatchers, config.clone()) => result,
         };
 
         match result {
@@ -174,8 +167,8 @@ impl<S: Signaling + 'static> NethernetListener<S> {
     async fn answer_offer(
         signal: Signal,
         signaling: &Arc<S>,
-        incoming_tx: &mpsc::UnboundedSender<Arc<Session>>,
-        signal_dispatchers: &SignalDispatchers,
+        incoming_tx: &mpsc::UnboundedSender<AcceptedSession>,
+        dispatchers: &mut SignalDispatchers,
         config: ConnectionConfig,
     ) -> std::result::Result<(), (Option<SignalErrorCode>, NethernetError)> {
         let (remote_description, remote_candidates) = SansConnection::parse_offer(&signal)
@@ -186,20 +179,20 @@ impl<S: Signaling + 'static> NethernetListener<S> {
                 )
             })?;
 
-        let remote_address =
-            signaling.remote_address(&Addr::new(signal.network_id.clone(), signal.connection_id));
+        let remote_address = signaling
+            .remote_address(&Addr::new(signal.network_id.clone(), signal.connection_id))
+            .await;
 
         let connection_id = signal.connection_id;
         let network_id = signal.network_id.clone();
         let key = (network_id.clone(), connection_id);
 
         let (signal_tx, signal_rx) = mpsc::unbounded_channel();
-        signal_dispatchers
-            .lock()
-            .await
-            .insert(key.clone(), signal_tx);
+        dispatchers.insert(key.clone(), signal_tx);
         // A peer that cannot prove who it is has an offer anyone could have replayed
-        let signaled_player = signaling.player(&Addr::new(network_id.clone(), connection_id));
+        let signaled_player = signaling
+            .player(&Addr::new(network_id.clone(), connection_id))
+            .await;
         let player = match &config.token_trust {
             Some(trust) => match validate_sdp(&signal.data, trust, SystemTime::now()) {
                 Ok(claims) => Some(Arc::new(PlayerInfo::new(
@@ -299,8 +292,8 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         let local = Addr::new(signaling.network_id(), connection_id);
         let remote = Addr::new(network_id.clone(), connection_id);
 
-        let (session, ready_rx) = Session::spawn(socket, connection, local, remote);
-        let session = Arc::new(session);
+        let (session, reliable, unreliable, ready_rx) =
+            Session::spawn(socket, connection, local, remote);
 
         if let Some(player) = player {
             session.set_player(player).await;
@@ -319,7 +312,11 @@ impl<S: Signaling + 'static> NethernetListener<S> {
 
             match result {
                 Ok(()) => {
-                    let _ = incoming_tx.send(session);
+                    let _ = incoming_tx.send(AcceptedSession {
+                        session,
+                        reliable,
+                        unreliable,
+                    });
                 }
                 Err((code, e)) => {
                     tracing::debug!("Failed to establish incoming connection: {}", e);
@@ -334,7 +331,7 @@ impl<S: Signaling + 'static> NethernetListener<S> {
     }
 
     /// Waits for and returns the next inbound session.
-    pub async fn accept(&mut self) -> Result<Arc<Session>> {
+    pub async fn accept(&mut self) -> Result<AcceptedSession> {
         self.incoming
             .recv()
             .await
@@ -349,12 +346,18 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         self.cancel_token.cancel();
         self.incoming.close();
 
-        while let Ok(session) = self.incoming.try_recv() {
-            if let Err(e) = session.close().await {
+        while let Ok(accepted) = self.incoming.try_recv() {
+            if let Err(e) = accepted.session.close().await {
                 tracing::debug!("Failed to close pending session: {}", e);
             }
         }
-        self.signal_dispatchers.lock().await.clear();
+
+        // Waiting for the task to actually finish, rather than just cancelling it, is
+        // what guarantees its dispatch table (and every sender in it) is dropped before
+        // this returns.
+        if let Some(task) = self.signal_handler_task.take() {
+            let _ = task.await;
+        }
 
         Ok(())
     }
@@ -408,11 +411,8 @@ impl<S: Signaling> Drop for NethernetListener<S> {
 }
 
 impl<S: Signaling + 'static + Unpin> Stream for NethernetListener<S> {
-    type Item = Arc<Session>;
+    type Item = AcceptedSession;
 
-    /// Polls the listener for the next inbound session, returning Pending if the internal queue is empty.
-    ///
-    /// This method delegates to the inner receiver's poll to produce the next [`Arc<Session>`].
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.get_mut().incoming.poll_recv(cx)
     }

@@ -19,19 +19,13 @@ pub struct MessagePacket {
 }
 
 impl MessagePacket {
-    /// Create a MessagePacket for sending signaling data to a specific recipient.
-    ///
-    /// `recipient_id` is the recipient's network ID (not a connection ID).
-    /// `data` is the signaling payload as a UTF-8 string (e.g., serialized Signal/ICE info).
     pub fn new(recipient_id: u64, data: String) -> Self {
         Self { recipient_id, data }
     }
 }
 
 impl NetherCodec for MessagePacket {
-    /// Serializes the packet into the wire format and writes it to `writer`.
-    ///
-    /// The wire format is: recipient ID as little-endian u64 followed by the data as a
+    /// Writes the recipient ID as a little-endian u64, followed by the data as a
     /// 32-bit length-prefixed byte sequence.
     fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_u64::<LittleEndian>(self.recipient_id)?;
@@ -39,11 +33,6 @@ impl NetherCodec for MessagePacket {
         Ok(())
     }
 
-    /// Reads packet fields from `reader` and populates `recipient_id` and `data`.
-    ///
-    /// Reads `recipient_id` as a little-endian 64-bit unsigned integer, then reads a
-    /// 32-bit length-prefixed byte array and converts it to a UTF-8 `String`.
-    /// I/O errors are propagated; invalid UTF-8 is returned as `ProtocolError::Other`.
     fn deserialize<R: Read>(reader: &mut R) -> Result<Self> {
         let recipient_id = reader.read_u64::<LittleEndian>()?;
         let data_bytes = read_bytes_u32(reader)?;

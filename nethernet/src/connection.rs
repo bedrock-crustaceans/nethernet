@@ -14,7 +14,7 @@ use crate::session::{Channel, Session, SessionOutput};
 use bytes::Bytes;
 use rtc::ice::candidate::Candidate;
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Which ICE shape to use when encoding this side's offer/answer SDP, matching the
 /// signaling transport that will carry it (see the NetherNet HTTP signaling guide,
@@ -253,6 +253,11 @@ impl Connection {
         self.session.remote_addr()
     }
 
+    /// The current round-trip-time estimate, once the data channels are open.
+    pub fn rtt(&self) -> Option<Duration> {
+        self.session.rtt()
+    }
+
     /// The connection ID this attempt was signaled under.
     pub fn connection_id(&self) -> u64 {
         self.connection_id
@@ -327,6 +332,9 @@ mod tests {
                 match output {
                     SessionOutput::Send(data, to) => outbox.push((data, to)),
                     SessionOutput::Event(SessionEvent::Ready) => offerer_ready = true,
+                    SessionOutput::Event(SessionEvent::Failed) => {
+                        panic!("session failed unexpectedly")
+                    }
                     SessionOutput::Message(..) => {}
                 }
             }
@@ -340,6 +348,9 @@ mod tests {
                 match output {
                     SessionOutput::Send(data, to) => outbox.push((data, to)),
                     SessionOutput::Event(SessionEvent::Ready) => answerer_ready = true,
+                    SessionOutput::Event(SessionEvent::Failed) => {
+                        panic!("session failed unexpectedly")
+                    }
                     SessionOutput::Message(..) => {}
                 }
             }
