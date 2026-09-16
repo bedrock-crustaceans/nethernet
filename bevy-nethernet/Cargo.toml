@@ -1,0 +1,14 @@
+[package]
+name = "bevy-nethernet"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy_app = { version = "0.19.1", default-features = false }
+bevy_ecs = { version = "0.19.1", default-features = false, features = ["std"] }
+nethernet = { path = "../nethernet" }
+tracing = "0.1"
+rand = "0.10"
+httparse = "1"
+socket2 = "0.6.5"
+http = "1.5.0"

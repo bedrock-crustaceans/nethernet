@@ -9,6 +9,8 @@
       <sourceFolder url="file://$MODULE_DIR$/nethernet-tokio/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/nethernet-tokio/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/nethernet-tokio/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/bevy-nethernet/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/bevy-nethernet/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/nethernet-tokio/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/nethernet/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/nethernet/target" />
