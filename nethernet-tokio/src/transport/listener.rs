@@ -338,7 +338,7 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         self.incoming
             .recv()
             .await
-            .ok_or_else(|| NethernetError::ConnectionClosed)
+            .ok_or(NethernetError::ConnectionClosed)
     }
 
     /// Closes the listener and every session that has not been accepted yet.

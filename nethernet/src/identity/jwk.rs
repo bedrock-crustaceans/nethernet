@@ -9,8 +9,8 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rsa::pkcs1v15::Pkcs1v15Sign;
 use rsa::{BigUint, RsaPublicKey};
+use rsa::sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
-use sha2_rsa::{Digest, Sha256};
 
 /// A set of keys an issuer signs its tokens with.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
