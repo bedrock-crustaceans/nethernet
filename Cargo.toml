@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["nethernet", "nethernet-tokio"] 
+members = ["bevy-nethernet", "nethernet", "nethernet-tokio"]
 
 [workspace.dependencies]
 nethernet = { path = "./nethernet" }
