@@ -75,9 +75,10 @@ impl Message {
     /// This validates segment sequencing, appends the segment payload to the internal buffer, and resets internal state when a complete message is produced. If a segment is out of the expected order the accumulator is cleared and a `MessageParse` error is returned.
     pub fn add_segment(&mut self, segment: MessageSegment) -> Result<Option<Bytes>> {
         if self.expected_segments == 0 && segment.remaining_segments > 0 {
-            self.expected_segments = segment.remaining_segments.checked_add(1).ok_or_else(|| {
-                ProtocolError::MessageParse("segment count out of range".to_string())
-            })?;
+            self.expected_segments =
+                segment.remaining_segments.checked_add(1).ok_or_else(|| {
+                    ProtocolError::MessageParse("segment count out of range".to_string())
+                })?;
             let estimated = self.expected_segments as usize * MAX_MESSAGE_SIZE;
             self.data.reserve(estimated);
         }
