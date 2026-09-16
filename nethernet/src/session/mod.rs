@@ -467,12 +467,12 @@ fn drain_dcep_and_data(
             };
 
             match channel {
-                Channel::Reliable => {
-                    if let Some(message) = channels.reassembly.add_segment(segment)? {
-                        output
-                            .push_back(SessionOutput::Message(Channel::Reliable, message.to_vec()));
-                    }
-                }
+                Channel::Reliable => match channels.reassembly.add_segment(segment) {
+                    Ok(Some(message)) => output
+                        .push_back(SessionOutput::Message(Channel::Reliable, message.to_vec())),
+                    Ok(None) => {}
+                    Err(e) => tracing::debug!("dropping malformed reliable segment: {e}"),
+                },
                 Channel::Unreliable => {
                     if segment.remaining_segments == 0 {
                         output.push_back(SessionOutput::Message(

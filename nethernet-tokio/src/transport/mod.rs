@@ -96,7 +96,9 @@ pub struct Timeouts {
     /// Time to wait for the answer of the remote connection. Only used while dialing.
     pub negotiation: Duration,
 
-    /// Time to wait for each transport to start.
+    /// Time to wait for the transport (ICE/DTLS) to start. Added to `channel` for the
+    /// total post-negotiation budget, since there's no separate signal to time the two
+    /// phases apart.
     pub start: Duration,
 
     /// Time to wait for the data channels to open, once transports have started.

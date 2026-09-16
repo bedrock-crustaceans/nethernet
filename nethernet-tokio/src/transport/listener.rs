@@ -314,7 +314,7 @@ impl<S: Signaling + 'static> NethernetListener<S> {
             let cancel_token = config.cancel_token.clone();
             let result = tokio::select! {
                 _ = cancel_token.cancelled() => Err((None, NethernetError::ConnectionClosed)),
-                result = wait_ready(ready_rx, config.timeouts.channel) => result,
+                result = wait_ready(ready_rx, config.timeouts.start + config.timeouts.channel) => result,
             };
 
             match result {

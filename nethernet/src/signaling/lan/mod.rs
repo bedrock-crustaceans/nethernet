@@ -274,7 +274,7 @@ impl LanSignaler {
         };
 
         let due = match self.last_broadcast {
-            Some(last) => now.duration_since(last) >= self.config.broadcast_interval,
+            Some(last) => now.saturating_duration_since(last) >= self.config.broadcast_interval,
             None => true,
         };
         if !due {
@@ -292,7 +292,7 @@ impl LanSignaler {
     fn expire(&mut self, now: Instant) {
         let timeout = self.config.address_timeout;
         self.addresses
-            .retain(|_, entry| now.duration_since(entry.last_seen) < timeout);
+            .retain(|_, entry| now.saturating_duration_since(entry.last_seen) < timeout);
         self.last_cleanup = Some(now);
     }
 

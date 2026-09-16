@@ -300,7 +300,7 @@ impl NethernetStream {
             session.signal_sender(),
         );
 
-        tokio::time::timeout(config.timeouts.channel, ready_rx)
+        tokio::time::timeout(config.timeouts.start + config.timeouts.channel, ready_rx)
             .await
             .map_err(|_| {
                 (
