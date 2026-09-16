@@ -12,6 +12,7 @@ const MAX_DATAGRAMS_PER_TICK: usize = 256;
 pub(crate) enum ConnectionEvent {
     Ready,
     Message(Channel, Box<[u8]>),
+    Failed,
 }
 
 pub(crate) fn bind_session_socket() -> std::io::Result<(UdpSocket, SocketAddr)> {
@@ -70,6 +71,7 @@ impl ConnectionDriver {
                     let _ = self.socket.send_to(&data, to);
                 }
                 SessionOutput::Event(SessionEvent::Ready) => events.push(ConnectionEvent::Ready),
+                SessionOutput::Event(SessionEvent::Failed) => events.push(ConnectionEvent::Failed),
                 SessionOutput::Message(channel, data) => {
                     events.push(ConnectionEvent::Message(channel, data.into_boxed_slice()))
                 }

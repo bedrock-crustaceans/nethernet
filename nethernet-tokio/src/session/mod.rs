@@ -5,7 +5,7 @@
 //! glue that feeds it datagrams and timers from a real socket, in a background task, and
 //! exposes the async `send`/`recv` surface the rest of this crate is built on.
 //!
-//! All mutable state lives only inside that task; callers reach it through a [`Command`]
+//! All mutable state lives only inside that task; callers reach it through a `Command`
 //! channel instead of a lock. Receiving is split out into [`SessionReceiver`], since each
 //! channel only ever has one legitimate reader, while [`Session`] itself is cheap to
 //! clone and hand to every task that needs to send or query it.

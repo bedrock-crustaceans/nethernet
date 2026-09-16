@@ -225,6 +225,11 @@ impl NethernetClient {
                 ConnectionEvent::Message(Channel::Unreliable, data) => {
                     self.received_unreliable.push_back(data)
                 }
+                ConnectionEvent::Failed => {
+                    self.connecting_since = None;
+                    self.connection = None;
+                    self.events.push_back(NethernetClientEvent::Disconnected);
+                }
             }
         }
 

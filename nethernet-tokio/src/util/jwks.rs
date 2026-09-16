@@ -25,7 +25,7 @@ enum Command {
 /// The keys of an issuer, refreshed when a token names one that is not held yet.
 ///
 /// The keys themselves live only inside a background task; every accessor here sends it
-/// a [`Command`] and awaits the reply, rather than sharing the cache behind a lock. The
+/// a `Command` and awaits the reply, rather than sharing the cache behind a lock. The
 /// task ends naturally once every clone of the handle is dropped.
 #[derive(Clone)]
 pub struct Jwks {

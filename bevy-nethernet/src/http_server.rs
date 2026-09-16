@@ -338,6 +338,7 @@ impl NethernetHttpServer {
     }
 
     fn drive_sessions(&mut self, now: Instant) {
+        let mut failed = Vec::new();
         for (id, entry) in self.sessions.iter_mut() {
             let mut events = Vec::new();
             entry.driver.drive(now, &mut events);
@@ -356,8 +357,13 @@ impl NethernetHttpServer {
                     ConnectionEvent::Message(Channel::Unreliable, data) => {
                         self.received_unreliable.push_back((id.clone(), data))
                     }
+                    ConnectionEvent::Failed => failed.push(id.clone()),
                 }
             }
+        }
+
+        for id in failed {
+            self.disconnect(&id);
         }
     }
 }

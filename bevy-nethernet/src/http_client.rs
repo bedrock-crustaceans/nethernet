@@ -306,6 +306,18 @@ impl NethernetHttpClient {
                     ConnectionEvent::Message(Channel::Unreliable, data) => {
                         self.received_unreliable.push_back(data)
                     }
+                    ConnectionEvent::Failed => {
+                        let was_ready = self.ready;
+                        self.join = None;
+                        self.connection = None;
+                        self.connecting_since = None;
+                        self.ready = false;
+                        self.events.push_back(if was_ready {
+                            NethernetHttpClientEvent::Disconnected
+                        } else {
+                            NethernetHttpClientEvent::ConnectFailed
+                        });
+                    }
                 }
             }
         }
