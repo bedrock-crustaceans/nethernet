@@ -1,8 +1,8 @@
-pub mod server;
 pub mod client;
+pub mod server;
 
-pub use server::NetherServer;
 pub use client::NetherClient;
+pub use server::NetherServer;
 
 use nethernet::identity::{ServerIdentity, TokenTrust};
 use std::fmt;
