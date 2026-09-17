@@ -15,25 +15,22 @@ use std::time::Instant;
 const MAX_DATAGRAMS_PER_TICK: usize = 1024;
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-pub struct NethernetServerPlugin;
+pub struct NetherServerPlugin;
 
-impl Plugin for NethernetServerPlugin {
+impl Plugin for NetherServerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<NethernetServerEvent>();
+        app.add_message::<NetherServerEvent>();
         app.add_systems(
             PreUpdate,
             Self::update
-                .in_set(NethernetServerSet)
-                .run_if(resource_exists::<NethernetServer>),
+                .in_set(NetherServerSet)
+                .run_if(resource_exists::<NetherServer>),
         );
     }
 }
 
-impl NethernetServerPlugin {
-    fn update(
-        mut server: ResMut<NethernetServer>,
-        mut events: MessageWriter<NethernetServerEvent>,
-    ) {
+impl NetherServerPlugin {
+    fn update(mut server: ResMut<NetherServer>, mut events: MessageWriter<NetherServerEvent>) {
         server.update();
 
         while let Some(event) = server.next_event() {
@@ -42,23 +39,23 @@ impl NethernetServerPlugin {
     }
 }
 
-/// PreUpdate set containing NethernetServerPlugin's update system. Order your own
-/// systems `.after(NethernetServerSet)` to see this tick's events/received data.
+/// PreUpdate set containing NetherServerPlugin's update system. Order your own
+/// systems `.after(NetherServerSet)` to see this tick's events/received data.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct NethernetServerSet;
+pub struct NetherServerSet;
 
-/// Unique within a [`NethernetServer`], not globally: connection IDs are only unique
+/// Unique within a [`NetherServer`], not globally: connection IDs are only unique
 /// within the signaling network that issued them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct NethernetSessionId {
+pub struct NetherSessionId {
     pub network_id: String,
     pub connection_id: u64,
 }
 
 #[derive(Message, Clone, Debug)]
-pub enum NethernetServerEvent {
-    SessionConnected(NethernetSessionId),
-    SessionDisconnected(NethernetSessionId),
+pub enum NetherServerEvent {
+    SessionConnected(NetherSessionId),
+    SessionDisconnected(NetherSessionId),
 }
 
 struct SessionEntry {
@@ -68,17 +65,17 @@ struct SessionEntry {
 }
 
 #[derive(Resource)]
-pub struct NethernetServer {
+pub struct NetherServer {
     signaler: LanSignaler,
     socket: UdpSocket,
-    sessions: HashMap<NethernetSessionId, SessionEntry>,
-    received: VecDeque<(NethernetSessionId, Box<[u8]>)>,
-    received_unreliable: VecDeque<(NethernetSessionId, Box<[u8]>)>,
-    events: VecDeque<NethernetServerEvent>,
+    sessions: HashMap<NetherSessionId, SessionEntry>,
+    received: VecDeque<(NetherSessionId, Box<[u8]>)>,
+    received_unreliable: VecDeque<(NetherSessionId, Box<[u8]>)>,
+    events: VecDeque<NetherServerEvent>,
     buf: Box<[u8]>,
 }
 
-impl NethernetServer {
+impl NetherServer {
     pub fn new<T>(network_id: u64, bind_addr: SocketAddr, conf: T) -> std::io::Result<Self>
     where
         T: FnOnce(&mut LanSignalerConfig),
@@ -107,7 +104,7 @@ impl NethernetServer {
             .handle(LanSignalerInput::SetServerData(Box::new(data)));
     }
 
-    pub fn sessions(&self) -> impl Iterator<Item = &NethernetSessionId> {
+    pub fn sessions(&self) -> impl Iterator<Item = &NetherSessionId> {
         self.sessions
             .iter()
             .filter(|(_, entry)| entry.ready)
@@ -116,7 +113,7 @@ impl NethernetServer {
 
     pub fn send(
         &mut self,
-        id: &NethernetSessionId,
+        id: &NetherSessionId,
         data: &[u8],
     ) -> Result<(), nethernet::error::ProtocolError> {
         self.send_on(id, Channel::Reliable, data)
@@ -124,7 +121,7 @@ impl NethernetServer {
 
     pub fn send_unreliable(
         &mut self,
-        id: &NethernetSessionId,
+        id: &NetherSessionId,
         data: &[u8],
     ) -> Result<(), nethernet::error::ProtocolError> {
         self.send_on(id, Channel::Unreliable, data)
@@ -132,7 +129,7 @@ impl NethernetServer {
 
     fn send_on(
         &mut self,
-        id: &NethernetSessionId,
+        id: &NetherSessionId,
         channel: Channel,
         data: &[u8],
     ) -> Result<(), nethernet::error::ProtocolError> {
@@ -144,22 +141,22 @@ impl NethernetServer {
         entry.driver.send(channel, data.into())
     }
 
-    pub fn recv(&mut self) -> Option<(NethernetSessionId, Box<[u8]>)> {
+    pub fn recv(&mut self) -> Option<(NetherSessionId, Box<[u8]>)> {
         self.received.pop_front()
     }
 
-    pub fn recv_unreliable(&mut self) -> Option<(NethernetSessionId, Box<[u8]>)> {
+    pub fn recv_unreliable(&mut self) -> Option<(NetherSessionId, Box<[u8]>)> {
         self.received_unreliable.pop_front()
     }
 
-    pub fn disconnect(&mut self, id: &NethernetSessionId) {
+    pub fn disconnect(&mut self, id: &NetherSessionId) {
         if self.sessions.remove(id).is_some() {
             self.events
-                .push_back(NethernetServerEvent::SessionDisconnected(id.clone()));
+                .push_back(NetherServerEvent::SessionDisconnected(id.clone()));
         }
     }
 
-    pub fn next_event(&mut self) -> Option<NethernetServerEvent> {
+    pub fn next_event(&mut self) -> Option<NetherServerEvent> {
         self.events.pop_front()
     }
 
@@ -202,7 +199,7 @@ impl NethernetServer {
                     ConnectionEvent::Ready if !entry.ready => {
                         entry.ready = true;
                         self.events
-                            .push_back(NethernetServerEvent::SessionConnected(id.clone()));
+                            .push_back(NetherServerEvent::SessionConnected(id.clone()));
                     }
                     ConnectionEvent::Ready => {}
                     ConnectionEvent::Message(Channel::Reliable, data) => {
@@ -231,7 +228,7 @@ impl NethernetServer {
             return;
         }
 
-        let id = NethernetSessionId {
+        let id = NetherSessionId {
             network_id: signal.network_id.clone(),
             connection_id: signal.connection_id,
         };
@@ -243,7 +240,7 @@ impl NethernetServer {
     }
 
     fn handle_offer(&mut self, offer: Signal, now: Instant) {
-        let id = NethernetSessionId {
+        let id = NetherSessionId {
             network_id: offer.network_id.clone(),
             connection_id: offer.connection_id,
         };

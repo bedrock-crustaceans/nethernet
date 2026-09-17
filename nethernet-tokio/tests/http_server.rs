@@ -2,9 +2,7 @@
 
 use bytes::Bytes;
 use nethernet_tokio::signaling::http::{HttpServerConfig, HttpSignaling, HttpSignalingServer};
-use nethernet_tokio::{
-    AcceptedSession, ConnectionConfig, NethernetListener, NethernetStream, ServerData,
-};
+use nethernet_tokio::{AcceptedSession, ConnectionConfig, NetherClient, NetherServer, ServerData};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,14 +30,14 @@ fn client_config() -> ConnectionConfig {
     }
 }
 
-async fn serve(config: HttpServerConfig) -> (String, NethernetListener<HttpSignalingServer>) {
+async fn serve(config: HttpServerConfig) -> (String, NetherServer) {
     let signaling = HttpSignalingServer::bind("127.0.0.1:0".parse().unwrap(), config)
         .await
         .unwrap();
     signaling.set_server_data(ServerData::new("test".into(), "world".into()));
 
     let addr = signaling.local_addr();
-    let listener = NethernetListener::bind(signaling).await.unwrap();
+    let listener = NetherServer::bind(signaling).await.unwrap();
 
     (format!("http://{addr}"), listener)
 }
@@ -61,10 +59,10 @@ async fn offer_is_negotiated_over_the_endpoint() {
         }
     });
 
-    let signaling = Arc::new(HttpSignaling::new(NETWORK_ID.to_string()).unwrap());
+    let signaling = HttpSignaling::new(NETWORK_ID.to_string()).unwrap();
     let mut stream = tokio::time::timeout(
         Duration::from_secs(20),
-        NethernetStream::connect_with(signaling, url, client_config()),
+        NetherClient::connect_with(signaling, url, client_config()),
     )
     .await
     .expect("negotiation timed out")
@@ -85,10 +83,10 @@ async fn offer_is_negotiated_over_the_endpoint() {
 async fn an_offer_without_an_identity_is_turned_away() {
     let (url, _listener) = serve(server_config()).await;
 
-    let signaling = Arc::new(HttpSignaling::new(NETWORK_ID.to_string()).unwrap());
+    let signaling = HttpSignaling::new(NETWORK_ID.to_string()).unwrap();
     let error = tokio::time::timeout(
         Duration::from_secs(20),
-        NethernetStream::connect_with(signaling, url, ConnectionConfig::default()),
+        NetherClient::connect_with(signaling, url, ConnectionConfig::default()),
     )
     .await
     .expect("negotiation timed out");

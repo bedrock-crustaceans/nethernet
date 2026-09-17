@@ -6,7 +6,7 @@
 //! - Handles packets from clients
 
 use nethernet_tokio::signaling::lan::LanSignaling;
-use nethernet_tokio::{AcceptedSession, NethernetListener, ServerData};
+use nethernet_tokio::{AcceptedSession, NetherServer, ServerData};
 use std::net::SocketAddr;
 use tracing::Level;
 use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("   Listening on: {}", bind_addr);
     tracing::info!("   Broadcasting discovery responses...");
 
-    let mut listener = NethernetListener::bind(signaling).await?;
+    let mut listener = NetherServer::bind(signaling).await?;
     tracing::info!("✅ Server ready and responding to LAN discovery");
 
     loop {

@@ -6,6 +6,7 @@ use nethernet::connection::{Connection, IceMode};
 use nethernet::error::ProtocolError;
 use nethernet::protocol::Signal;
 use nethernet::session::{Channel, Session};
+use nethernet::signaling::http::join;
 use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
@@ -15,24 +16,24 @@ use std::time::{Duration, Instant};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_CHUNK: usize = 4096;
 
-pub struct NethernetHttpClientPlugin;
+pub struct NetherHttpClientPlugin;
 
-impl Plugin for NethernetHttpClientPlugin {
+impl Plugin for NetherHttpClientPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<NethernetHttpClientEvent>();
+        app.add_message::<NetherHttpClientEvent>();
         app.add_systems(
             PreUpdate,
             Self::update
-                .in_set(NethernetHttpClientSet)
-                .run_if(resource_exists::<NethernetHttpClient>),
+                .in_set(NetherHttpClientSet)
+                .run_if(resource_exists::<NetherHttpClient>),
         );
     }
 }
 
-impl NethernetHttpClientPlugin {
+impl NetherHttpClientPlugin {
     fn update(
-        mut client: ResMut<NethernetHttpClient>,
-        mut events: MessageWriter<NethernetHttpClientEvent>,
+        mut client: ResMut<NetherHttpClient>,
+        mut events: MessageWriter<NetherHttpClientEvent>,
     ) {
         client.update();
 
@@ -42,13 +43,13 @@ impl NethernetHttpClientPlugin {
     }
 }
 
-/// PreUpdate set containing NethernetHttpClientPlugin's update system. Order your own
-/// systems `.after(NethernetHttpClientSet)` to see this tick's events/received data.
+/// PreUpdate set containing NetherHttpClientPlugin's update system. Order your own
+/// systems `.after(NetherHttpClientSet)` to see this tick's events/received data.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct NethernetHttpClientSet;
+pub struct NetherHttpClientSet;
 
 #[derive(Message, Clone, Copy, Debug)]
-pub enum NethernetHttpClientEvent {
+pub enum NetherHttpClientEvent {
     Connected,
     ConnectFailed,
     Disconnected,
@@ -135,17 +136,17 @@ struct Join {
 }
 
 #[derive(Resource, Default)]
-pub struct NethernetHttpClient {
+pub struct NetherHttpClient {
     join: Option<Join>,
     connection: Option<ConnectionDriver>,
     connecting_since: Option<Instant>,
     ready: bool,
-    events: VecDeque<NethernetHttpClientEvent>,
+    events: VecDeque<NetherHttpClientEvent>,
     received: VecDeque<Box<[u8]>>,
     received_unreliable: VecDeque<Box<[u8]>>,
 }
 
-impl NethernetHttpClient {
+impl NetherHttpClient {
     pub fn new() -> Self {
         Self::default()
     }
@@ -188,8 +189,8 @@ impl NethernetHttpClient {
 
         let request = http_wire::encode_post(
             host,
-            &format!("/v1/join/{local_network_id}"),
-            "application/sdp",
+            &join::join_path(&local_network_id),
+            join::CONTENT_TYPE,
             &offer.data,
         );
 
@@ -215,8 +216,7 @@ impl NethernetHttpClient {
         self.connecting_since = None;
         if self.ready {
             self.ready = false;
-            self.events
-                .push_back(NethernetHttpClientEvent::Disconnected);
+            self.events.push_back(NetherHttpClientEvent::Disconnected);
         }
     }
 
@@ -243,7 +243,7 @@ impl NethernetHttpClient {
         self.received_unreliable.pop_front()
     }
 
-    pub fn next_event(&mut self) -> Option<NethernetHttpClientEvent> {
+    pub fn next_event(&mut self) -> Option<NetherHttpClientEvent> {
         self.events.pop_front()
     }
 
@@ -256,13 +256,8 @@ impl NethernetHttpClient {
                     join.state = state;
                     self.join = Some(join);
                 }
-                JoinStep::Done(code, body) if (200..300).contains(&code) => {
-                    if body.trim().parse::<u32>().is_ok() {
-                        tracing::debug!("server rejected the offer: {body}");
-                        self.connecting_since = None;
-                        self.events
-                            .push_back(NethernetHttpClientEvent::ConnectFailed);
-                    } else {
+                JoinStep::Done(code, body) => match join::validate_join_response(code, &body) {
+                    Ok(()) => {
                         let Join {
                             mut connection,
                             session_socket,
@@ -275,15 +270,18 @@ impl NethernetHttpClient {
                                 Some(ConnectionDriver::new(session_socket, connection));
                         } else {
                             self.connecting_since = None;
-                            self.events
-                                .push_back(NethernetHttpClientEvent::ConnectFailed);
+                            self.events.push_back(NetherHttpClientEvent::ConnectFailed);
                         }
                     }
-                }
-                JoinStep::Done(..) | JoinStep::Failed => {
+                    Err(e) => {
+                        tracing::debug!("join failed: {e}");
+                        self.connecting_since = None;
+                        self.events.push_back(NetherHttpClientEvent::ConnectFailed);
+                    }
+                },
+                JoinStep::Failed => {
                     self.connecting_since = None;
-                    self.events
-                        .push_back(NethernetHttpClientEvent::ConnectFailed);
+                    self.events.push_back(NetherHttpClientEvent::ConnectFailed);
                 }
             }
         }
@@ -297,7 +295,7 @@ impl NethernetHttpClient {
                     ConnectionEvent::Ready if !self.ready => {
                         self.ready = true;
                         self.connecting_since = None;
-                        self.events.push_back(NethernetHttpClientEvent::Connected);
+                        self.events.push_back(NetherHttpClientEvent::Connected);
                     }
                     ConnectionEvent::Ready => {}
                     ConnectionEvent::Message(Channel::Reliable, data) => {
@@ -313,9 +311,9 @@ impl NethernetHttpClient {
                         self.connecting_since = None;
                         self.ready = false;
                         self.events.push_back(if was_ready {
-                            NethernetHttpClientEvent::Disconnected
+                            NetherHttpClientEvent::Disconnected
                         } else {
-                            NethernetHttpClientEvent::ConnectFailed
+                            NetherHttpClientEvent::ConnectFailed
                         });
                     }
                 }
@@ -331,9 +329,9 @@ impl NethernetHttpClient {
             self.connecting_since = None;
             self.ready = false;
             self.events.push_back(if was_ready {
-                NethernetHttpClientEvent::Disconnected
+                NetherHttpClientEvent::Disconnected
             } else {
-                NethernetHttpClientEvent::ConnectFailed
+                NetherHttpClientEvent::ConnectFailed
             });
         }
     }

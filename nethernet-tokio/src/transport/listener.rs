@@ -1,8 +1,8 @@
 use crate::addr::Addr;
-use crate::error::{NethernetError, Result, SignalErrorCode};
+use crate::error::{NetherError, Result, SignalErrorCode};
 use crate::protocol::{Signal, SignalType};
 use crate::session::{AcceptedSession, Command, Session};
-use crate::signaling::Signaling;
+use crate::signaling::ServerSignaling;
 use crate::transport::{ConnectionConfig, local_bind_addr};
 use futures::{Stream, StreamExt};
 use nethernet::connection::{Connection as SansConnection, IceMode};
@@ -10,7 +10,6 @@ use nethernet::identity::{PlayerInfo, validate_sdp};
 use nethernet::session::Session as SansSession;
 use nethernet::util::candidate;
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -21,8 +20,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// Signals an error back to the remote connection referenced by the IDs.
-async fn signal_error<S: Signaling>(
-    signaling: &Arc<S>,
+async fn signal_error(
+    signaling: &ServerSignaling,
     connection_id: u64,
     network_id: String,
     code: SignalErrorCode,
@@ -45,27 +44,29 @@ type ConnectionKey = (String, u64);
 type SignalDispatchers = HashMap<ConnectionKey, mpsc::UnboundedSender<Signal>>;
 
 /// NetherNet listener - accepts NetherNet connections
-pub struct NethernetListener<S: Signaling> {
+pub struct NetherServer {
     incoming: mpsc::UnboundedReceiver<AcceptedSession>,
     local_addr: Addr,
     cancel_token: CancellationToken,
     signal_handler_task: Option<JoinHandle<()>>,
-    _phantom: PhantomData<S>,
 }
 
-impl<S: Signaling + 'static> NethernetListener<S> {
-    /// Create a new [`NethernetListener`] on the local network of the signaling implementation.
+impl NetherServer {
+    /// Create a new [`NetherServer`] on the local network of the signaling implementation.
     ///
     /// The returned listener is ready to accept inbound sessions. It initializes internal
     /// queues and dispatch structures, and spawns a background task to process signaling
     /// events; dropping the listener cancels that task.
-    pub async fn bind(signaling: S) -> Result<Self> {
+    pub async fn bind(signaling: impl Into<ServerSignaling>) -> Result<Self> {
         Self::bind_with(signaling, ConnectionConfig::default()).await
     }
 
-    /// Creates a [`NethernetListener`] using the timeouts of the given configuration.
-    pub async fn bind_with(signaling: S, config: ConnectionConfig) -> Result<Self> {
-        let signaling = Arc::new(signaling);
+    /// Creates a [`NetherServer`] using the timeouts of the given configuration.
+    pub async fn bind_with(
+        signaling: impl Into<ServerSignaling>,
+        config: ConnectionConfig,
+    ) -> Result<Self> {
+        let signaling: ServerSignaling = signaling.into();
         let local_addr = Addr::network(signaling.network_id());
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
@@ -78,14 +79,13 @@ impl<S: Signaling + 'static> NethernetListener<S> {
             local_addr,
             cancel_token,
             signal_handler_task: Some(signal_handler_task),
-            _phantom: PhantomData,
         };
 
         Ok(listener)
     }
 
     fn start_signal_handler(
-        signaling: Arc<S>,
+        signaling: ServerSignaling,
         incoming_tx: mpsc::UnboundedSender<AcceptedSession>,
         cancel_token: CancellationToken,
         config: ConnectionConfig,
@@ -137,7 +137,7 @@ impl<S: Signaling + 'static> NethernetListener<S> {
     /// once it is ready.
     async fn handle_offer(
         signal: Signal,
-        signaling: &Arc<S>,
+        signaling: &ServerSignaling,
         incoming_tx: &mpsc::UnboundedSender<AcceptedSession>,
         dispatchers: &mut SignalDispatchers,
         config: ConnectionConfig,
@@ -147,7 +147,7 @@ impl<S: Signaling + 'static> NethernetListener<S> {
 
         let cancel_token = config.cancel_token.clone();
         let result = tokio::select! {
-            _ = cancel_token.cancelled() => Err((None, NethernetError::ConnectionClosed)),
+            _ = cancel_token.cancelled() => Err((None, NetherError::ConnectionClosed)),
             result = Self::answer_offer(signal, signaling, incoming_tx, dispatchers, config.clone()) => result,
         };
 
@@ -166,11 +166,11 @@ impl<S: Signaling + 'static> NethernetListener<S> {
     /// connection when a step fails.
     async fn answer_offer(
         signal: Signal,
-        signaling: &Arc<S>,
+        signaling: &ServerSignaling,
         incoming_tx: &mpsc::UnboundedSender<AcceptedSession>,
         dispatchers: &mut SignalDispatchers,
         config: ConnectionConfig,
-    ) -> std::result::Result<(), (Option<SignalErrorCode>, NethernetError)> {
+    ) -> std::result::Result<(), (Option<SignalErrorCode>, NetherError)> {
         let (remote_description, remote_candidates) = SansConnection::parse_offer(&signal)
             .map_err(|e| {
                 (
@@ -201,10 +201,7 @@ impl<S: Signaling + 'static> NethernetListener<S> {
                     remote_address,
                 ))),
                 Err(e) => {
-                    return Err((
-                        Some(SignalErrorCode::NotLoggedIn),
-                        NethernetError::Identity(e),
-                    ));
+                    return Err((Some(SignalErrorCode::NotLoggedIn), NetherError::Identity(e)));
                 }
             },
             None => signaled_player,
@@ -213,20 +210,20 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         let socket = Arc::new(UdpSocket::bind(local_bind_addr()).await.map_err(|e| {
             (
                 Some(SignalErrorCode::FailedToCreatePeerConnection),
-                NethernetError::from(e),
+                NetherError::from(e),
             )
         })?);
         let bound_addr = socket.local_addr().map_err(|e| {
             (
                 Some(SignalErrorCode::FailedToCreatePeerConnection),
-                NethernetError::from(e),
+                NetherError::from(e),
             )
         })?;
 
         let (session, description) = SansSession::new(bound_addr, false).map_err(|e| {
             (
                 Some(SignalErrorCode::FailedToCreatePeerConnection),
-                NethernetError::from(e),
+                NetherError::from(e),
             )
         })?;
 
@@ -258,7 +255,7 @@ impl<S: Signaling + 'static> NethernetListener<S> {
             Some(identity) => identity.augment(&answer.data).map_err(|e| {
                 (
                     Some(SignalErrorCode::FailedToCreateAnswer),
-                    NethernetError::Identity(e),
+                    NetherError::Identity(e),
                 )
             })?,
             None => answer.data,
@@ -306,7 +303,7 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         tokio::spawn(async move {
             let cancel_token = config.cancel_token.clone();
             let result = tokio::select! {
-                _ = cancel_token.cancelled() => Err((None, NethernetError::ConnectionClosed)),
+                _ = cancel_token.cancelled() => Err((None, NetherError::ConnectionClosed)),
                 result = wait_ready(ready_rx, config.timeouts.start + config.timeouts.channel) => result,
             };
 
@@ -335,13 +332,13 @@ impl<S: Signaling + 'static> NethernetListener<S> {
         self.incoming
             .recv()
             .await
-            .ok_or(NethernetError::ConnectionClosed)
+            .ok_or(NetherError::ConnectionClosed)
     }
 
     /// Closes the listener and every session that has not been accepted yet.
     ///
-    /// Blocked calls to [`NethernetListener::accept`] return
-    /// [`NethernetError::ConnectionClosed`] once the listener is closed.
+    /// Blocked calls to [`NetherServer::accept`] return
+    /// [`NetherError::ConnectionClosed`] once the listener is closed.
     pub async fn close(&mut self) -> Result<()> {
         self.cancel_token.cancel();
         self.incoming.close();
@@ -392,25 +389,25 @@ fn spawn_late_signal_forwarder(
 async fn wait_ready(
     ready_rx: tokio::sync::oneshot::Receiver<()>,
     timeout: std::time::Duration,
-) -> std::result::Result<(), (Option<SignalErrorCode>, NethernetError)> {
+) -> std::result::Result<(), (Option<SignalErrorCode>, NetherError)> {
     tokio::time::timeout(timeout, ready_rx)
         .await
         .map_err(|_| {
             (
                 Some(SignalErrorCode::NegotiationTimeoutWaitingForAccept),
-                NethernetError::Timeout,
+                NetherError::Timeout,
             )
         })?
-        .map_err(|_| (None, NethernetError::ConnectionClosed))
+        .map_err(|_| (None, NetherError::ConnectionClosed))
 }
 
-impl<S: Signaling> Drop for NethernetListener<S> {
+impl Drop for NetherServer {
     fn drop(&mut self) {
         self.cancel_token.cancel();
     }
 }
 
-impl<S: Signaling + 'static + Unpin> Stream for NethernetListener<S> {
+impl Stream for NetherServer {
     type Item = AcceptedSession;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

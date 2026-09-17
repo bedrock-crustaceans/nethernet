@@ -1,8 +1,8 @@
 pub mod listener;
 pub mod stream;
 
-pub use listener::NethernetListener;
-pub use stream::NethernetStream;
+pub use listener::NetherServer;
+pub use stream::NetherClient;
 
 use nethernet::identity::{ServerIdentity, TokenTrust};
 use std::fmt;

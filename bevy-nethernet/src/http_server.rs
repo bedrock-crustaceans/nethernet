@@ -1,6 +1,6 @@
 use crate::connection::{ConnectionDriver, ConnectionEvent, bind_session_socket};
 use crate::http_wire;
-use crate::server::NethernetSessionId;
+use crate::server::NetherSessionId;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use nethernet::connection::{Connection, IceMode};
@@ -20,24 +20,24 @@ const MAX_ACCEPTS_PER_TICK: usize = 64;
 const READ_CHUNK: usize = 4096;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
-pub struct NethernetHttpServerPlugin;
+pub struct NetherHttpServerPlugin;
 
-impl Plugin for NethernetHttpServerPlugin {
+impl Plugin for NetherHttpServerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<NethernetHttpServerEvent>();
+        app.add_message::<NetherHttpServerEvent>();
         app.add_systems(
             PreUpdate,
             Self::update
-                .in_set(NethernetHttpServerSet)
-                .run_if(resource_exists::<NethernetHttpServer>),
+                .in_set(NetherHttpServerSet)
+                .run_if(resource_exists::<NetherHttpServer>),
         );
     }
 }
 
-impl NethernetHttpServerPlugin {
+impl NetherHttpServerPlugin {
     fn update(
-        mut server: ResMut<NethernetHttpServer>,
-        mut events: MessageWriter<NethernetHttpServerEvent>,
+        mut server: ResMut<NetherHttpServer>,
+        mut events: MessageWriter<NetherHttpServerEvent>,
     ) {
         server.update();
 
@@ -47,15 +47,15 @@ impl NethernetHttpServerPlugin {
     }
 }
 
-/// PreUpdate set containing NethernetHttpServerPlugin's update system. Order your own
-/// systems `.after(NethernetHttpServerSet)` to see this tick's events/received data.
+/// PreUpdate set containing NetherHttpServerPlugin's update system. Order your own
+/// systems `.after(NetherHttpServerSet)` to see this tick's events/received data.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct NethernetHttpServerSet;
+pub struct NetherHttpServerSet;
 
 #[derive(Message, Clone, Debug)]
-pub enum NethernetHttpServerEvent {
-    SessionConnected(NethernetSessionId),
-    SessionDisconnected(NethernetSessionId),
+pub enum NetherHttpServerEvent {
+    SessionConnected(NetherSessionId),
+    SessionDisconnected(NetherSessionId),
 }
 
 struct TcpConn {
@@ -74,18 +74,18 @@ struct SessionEntry {
 }
 
 #[derive(Resource)]
-pub struct NethernetHttpServer {
+pub struct NetherHttpServer {
     listener: TcpListener,
     signaler: HttpSignaler,
     next_conn_id: u64,
     connections: HashMap<u64, TcpConn>,
-    sessions: HashMap<NethernetSessionId, SessionEntry>,
-    received: VecDeque<(NethernetSessionId, Box<[u8]>)>,
-    received_unreliable: VecDeque<(NethernetSessionId, Box<[u8]>)>,
-    events: VecDeque<NethernetHttpServerEvent>,
+    sessions: HashMap<NetherSessionId, SessionEntry>,
+    received: VecDeque<(NetherSessionId, Box<[u8]>)>,
+    received_unreliable: VecDeque<(NetherSessionId, Box<[u8]>)>,
+    events: VecDeque<NetherHttpServerEvent>,
 }
 
-impl NethernetHttpServer {
+impl NetherHttpServer {
     pub fn bind<T>(bind_addr: SocketAddr, conf: T) -> std::io::Result<Self>
     where
         T: FnOnce(&mut HttpSignalerConfig),
@@ -118,7 +118,7 @@ impl NethernetHttpServer {
             .handle(HttpSignalerInput::SetServerData(Box::new(data)));
     }
 
-    pub fn sessions(&self) -> impl Iterator<Item = &NethernetSessionId> {
+    pub fn sessions(&self) -> impl Iterator<Item = &NetherSessionId> {
         self.sessions
             .iter()
             .filter(|(_, entry)| entry.ready)
@@ -127,7 +127,7 @@ impl NethernetHttpServer {
 
     pub fn send(
         &mut self,
-        id: &NethernetSessionId,
+        id: &NetherSessionId,
         data: &[u8],
     ) -> Result<(), nethernet::error::ProtocolError> {
         self.send_on(id, Channel::Reliable, data)
@@ -135,7 +135,7 @@ impl NethernetHttpServer {
 
     pub fn send_unreliable(
         &mut self,
-        id: &NethernetSessionId,
+        id: &NetherSessionId,
         data: &[u8],
     ) -> Result<(), nethernet::error::ProtocolError> {
         self.send_on(id, Channel::Unreliable, data)
@@ -143,7 +143,7 @@ impl NethernetHttpServer {
 
     fn send_on(
         &mut self,
-        id: &NethernetSessionId,
+        id: &NetherSessionId,
         channel: Channel,
         data: &[u8],
     ) -> Result<(), nethernet::error::ProtocolError> {
@@ -155,22 +155,22 @@ impl NethernetHttpServer {
         entry.driver.send(channel, data.into())
     }
 
-    pub fn recv(&mut self) -> Option<(NethernetSessionId, Box<[u8]>)> {
+    pub fn recv(&mut self) -> Option<(NetherSessionId, Box<[u8]>)> {
         self.received.pop_front()
     }
 
-    pub fn recv_unreliable(&mut self) -> Option<(NethernetSessionId, Box<[u8]>)> {
+    pub fn recv_unreliable(&mut self) -> Option<(NetherSessionId, Box<[u8]>)> {
         self.received_unreliable.pop_front()
     }
 
-    pub fn disconnect(&mut self, id: &NethernetSessionId) {
+    pub fn disconnect(&mut self, id: &NetherSessionId) {
         if self.sessions.remove(id).is_some() {
             self.events
-                .push_back(NethernetHttpServerEvent::SessionDisconnected(id.clone()));
+                .push_back(NetherHttpServerEvent::SessionDisconnected(id.clone()));
         }
     }
 
-    pub fn next_event(&mut self) -> Option<NethernetHttpServerEvent> {
+    pub fn next_event(&mut self) -> Option<NetherHttpServerEvent> {
         self.events.pop_front()
     }
 
@@ -317,7 +317,7 @@ impl NethernetHttpServer {
                     sdp: answer_sdp,
                 });
                 self.sessions.insert(
-                    NethernetSessionId {
+                    NetherSessionId {
                         network_id: offer.network_id,
                         connection_id: offer.connection_id,
                     },
@@ -348,7 +348,7 @@ impl NethernetHttpServer {
                     ConnectionEvent::Ready if !entry.ready => {
                         entry.ready = true;
                         self.events
-                            .push_back(NethernetHttpServerEvent::SessionConnected(id.clone()));
+                            .push_back(NetherHttpServerEvent::SessionConnected(id.clone()));
                     }
                     ConnectionEvent::Ready => {}
                     ConnectionEvent::Message(Channel::Reliable, data) => {

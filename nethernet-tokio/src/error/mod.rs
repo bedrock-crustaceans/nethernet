@@ -7,7 +7,7 @@ pub use nethernet::error::SignalErrorCode;
 
 /// Errors related to the NetherNet protocol.
 #[derive(Debug, Error)]
-pub enum NethernetError {
+pub enum NetherError {
     /// ICE connection error
     #[error("ICE error: {0}")]
     Ice(String),
@@ -101,4 +101,4 @@ pub enum SignalingError {
     ParseError(String),
 }
 
-pub type Result<T> = std::result::Result<T, NethernetError>;
+pub type Result<T> = std::result::Result<T, NetherError>;

@@ -6,11 +6,11 @@ use nethernet::protocol::NetherCodec;
 ///
 /// This builder is intended for values passed to `Signaling::set_pong_data`.
 #[derive(Debug, Clone)]
-pub struct NethernetMotd {
+pub struct NetherMotd {
     server_data: ServerData,
 }
 
-impl NethernetMotd {
+impl NetherMotd {
     /// Creates a new MOTD builder with sensible defaults.
     ///
     /// Defaults:

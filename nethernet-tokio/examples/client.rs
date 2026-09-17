@@ -5,11 +5,10 @@
 //! - Connects via WebRTC
 //! - Sends and receives packets
 
-use nethernet_tokio::NethernetStream;
+use nethernet_tokio::NetherClient;
 use nethernet_tokio::signaling::lan::LanSignaling;
 use rand::Rng;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::Level;
@@ -32,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let network_id = u64::from_le_bytes(network_id_bytes);
     let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
 
-    let signaling = Arc::new(LanSignaling::new(network_id, bind_addr).await?);
+    let signaling = LanSignaling::new(network_id, bind_addr).await?;
 
     tracing::info!("NetherNet client starting");
     tracing::info!("   Network ID: {}", network_id);
@@ -60,8 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("🔗 Connecting to network ID: {}", server_network_id);
 
-    let mut stream =
-        NethernetStream::connect(signaling.clone(), server_network_id.to_string()).await?;
+    let mut stream = NetherClient::connect(signaling, server_network_id.to_string()).await?;
 
     tracing::info!("✅ Connected to {}", stream.remote_addr().await);
 

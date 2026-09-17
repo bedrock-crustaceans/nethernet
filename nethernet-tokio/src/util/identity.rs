@@ -1,6 +1,6 @@
 //! Loading the identity a server signs its answers with off the filesystem.
 
-use crate::error::{NethernetError, Result};
+use crate::error::{NetherError, Result};
 use nethernet::identity::ServerIdentity;
 use std::path::Path;
 use std::time::SystemTime;
@@ -28,7 +28,7 @@ pub async fn from_pem_or_create(
             write(pem, &identity.to_pem()?).await?;
             Ok(identity)
         }
-        Err(e) => Err(NethernetError::Io(e)),
+        Err(e) => Err(NetherError::Io(e)),
     }
 }
 

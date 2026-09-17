@@ -14,15 +14,14 @@ fn spin<F: FnMut() -> bool>(deadline: Instant, mut done: F) -> bool {
 
 #[test]
 fn client_connects_to_server_over_http_and_exchanges_data() {
-    let mut server =
-        NethernetHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |config| {
-            config.token_trust = None;
-        })
-        .unwrap();
+    let mut server = NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |config| {
+        config.token_trust = None;
+    })
+    .unwrap();
     server.set_server_data(ServerData::new("Test Server".into(), "World".into()));
     let server_url = format!("http://{}", server.local_addr().unwrap());
 
-    let mut client = NethernetHttpClient::new();
+    let mut client = NetherHttpClient::new();
     client.connect("5678".to_string(), server_url).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(10);

@@ -1,10 +1,10 @@
 //! Tokio-based NetherNet protocol implementation.
 //!
 //! This crate provides high-level types for creating NetherNet clients and servers using WebRTC:
-//! - [`NethernetStream`] for client connections
-//! - [`NethernetListener`] for server-side connection acceptance
+//! - [`NetherClient`] for client connections
+//! - [`NetherServer`] for server-side connection acceptance
 //! - [`Session`] for WebRTC peer connection management
-//! - [`Signaling`] trait and its implementations, over LAN discovery and over HTTP
+//! - [`ServerSignaling`] and [`ClientSignaling`], over LAN discovery and over HTTP
 
 pub mod addr;
 pub mod builders;
@@ -19,12 +19,12 @@ pub mod util;
 pub use addr::Addr;
 pub use builders::*;
 pub use credentials::{Credentials, IceServer};
-pub use error::{NethernetError, Result};
+pub use error::{NetherError, Result};
 pub use nethernet::identity::{PlayerInfo, ServerIdentity, TokenTrust};
 pub use protocol::packet::discovery::{MessagePacket, RequestPacket, ResponsePacket, ServerData};
-pub use protocol::{ConnectError, Message, MessageSegment, Signal, SignalType};
+pub use protocol::{Message, MessageSegment, Signal, SignalType};
 pub use session::{AcceptedSession, Session, SessionReceiver};
-pub use signaling::Signaling;
 pub use signaling::http::{HttpServerConfig, HttpSignaling, HttpSignalingServer};
 pub use signaling::lan::{LanConfig, LanSignaling};
-pub use transport::{ConnectionConfig, NethernetListener, NethernetStream, Timeouts};
+pub use signaling::{ClientSignaling, ServerSignaling};
+pub use transport::{ConnectionConfig, NetherClient, NetherServer, Timeouts};

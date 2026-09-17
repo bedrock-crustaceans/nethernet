@@ -15,7 +15,7 @@ pub(crate) mod command;
 pub(crate) use command::Command;
 
 use crate::addr::Addr;
-use crate::error::{NethernetError, Result};
+use crate::error::{NetherError, Result};
 use bytes::Bytes;
 use nethernet::connection::Connection as SansConnection;
 use nethernet::identity::PlayerInfo;
@@ -196,7 +196,7 @@ impl Session {
                     },
                     command = commands.recv() => match command {
                         Some(Command::Send(channel, data, reply)) => {
-                            let _ = reply.send(connection.send(channel, data).map_err(NethernetError::from));
+                            let _ = reply.send(connection.send(channel, data).map_err(NetherError::from));
                         }
                         Some(Command::Signal(signal)) => {
                             if let Err(e) = connection.handle_signal(&signal) {
@@ -281,10 +281,8 @@ impl Session {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(Command::Send(channel, data, reply_tx))
-            .map_err(|_| NethernetError::ConnectionClosed)?;
-        reply_rx
-            .await
-            .map_err(|_| NethernetError::ConnectionClosed)?
+            .map_err(|_| NetherError::ConnectionClosed)?;
+        reply_rx.await.map_err(|_| NetherError::ConnectionClosed)?
     }
 
     /// Shuts down the session by stopping its background driver.

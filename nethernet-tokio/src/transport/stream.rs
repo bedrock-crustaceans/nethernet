@@ -1,8 +1,8 @@
 use crate::addr::Addr;
-use crate::error::{NethernetError, Result, SignalErrorCode};
+use crate::error::{NetherError, Result, SignalErrorCode};
 use crate::protocol::{Signal, SignalType};
 use crate::session::{Command, Session, SessionReceiver};
-use crate::signaling::Signaling;
+use crate::signaling::ClientSignaling;
 use crate::transport::{ConnectionConfig, local_bind_addr};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
@@ -66,7 +66,7 @@ impl Stream for SessionStream {
 }
 
 /// NetherNet stream - data transmission over a NetherNet session.
-pub struct NethernetStream {
+pub struct NetherClient {
     session: Session,
     unreliable: SessionReceiver,
     reader: StreamReader<SessionStream, Bytes>,
@@ -74,29 +74,30 @@ pub struct NethernetStream {
     shutdown_future: Option<ReusableBoxFuture<'static, Result<()>>>,
 }
 
-impl NethernetStream {
-    /// Establishes a NethernetStream with the remote network referenced by the ID.
+impl NetherClient {
+    /// Establishes a NetherClient with the remote network referenced by the ID.
     ///
     /// An offer is signaled with the parameters of a freshly created session, and the
     /// answer signaled back by the remote connection is used to complete the connection.
-    pub async fn connect<S: Signaling + 'static>(
-        signaling: Arc<S>,
+    pub async fn connect(
+        signaling: impl Into<ClientSignaling>,
         remote_network_id: String,
     ) -> Result<Self> {
         Self::connect_with(signaling, remote_network_id, ConnectionConfig::default()).await
     }
 
-    /// Establishes a NethernetStream using the timeouts of the given configuration.
+    /// Establishes a NetherClient using the timeouts of the given configuration.
     ///
     /// A negotiation that runs out of time is retried until the configured number of
     /// attempts is used up. Every attempt negotiates under a connection ID of its own,
     /// since a remote connection that answers the previous offer too late would answer an
     /// ID this side no longer waits for.
-    pub async fn connect_with<S: Signaling + 'static>(
-        signaling: Arc<S>,
+    pub async fn connect_with(
+        signaling: impl Into<ClientSignaling>,
         remote_network_id: String,
         config: ConnectionConfig,
     ) -> Result<Self> {
+        let signaling: ClientSignaling = signaling.into();
         let attempts = config.attempts.max(1);
 
         for attempt in 1..=attempts {
@@ -106,7 +107,7 @@ impl NethernetStream {
 
             let cancel_token = config.cancel_token.clone();
             let result = tokio::select! {
-                _ = cancel_token.cancelled() => Err((None, NethernetError::ConnectionClosed)),
+                _ = cancel_token.cancelled() => Err((None, NetherError::ConnectionClosed)),
                 result = Self::negotiate(
                     &signaling,
                     &remote_network_id,
@@ -131,7 +132,7 @@ impl NethernetStream {
             }
 
             // Anything else is an answer this side understood, so another offer changes nothing
-            if !matches!(error, NethernetError::Timeout) || attempt == attempts {
+            if !matches!(error, NetherError::Timeout) || attempt == attempts {
                 return Err(error);
             }
 
@@ -142,30 +143,30 @@ impl NethernetStream {
             );
         }
 
-        Err(NethernetError::Timeout)
+        Err(NetherError::Timeout)
     }
 
     /// Negotiates the connection, reporting the error code to be signaled back to the
     /// remote connection when a step fails.
-    async fn negotiate<S: Signaling + 'static>(
-        signaling: &Arc<S>,
+    async fn negotiate(
+        signaling: &ClientSignaling,
         remote_network_id: &str,
         connection_id: u64,
         config: ConnectionConfig,
-    ) -> std::result::Result<Self, (Option<SignalErrorCode>, NethernetError)> {
+    ) -> std::result::Result<Self, (Option<SignalErrorCode>, NetherError)> {
         let socket = Arc::new(
             UdpSocket::bind(local_bind_addr())
                 .await
-                .map_err(|e| (None, NethernetError::from(e)))?,
+                .map_err(|e| (None, NetherError::from(e)))?,
         );
         let bound_addr = socket
             .local_addr()
-            .map_err(|e| (None, NethernetError::from(e)))?;
+            .map_err(|e| (None, NetherError::from(e)))?;
 
         let (session, description) = SansSession::new(bound_addr, true).map_err(|e| {
             (
                 Some(SignalErrorCode::FailedToCreatePeerConnection),
-                NethernetError::from(e),
+                NetherError::from(e),
             )
         })?;
 
@@ -193,7 +194,7 @@ impl NethernetStream {
             Some(identity) => identity.augment(&offer.data).map_err(|e| {
                 (
                     Some(SignalErrorCode::FailedToCreateOffer),
-                    NethernetError::Identity(e),
+                    NetherError::Identity(e),
                 )
             })?,
             None => offer.data,
@@ -236,17 +237,17 @@ impl NethernetStream {
             .map_err(|_| {
                 (
                     Some(SignalErrorCode::NegotiationTimeoutWaitingForResponse),
-                    NethernetError::Timeout,
+                    NetherError::Timeout,
                 )
             })?
-            .ok_or((None, NethernetError::ConnectionClosed))?;
+            .ok_or((None, NetherError::ConnectionClosed))?;
 
             match signal.signal_type {
                 SignalType::Answer => {
                     connection.handle_signal(&signal).map_err(|e| {
                         (
                             Some(SignalErrorCode::FailedToSetRemoteDescription),
-                            NethernetError::from(e),
+                            NetherError::from(e),
                         )
                     })?;
                     if !need_candidate {
@@ -256,17 +257,17 @@ impl NethernetStream {
                 SignalType::Candidate => {
                     connection
                         .handle_signal(&signal)
-                        .map_err(|e| (Some(SignalErrorCode::Ice), NethernetError::from(e)))?;
+                        .map_err(|e| (Some(SignalErrorCode::Ice), NetherError::from(e)))?;
                     need_candidate = false;
                 }
                 SignalType::Error => {
                     let code = parse_error_code(&signal.data);
-                    return Err((None, NethernetError::Signaled(code)));
+                    return Err((None, NetherError::Signaled(code)));
                 }
                 SignalType::Offer => {
                     return Err((
                         Some(SignalErrorCode::IncomingConnectionIgnored),
-                        NethernetError::Other("received offer while dialing".to_string()),
+                        NetherError::Other("received offer while dialing".to_string()),
                     ));
                 }
             }
@@ -294,15 +295,15 @@ impl NethernetStream {
             .map_err(|_| {
                 (
                     Some(SignalErrorCode::NegotiationTimeoutWaitingForAccept),
-                    NethernetError::Timeout,
+                    NetherError::Timeout,
                 )
             })?
-            .map_err(|_| (None, NethernetError::ConnectionClosed))?;
+            .map_err(|_| (None, NetherError::ConnectionClosed))?;
 
         Ok(Self::from_session(session, reliable, unreliable))
     }
 
-    /// Constructs a NethernetStream from an existing Session and its two channel
+    /// Constructs a NetherClient from an existing Session and its two channel
     /// receivers.
     pub(crate) fn from_session(
         session: Session,
@@ -364,7 +365,7 @@ impl NethernetStream {
     }
 }
 
-impl AsyncRead for NethernetStream {
+impl AsyncRead for NetherClient {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -374,7 +375,7 @@ impl AsyncRead for NethernetStream {
     }
 }
 
-impl AsyncWrite for NethernetStream {
+impl AsyncWrite for NetherClient {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,

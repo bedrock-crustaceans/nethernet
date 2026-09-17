@@ -1,3 +1,3 @@
 mod motd;
 
-pub use motd::NethernetMotd;
+pub use motd::NetherMotd;

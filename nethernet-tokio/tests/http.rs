@@ -2,7 +2,7 @@
 
 use futures::StreamExt;
 use nethernet_tokio::signaling::http::HttpSignaling;
-use nethernet_tokio::{NethernetError, Signal, SignalType, Signaling};
+use nethernet_tokio::{NetherError, Signal, SignalType};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -92,7 +92,7 @@ async fn error_code_in_the_response_is_reported() {
         .await
         .unwrap_err();
 
-    assert!(matches!(err, NethernetError::Signaled(_)), "{err}");
+    assert!(matches!(err, NetherError::Signaled(_)), "{err}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

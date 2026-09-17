@@ -25,7 +25,7 @@ The WebRTC-based network protocol used in newer versions of Minecraft. It provid
 ### Crates
 
 - **[`nethernet`](nethernet)** - a pure sans-io implementation. It owns the wire formats, the identity assertions, the signaling state machines, and the WebRTC session itself (ICE, DTLS, SCTP, data channels, driven directly rather than through a generic peer connection), and performs no IO of its own, so it can be driven by any runtime.
-- **[`nethernet-tokio`](nethernet-tokio)** - an async tokio wrapper over the sans-io crate, exposing `NethernetListener` and `NethernetStream`.
+- **[`nethernet-tokio`](nethernet-tokio)** - an async tokio wrapper over the sans-io crate, exposing `NetherServer` and `NetherClient`.
 - **[`bevy-nethernet`](bevy-nethernet)** - a Bevy plugin wrapping the sans-io crate directly, for games that want to drive it from their own tick rather than through tokio.
 
 ### Features
@@ -78,7 +78,7 @@ let config = ConnectionConfig {
     ..Default::default()
 };
 
-let mut listener = NethernetListener::bind_with(signaling, config).await?;
+let mut listener = NetherServer::bind_with(signaling, config).await?;
 let AcceptedSession { session, .. } = listener.accept().await?;
 ```
 

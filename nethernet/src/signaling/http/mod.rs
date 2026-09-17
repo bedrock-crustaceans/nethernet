@@ -9,6 +9,7 @@
 pub mod config;
 pub mod error;
 pub mod input;
+pub mod join;
 pub mod output;
 
 use crate::identity::{PlayerInfo, validate_sdp};

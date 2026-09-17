@@ -16,25 +16,22 @@ use std::time::Instant;
 const MAX_DATAGRAMS_PER_TICK: usize = 1024;
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-pub struct NethernetClientPlugin;
+pub struct NetherClientPlugin;
 
-impl Plugin for NethernetClientPlugin {
+impl Plugin for NetherClientPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<NethernetClientEvent>();
+        app.add_message::<NetherClientEvent>();
         app.add_systems(
             PreUpdate,
             Self::update
-                .in_set(NethernetClientSet)
-                .run_if(resource_exists::<NethernetClient>),
+                .in_set(NetherClientSet)
+                .run_if(resource_exists::<NetherClient>),
         );
     }
 }
 
-impl NethernetClientPlugin {
-    fn update(
-        mut client: ResMut<NethernetClient>,
-        mut events: MessageWriter<NethernetClientEvent>,
-    ) {
+impl NetherClientPlugin {
+    fn update(mut client: ResMut<NetherClient>, mut events: MessageWriter<NetherClientEvent>) {
         client.update();
 
         while let Some(event) = client.next_event() {
@@ -43,20 +40,20 @@ impl NethernetClientPlugin {
     }
 }
 
-/// PreUpdate set containing NethernetClientPlugin's update system. Order your own
-/// systems `.after(NethernetClientSet)` to see this tick's events/received data.
+/// PreUpdate set containing NetherClientPlugin's update system. Order your own
+/// systems `.after(NetherClientSet)` to see this tick's events/received data.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct NethernetClientSet;
+pub struct NetherClientSet;
 
 #[derive(Message, Clone, Debug)]
-pub enum NethernetClientEvent {
+pub enum NetherClientEvent {
     ServerDiscovered(u64, Box<ServerData>),
     Connected,
     Disconnected,
 }
 
 #[derive(Resource)]
-pub struct NethernetClient {
+pub struct NetherClient {
     signaler: LanSignaler,
     socket: UdpSocket,
     connection: Option<ConnectionDriver>,
@@ -64,11 +61,11 @@ pub struct NethernetClient {
     ready: bool,
     received: VecDeque<Box<[u8]>>,
     received_unreliable: VecDeque<Box<[u8]>>,
-    events: VecDeque<NethernetClientEvent>,
+    events: VecDeque<NetherClientEvent>,
     buf: Box<[u8]>,
 }
 
-impl NethernetClient {
+impl NetherClient {
     pub fn new<T>(network_id: u64, conf: T) -> std::io::Result<Self>
     where
         T: FnOnce(&mut LanSignalerConfig),
@@ -137,7 +134,7 @@ impl NethernetClient {
         self.connection = None;
         if self.ready {
             self.ready = false;
-            self.events.push_back(NethernetClientEvent::Disconnected);
+            self.events.push_back(NetherClientEvent::Disconnected);
         }
     }
 
@@ -170,7 +167,7 @@ impl NethernetClient {
         self.received_unreliable.pop_front()
     }
 
-    pub fn next_event(&mut self) -> Option<NethernetClientEvent> {
+    pub fn next_event(&mut self) -> Option<NetherClientEvent> {
         self.events.pop_front()
     }
 
@@ -200,7 +197,7 @@ impl NethernetClient {
                 }
                 LanSignalerOutput::ServerDiscovered(id, data) => self
                     .events
-                    .push_back(NethernetClientEvent::ServerDiscovered(id, data)),
+                    .push_back(NetherClientEvent::ServerDiscovered(id, data)),
                 LanSignalerOutput::Signal(signal) => self.handle_signal(signal),
                 LanSignalerOutput::Wait(_) => {}
             }
@@ -218,7 +215,7 @@ impl NethernetClient {
                 ConnectionEvent::Ready if !self.ready => {
                     self.ready = true;
                     self.connecting_since = None;
-                    self.events.push_back(NethernetClientEvent::Connected);
+                    self.events.push_back(NetherClientEvent::Connected);
                 }
                 ConnectionEvent::Ready => {}
                 ConnectionEvent::Message(Channel::Reliable, data) => self.received.push_back(data),
@@ -228,7 +225,7 @@ impl NethernetClient {
                 ConnectionEvent::Failed => {
                     self.connecting_since = None;
                     self.connection = None;
-                    self.events.push_back(NethernetClientEvent::Disconnected);
+                    self.events.push_back(NetherClientEvent::Disconnected);
                 }
             }
         }
@@ -238,7 +235,7 @@ impl NethernetClient {
         {
             self.connecting_since = None;
             self.connection = None;
-            self.events.push_back(NethernetClientEvent::Disconnected);
+            self.events.push_back(NetherClientEvent::Disconnected);
         }
     }
 

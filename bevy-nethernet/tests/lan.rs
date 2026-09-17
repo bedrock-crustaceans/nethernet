@@ -16,7 +16,7 @@ fn spin<F: FnMut() -> bool>(deadline: Instant, mut done: F) -> bool {
 
 #[test]
 fn client_connects_to_server_and_exchanges_data() {
-    let mut server = NethernetServer::new(
+    let mut server = NetherServer::new(
         1234,
         SocketAddr::from((Ipv4Addr::UNSPECIFIED, PORT)),
         |config| config.broadcast_interval = Duration::from_millis(50),
@@ -24,7 +24,7 @@ fn client_connects_to_server_and_exchanges_data() {
     .unwrap();
     server.set_server_data(ServerData::new("Test Server".into(), "World".into()));
 
-    let mut client = NethernetClient::new(5678, |config| {
+    let mut client = NetherClient::new(5678, |config| {
         config.broadcast_address = Some(SocketAddr::from((Ipv4Addr::BROADCAST, PORT)));
         config.broadcast_interval = Duration::from_millis(50);
     })

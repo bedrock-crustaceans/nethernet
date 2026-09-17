@@ -4,7 +4,7 @@
 //! refreshing that set is what this module does. A set is refreshed when a token names a
 //! key that is not in it yet, which is how a rotated key is picked up without a restart.
 
-use crate::error::{NethernetError, Result};
+use crate::error::{NetherError, Result};
 use nethernet::identity::{MINECRAFT_KEYS_URL, TokenTrust};
 use nethernet::prelude::JwkSet;
 use reqwest::Client;
@@ -123,12 +123,12 @@ impl Jwks {
             .get(&self.url)
             .send()
             .await
-            .map_err(|e| NethernetError::Other(format!("fetch keys: {}", e)))?
+            .map_err(|e| NetherError::Other(format!("fetch keys: {}", e)))?
             .error_for_status()
-            .map_err(|e| NethernetError::Other(format!("fetch keys: {}", e)))?
+            .map_err(|e| NetherError::Other(format!("fetch keys: {}", e)))?
             .json()
             .await
-            .map_err(|e| NethernetError::Other(format!("read keys: {}", e)))?;
+            .map_err(|e| NetherError::Other(format!("read keys: {}", e)))?;
 
         let _ = self
             .commands

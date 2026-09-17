@@ -1,52 +1,17 @@
 //! End-to-end negotiation over LAN discovery.
 
 use nethernet_tokio::signaling::lan::{LanConfig, LanSignaling};
-use nethernet_tokio::{AcceptedSession, NethernetListener, NethernetStream, ServerData};
+use nethernet_tokio::{AcceptedSession, NetherClient, NetherServer, ServerData};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
-
-use futures::Stream;
-use nethernet_tokio::Signaling;
-use nethernet_tokio::protocol::Signal;
-use std::pin::Pin;
 
 const PORT: u16 = 7571;
 
 fn config() -> LanConfig {
-    config_for(PORT)
-}
-
-fn config_for(port: u16) -> LanConfig {
     LanConfig {
-        discovery_port: port,
+        discovery_port: PORT,
         broadcast_interval: Duration::from_millis(200),
         ..Default::default()
-    }
-}
-
-/// Signaling that negotiates without trickle ICE, as HTTP endpoints do.
-struct NonTrickle(LanSignaling);
-
-impl Signaling for NonTrickle {
-    async fn signal(&self, signal: Signal) -> nethernet_tokio::Result<()> {
-        self.0.signal(signal).await
-    }
-
-    fn signals(&self) -> Pin<Box<dyn Stream<Item = Signal> + Send>> {
-        self.0.signals()
-    }
-
-    fn network_id(&self) -> String {
-        self.0.network_id()
-    }
-
-    fn disable_trickle_ice(&self) -> bool {
-        true
-    }
-
-    fn set_pong_data(&self, data: &[u8]) {
-        self.0.set_pong_data(data)
     }
 }
 
@@ -61,7 +26,7 @@ async fn lan_roundtrip() {
     .unwrap();
     server_signaling.set_server_data(ServerData::new("test".into(), "world".into()));
 
-    let mut listener = NethernetListener::bind(server_signaling).await.unwrap();
+    let mut listener = NetherServer::bind(server_signaling).await.unwrap();
     tokio::spawn(async move {
         let AcceptedSession {
             session,
@@ -79,18 +44,16 @@ async fn lan_roundtrip() {
         }
     });
 
-    let client_signaling = Arc::new(
-        LanSignaling::with_config(5678, "0.0.0.0:0".parse().unwrap(), config())
-            .await
-            .unwrap(),
-    );
+    let client_signaling = LanSignaling::with_config(5678, "0.0.0.0:0".parse().unwrap(), config())
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     let servers = client_signaling.discover().await;
     assert_eq!(servers.len(), 1, "server not discovered");
     assert_eq!(servers[&1234].server_name, "test");
 
-    let mut stream = NethernetStream::connect(client_signaling, "1234".to_string())
+    let mut stream = NetherClient::connect(client_signaling, "1234".to_string())
         .await
         .unwrap();
 
@@ -111,54 +74,5 @@ async fn lan_roundtrip() {
     assert_eq!(&echoed[..], b"fast");
 
     assert_eq!(stream.remote_addr().await.network_id, "1234");
-    stream.close().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn non_trickle_roundtrip() {
-    const PORT: u16 = 7572;
-
-    let server_signaling = LanSignaling::with_config(
-        4321,
-        format!("0.0.0.0:{PORT}").parse::<SocketAddr>().unwrap(),
-        config_for(PORT),
-    )
-    .await
-    .unwrap();
-    server_signaling.set_server_data(ServerData::new("test".into(), "world".into()));
-
-    let mut listener = NethernetListener::bind(NonTrickle(server_signaling))
-        .await
-        .unwrap();
-    tokio::spawn(async move {
-        let AcceptedSession {
-            session,
-            mut reliable,
-            ..
-        } = listener.accept().await.unwrap();
-        while let Ok(Some(data)) = reliable.recv().await {
-            session.send(data).await.unwrap();
-        }
-    });
-
-    let client_signaling =
-        LanSignaling::with_config(8765, "0.0.0.0:0".parse().unwrap(), config_for(PORT))
-            .await
-            .unwrap();
-    let client_signaling = Arc::new(NonTrickle(client_signaling));
-    tokio::time::sleep(Duration::from_millis(600)).await;
-
-    let mut stream = NethernetStream::connect(client_signaling, "4321".to_string())
-        .await
-        .unwrap();
-
-    stream.send("hello".into()).await.unwrap();
-    let echoed = tokio::time::timeout(Duration::from_secs(5), stream.recv())
-        .await
-        .expect("echo timed out")
-        .unwrap()
-        .unwrap();
-    assert_eq!(&echoed[..], b"hello");
-
     stream.close().await.unwrap();
 }

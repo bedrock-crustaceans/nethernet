@@ -1,4 +1,5 @@
 use http::{Request, Response};
+use nethernet::signaling::http::join;
 
 const MAX_HEADERS: usize = 32;
 pub(crate) const MAX_BODY: usize = 1 << 20;
@@ -105,7 +106,7 @@ pub(crate) fn encode_post(host: &str, path: &str, content_type: &str, body: &str
     out.extend_from_slice(format!("POST {path} HTTP/1.1\r\n").as_bytes());
     out.extend_from_slice(format!("host: {host}\r\n").as_bytes());
     out.extend_from_slice(format!("content-type: {content_type}\r\n").as_bytes());
-    out.extend_from_slice(b"user-agent: libhttpclient/1.0.0.0\r\n");
+    out.extend_from_slice(format!("user-agent: {}\r\n", join::CLIENT_USER_AGENT).as_bytes());
     out.extend_from_slice(format!("content-length: {}\r\n", body.len()).as_bytes());
     out.extend_from_slice(b"connection: close\r\n");
     out.extend_from_slice(b"\r\n");

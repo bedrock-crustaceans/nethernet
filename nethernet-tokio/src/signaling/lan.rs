@@ -1,9 +1,8 @@
 //! Signaling over LAN discovery, driven on top of the sans-IO state machine.
 
 use crate::addr::Addr;
-use crate::error::{NethernetError, Result};
+use crate::error::{NetherError, Result};
 use crate::protocol::Signal;
-use crate::signaling::Signaling;
 use futures::Stream;
 use nethernet::prelude::{
     LanSignaler, LanSignalerInput, LanSignalerOutput, Packets, RequestPacket, Sans, ServerData,
@@ -123,6 +122,57 @@ impl LanSignaling {
         reply_rx.await.ok().flatten()
     }
 
+    /// Sends a signal into the running discovery state machine.
+    pub async fn signal(&self, signal: Signal) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.commands
+            .send(Command::Signal(Box::new(signal), reply_tx))
+            .map_err(|_| NetherError::ConnectionClosed)?;
+
+        reply_rx.await.map_err(|_| NetherError::ConnectionClosed)?
+    }
+
+    /// The signals answered offers and trickled candidates arrive on.
+    pub fn signals(&self) -> Pin<Box<dyn Stream<Item = Signal> + Send>> {
+        let rx = self.signal_tx.subscribe();
+        Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(signal) => return Some((signal, rx)),
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("Signal receiver lagged, missed {} signals", n);
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        }))
+    }
+
+    /// The ID of the local network, as named to a remote peer.
+    pub fn network_id(&self) -> String {
+        self.network_id.to_string()
+    }
+
+    /// Candidates are trickled separately, as discovery signals as many datagrams as it needs.
+    pub fn disable_trickle_ice(&self) -> bool {
+        false
+    }
+
+    /// The address the connection referenced by `addr` was last seen at.
+    pub async fn remote_address(&self, addr: &Addr) -> Option<SocketAddr> {
+        let network_id = addr.network_id.parse::<u64>().ok()?;
+        self.get_address(network_id).await
+    }
+
+    /// Sets the data advertised in response to discovery requests, from a RakNet pong.
+    pub fn set_pong_data(&self, data: &[u8]) {
+        match ServerData::from_pong_data(data) {
+            Ok(server_data) => self.set_server_data(server_data),
+            Err(e) => tracing::error!("Failed to parse pong data: {}", e),
+        }
+    }
+
     fn drive(
         mut signaler: LanSignaler,
         socket: Arc<UdpSocket>,
@@ -156,7 +206,7 @@ impl LanSignaling {
                         Some(Command::Signal(signal, reply)) => {
                             let result = signaler
                                 .handle(LanSignalerInput::Signal(*signal, Instant::now()))
-                                .map_err(|e| NethernetError::Other(e.to_string()));
+                                .map_err(|e| NetherError::Other(e.to_string()));
                             let _ = reply.send(result);
                         }
                         Some(Command::SetServerData(data)) => {
@@ -205,51 +255,6 @@ impl Drop for LanSignaling {
         self.cancel_token.cancel();
         if let Some(task) = self.task.take() {
             task.abort();
-        }
-    }
-}
-
-impl Signaling for LanSignaling {
-    async fn signal(&self, signal: Signal) -> Result<()> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.commands
-            .send(Command::Signal(Box::new(signal), reply_tx))
-            .map_err(|_| NethernetError::ConnectionClosed)?;
-
-        reply_rx
-            .await
-            .map_err(|_| NethernetError::ConnectionClosed)?
-    }
-
-    fn signals(&self) -> Pin<Box<dyn Stream<Item = Signal> + Send>> {
-        let rx = self.signal_tx.subscribe();
-        Box::pin(futures::stream::unfold(rx, |mut rx| async move {
-            loop {
-                match rx.recv().await {
-                    Ok(signal) => return Some((signal, rx)),
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("Signal receiver lagged, missed {} signals", n);
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return None,
-                }
-            }
-        }))
-    }
-
-    fn network_id(&self) -> String {
-        self.network_id.to_string()
-    }
-
-    async fn remote_address(&self, addr: &Addr) -> Option<SocketAddr> {
-        let network_id = addr.network_id.parse::<u64>().ok()?;
-        self.get_address(network_id).await
-    }
-
-    fn set_pong_data(&self, data: &[u8]) {
-        match ServerData::from_pong_data(data) {
-            Ok(server_data) => self.set_server_data(server_data),
-            Err(e) => tracing::error!("Failed to parse pong data: {}", e),
         }
     }
 }

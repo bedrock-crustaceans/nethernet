@@ -5,9 +5,8 @@
 //! bound to this signaling accepts the connections the endpoint negotiates.
 
 use crate::addr::Addr;
-use crate::error::{NethernetError, Result};
+use crate::error::{NetherError, Result};
 use crate::protocol::{Signal, SignalType};
-use crate::signaling::Signaling;
 use crate::transport::stream::parse_error_code;
 use futures::Stream;
 use http_body_util::{BodyExt, Full};
@@ -352,12 +351,12 @@ impl Drop for HttpSignalingServer {
     }
 }
 
-impl Signaling for HttpSignalingServer {
+impl HttpSignalingServer {
     /// Delivers the answer, or the rejection, of a join that is waiting for one.
     ///
     /// A request carries a single description, so nothing else can be signaled back: a
     /// candidate has to be part of the answer itself.
-    async fn signal(&self, signal: Signal) -> Result<()> {
+    pub async fn signal(&self, signal: Signal) -> Result<()> {
         let command = match signal.signal_type {
             SignalType::Answer => Command::Answer {
                 connection_id: signal.connection_id,
@@ -368,7 +367,7 @@ impl Signaling for HttpSignalingServer {
                 reason: parse_error_code(&signal.data).into(),
             },
             signal_type => {
-                return Err(NethernetError::Other(format!(
+                return Err(NetherError::Other(format!(
                     "{} is not supported over HTTP signaling",
                     signal_type
                 )));
@@ -377,10 +376,10 @@ impl Signaling for HttpSignalingServer {
 
         self.commands
             .send(command)
-            .map_err(|_| NethernetError::ConnectionClosed)
+            .map_err(|_| NetherError::ConnectionClosed)
     }
 
-    fn signals(&self) -> Pin<Box<dyn Stream<Item = Signal> + Send>> {
+    pub fn signals(&self) -> Pin<Box<dyn Stream<Item = Signal> + Send>> {
         let rx = self.signal_tx.subscribe();
         Box::pin(futures::stream::unfold(rx, |mut rx| async move {
             loop {
@@ -396,17 +395,17 @@ impl Signaling for HttpSignalingServer {
         }))
     }
 
-    fn network_id(&self) -> String {
+    pub fn network_id(&self) -> String {
         self.network_id.clone()
     }
 
     /// Always returns `true`, as the answer is the response to the request carrying the
     /// offer and must already hold every candidate.
-    fn disable_trickle_ice(&self) -> bool {
+    pub fn disable_trickle_ice(&self) -> bool {
         true
     }
 
-    async fn remote_address(&self, addr: &Addr) -> Option<SocketAddr> {
+    pub async fn remote_address(&self, addr: &Addr) -> Option<SocketAddr> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
             .send(Command::Address(addr.connection_id, reply_tx))
@@ -414,7 +413,7 @@ impl Signaling for HttpSignalingServer {
         reply_rx.await.ok().flatten()
     }
 
-    async fn player(&self, addr: &Addr) -> Option<Arc<PlayerInfo>> {
+    pub async fn player(&self, addr: &Addr) -> Option<Arc<PlayerInfo>> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
             .send(Command::Player(addr.connection_id, reply_tx))
@@ -422,7 +421,7 @@ impl Signaling for HttpSignalingServer {
         reply_rx.await.ok().flatten()
     }
 
-    fn set_pong_data(&self, data: &[u8]) {
+    pub fn set_pong_data(&self, data: &[u8]) {
         match ServerData::from_pong_data(data) {
             Ok(server_data) => self.set_server_data(server_data),
             Err(e) => tracing::error!("Failed to parse pong data: {}", e),
@@ -450,7 +449,7 @@ async fn serve(
             let stream = acceptor
                 .accept(stream)
                 .await
-                .map_err(|e| NethernetError::Other(format!("TLS handshake: {}", e)))?;
+                .map_err(|e| NetherError::Other(format!("TLS handshake: {}", e)))?;
             serve_http(stream, connection, proxied, config, commands).await
         }
         None => serve_http(stream, connection, proxied, config, commands).await,
@@ -534,7 +533,7 @@ where
 
     connection
         .await
-        .map_err(|e| NethernetError::Other(format!("HTTP connection: {}", e)))
+        .map_err(|e| NetherError::Other(format!("HTTP connection: {}", e)))
 }
 
 /// Reads the PROXY header off the front of a connection, leaving the bytes that follow it

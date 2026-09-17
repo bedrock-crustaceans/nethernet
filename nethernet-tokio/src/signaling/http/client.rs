@@ -4,10 +4,10 @@
 //! SDP of the connection in the response body. As a request only carries a single
 //! description, candidates are embedded in it instead of being signaled separately.
 
-use crate::error::{NethernetError, Result};
+use crate::error::{NetherError, Result};
 use crate::protocol::{Signal, SignalType};
-use crate::signaling::Signaling;
 use futures::Stream;
+use nethernet::signaling::http::join;
 use reqwest::Client;
 use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 use std::pin::Pin;
@@ -16,14 +16,8 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use url::Url;
 
-/// User agent of the HTTP client of Minecraft.
-const CLIENT_USER_AGENT: &str = "libhttpclient/1.0.0.0";
-
 /// Guards installation of the process-wide TLS provider.
 static PROVIDER: Once = Once::new();
-
-/// Maximum size of an SDP body accepted from a server.
-const MAX_SDP_SIZE: usize = 1 << 20;
 
 /// Signaling implementation for connecting to servers that expose an HTTP endpoint.
 ///
@@ -49,7 +43,7 @@ impl HttpSignaling {
         let client = Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
-            .map_err(|e| NethernetError::Other(format!("create HTTP client: {}", e)))?;
+            .map_err(|e| NetherError::Other(format!("create HTTP client: {}", e)))?;
 
         Ok(Self::with_client(network_id, client))
     }
@@ -71,16 +65,16 @@ impl HttpSignaling {
     /// Returns the URL an offer for the remote network is sent to.
     fn join_url(&self, network_id: &str) -> Result<Url> {
         let url = Url::parse(network_id)
-            .map_err(|e| NethernetError::Other(format!("parse network ID as URL: {}", e)))?;
+            .map_err(|e| NetherError::Other(format!("parse network ID as URL: {}", e)))?;
         if !matches!(url.scheme(), "http" | "https") || url.port().is_none() {
-            return Err(NethernetError::Other(format!(
+            return Err(NetherError::Other(format!(
                 "network ID must be a HTTP/HTTPS URL with a port: {}",
                 network_id
             )));
         }
 
-        url.join(&format!("/v1/join/{}", self.network_id))
-            .map_err(|e| NethernetError::Other(format!("build join URL: {}", e)))
+        url.join(&join::join_path(&self.network_id))
+            .map_err(|e| NetherError::Other(format!("build join URL: {}", e)))
     }
 
     /// Sends the offer to the endpoint of the remote network and returns its answer.
@@ -88,48 +82,34 @@ impl HttpSignaling {
         let response = self
             .client
             .post(self.join_url(&signal.network_id)?)
-            .header(CONTENT_TYPE, "application/sdp")
-            .header(USER_AGENT, CLIENT_USER_AGENT)
+            .header(CONTENT_TYPE, join::CONTENT_TYPE)
+            .header(USER_AGENT, join::CLIENT_USER_AGENT)
             .body(signal.data.clone())
             .send()
             .await
-            .map_err(|e| NethernetError::Other(format!("signal offer: {}", e)))?;
+            .map_err(|e| NetherError::Other(format!("signal offer: {}", e)))?;
 
         let status = response.status();
-        if !status.is_success() {
-            return Err(NethernetError::Other(format!("signal offer: {}", status)));
-        }
-
         let body = response
             .text()
             .await
-            .map_err(|e| NethernetError::Other(format!("read answer: {}", e)))?;
-        if body.is_empty() {
-            return Err(NethernetError::Other(
-                "missing answer in response".to_string(),
-            ));
-        }
-        if body.len() > MAX_SDP_SIZE {
-            return Err(NethernetError::Other(format!(
-                "answer exceeds {} bytes",
-                MAX_SDP_SIZE
-            )));
-        }
-        // Servers report a failed negotiation by answering with an error code
-        if let Ok(code) = body.trim().parse::<u32>() {
-            return Err(NethernetError::Signaled(code.into()));
-        }
+            .map_err(|e| NetherError::Other(format!("read answer: {}", e)))?;
+
+        join::validate_join_response(status.as_u16(), &body).map_err(|e| match e {
+            join::JoinResponseError::Rejected(code) => NetherError::Signaled(code),
+            e => NetherError::Other(e.to_string()),
+        })?;
 
         Ok(body)
     }
 }
 
-impl Signaling for HttpSignaling {
+impl HttpSignaling {
     /// Signals an offer to the endpoint of the remote network and notifies its answer.
     ///
     /// Only offers are supported, as an answer is the response of the request carrying
     /// the offer and candidates are embedded in both.
-    async fn signal(&self, signal: Signal) -> Result<()> {
+    pub async fn signal(&self, signal: Signal) -> Result<()> {
         match signal.signal_type {
             SignalType::Offer => {
                 let answer = self.join(&signal).await?;
@@ -141,14 +121,14 @@ impl Signaling for HttpSignaling {
                 Ok(())
             }
             SignalType::Error => Ok(()),
-            signal_type => Err(NethernetError::Other(format!(
+            signal_type => Err(NetherError::Other(format!(
                 "{} is not supported over HTTP signaling",
                 signal_type
             ))),
         }
     }
 
-    fn signals(&self) -> Pin<Box<dyn Stream<Item = Signal> + Send>> {
+    pub fn signals(&self) -> Pin<Box<dyn Stream<Item = Signal> + Send>> {
         let rx = self.signal_tx.subscribe();
         Box::pin(futures::stream::unfold(rx, |mut rx| async move {
             loop {
@@ -164,18 +144,15 @@ impl Signaling for HttpSignaling {
         }))
     }
 
-    fn network_id(&self) -> String {
+    pub fn network_id(&self) -> String {
         self.network_id.clone()
     }
 
     /// Always returns `true`, as a request carries a single description that must
     /// already contain every local candidate.
-    fn disable_trickle_ice(&self) -> bool {
+    pub fn disable_trickle_ice(&self) -> bool {
         true
     }
-
-    /// Servers are not discovered over HTTP signaling, so the data is discarded.
-    fn set_pong_data(&self, _data: &[u8]) {}
 }
 
 #[cfg(test)]
