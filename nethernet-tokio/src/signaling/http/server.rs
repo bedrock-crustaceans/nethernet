@@ -7,7 +7,7 @@
 use crate::addr::Addr;
 use crate::error::{NetherError, Result};
 use crate::protocol::{Signal, SignalType};
-use crate::transport::stream::parse_error_code;
+use crate::transport::client::parse_error_code;
 use futures::Stream;
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};

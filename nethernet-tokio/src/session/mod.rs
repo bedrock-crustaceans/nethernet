@@ -100,7 +100,7 @@ pub struct AcceptedSession {
 impl Session {
     /// Spawns the background driver for an already-negotiated-enough [`SansConnection`]
     /// (the initial offer/answer and, for trickle ICE, the first candidate should already
-    /// be applied - see [`crate::transport::listener`]/[`crate::transport::stream`]), and
+    /// be applied - see [`crate::transport::server`]/[`crate::transport::client`]), and
     /// returns the session handle, the receivers of its two data channels, and a receiver
     /// that resolves once both channels are open.
     pub(crate) fn spawn(

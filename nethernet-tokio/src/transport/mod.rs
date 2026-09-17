@@ -1,8 +1,8 @@
-pub mod listener;
-pub mod stream;
+pub mod server;
+pub mod client;
 
-pub use listener::NetherServer;
-pub use stream::NetherClient;
+pub use server::NetherServer;
+pub use client::NetherClient;
 
 use nethernet::identity::{ServerIdentity, TokenTrust};
 use std::fmt;
