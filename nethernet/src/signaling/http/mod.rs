@@ -216,7 +216,7 @@ impl HttpSignaler {
         }
 
         let Some(data) = self.server_data.as_ref().filter(|_| self.config.serve_motd) else {
-            return self.respond(connection, StatusCode::SERVICE_UNAVAILABLE, keep_alive);
+            return self.respond(connection, StatusCode::NOT_FOUND, keep_alive);
         };
 
         let body = data.to_json();
@@ -537,6 +537,33 @@ mod tests {
             "{\"name\":\"Server\",\"protocol\":0,\"version\":\"\",\"level\":\"World\",\
              \"players\":1,\"maxPlayers\":8,\"gameType\":0}"
         );
+    }
+
+    #[test]
+    fn a_host_with_nothing_to_advertise_is_not_found() {
+        let mut signaler = HttpSignaler::new(HttpSignalerConfig::default());
+        connect(&mut signaler, 1, "127.0.0.1:1000");
+        send(&mut signaler, 1, request(Method::GET, "/v1/join", ""));
+
+        let HttpSignalerOutput::Response { response, .. } = next(&mut signaler) else {
+            panic!("expected a response");
+        };
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn the_status_endpoint_is_not_found_when_the_motd_is_disabled() {
+        let mut signaler = signaler(HttpSignalerConfig {
+            serve_motd: false,
+            ..Default::default()
+        });
+        connect(&mut signaler, 1, "127.0.0.1:1000");
+        send(&mut signaler, 1, request(Method::GET, "/v1/join", ""));
+
+        let HttpSignalerOutput::Response { response, .. } = next(&mut signaler) else {
+            panic!("expected a response");
+        };
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]

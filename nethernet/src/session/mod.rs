@@ -10,6 +10,7 @@ use crate::error::ProtocolError;
 use crate::protocol::constants::SCTP_MAX_MESSAGE_SIZE;
 use crate::protocol::message::{Message as Framing, MessageSegment};
 use crate::protocol::webrtc::{Description, DtlsRole, certificate};
+use crate::sans::Sans;
 use dtls::EndpointEvent;
 pub use dtls::ResolvedRole;
 use ice::IceLayer;
@@ -22,8 +23,15 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-const RELIABLE_STREAM_ID: StreamId = 0;
-const UNRELIABLE_STREAM_ID: StreamId = 1;
+/// Stream IDs the controlling (offerer) side opens its channels on. NetherNet's
+/// offerer always resolves to the DTLS server role (see [`ResolvedRole`]), and per
+/// [RFC 8832 §6](https://www.rfc-editor.org/rfc/rfc8832#section-6) the DTLS server
+/// numbers the channels it opens with odd stream IDs - the same convention Pion (and
+/// so any real WebRTC/NetherNet peer) follows. The answerer never opens a channel of
+/// its own; it learns the actual IDs from the incoming `DATA_CHANNEL_OPEN` messages
+/// instead of assuming these constants (see [`Channels`]).
+const RELIABLE_STREAM_ID: StreamId = 1;
+const UNRELIABLE_STREAM_ID: StreamId = 3;
 
 /// Which of NetherNet's two fixed data channels a message belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +43,7 @@ pub enum Channel {
 /// Events the driving application should react to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionEvent {
-    /// Both data channels are open; [`Session::send`] and [`Session::poll`]'s
+    /// Both data channels are open; [`SessionInput::Send`] and
     /// [`SessionOutput::Message`] are now meaningful.
     Ready,
     /// ICE or SCTP entered a state it cannot recover from - the peer vanished, the
@@ -51,6 +59,32 @@ pub enum SessionOutput {
     Event(SessionEvent),
     /// A complete, reassembled message received on a data channel.
     Message(Channel, Vec<u8>),
+    /// How long the caller may wait before it has to drive
+    /// [`SessionInput::Timeout`] again.
+    Wait(Duration),
+}
+
+/// Input fed to a [`Session`] (see [`Sans`]).
+pub enum SessionInput {
+    /// An inbound datagram received on the local socket.
+    Packet(Box<[u8]>, SocketAddr, Instant),
+
+    /// Applies the remote's description once known, plus any candidates embedded in
+    /// it (full ICE) or already trickled.
+    RemoteDescription(Description, Vec<Candidate>),
+
+    /// Adds a candidate trickled separately from the description (LAN/trickle-ICE
+    /// signaling only).
+    RemoteCandidate(Candidate),
+
+    /// A complete application message to send on a channel.
+    Send(Channel, bytes::Bytes),
+
+    /// Drives ICE/DTLS/SCTP retransmission and keepalive timers. The only input that
+    /// produces a [`SessionOutput::Wait`], matching
+    /// [`crate::signaling::lan::LanSignaler`] and
+    /// [`crate::signaling::http::HttpSignaler`].
+    Timeout(Instant),
 }
 
 struct RemoteInfo {
@@ -59,8 +93,12 @@ struct RemoteInfo {
 
 #[derive(Default)]
 struct Channels {
-    reliable_open: bool,
-    unreliable_open: bool,
+    /// The stream ID actually carrying each channel: the fixed
+    /// [`RELIABLE_STREAM_ID`]/[`UNRELIABLE_STREAM_ID`] when this side opened them
+    /// (controlling), or whatever the peer's `DATA_CHANNEL_OPEN` named (answering).
+    /// `None` until the channel is open.
+    reliable_stream_id: Option<StreamId>,
+    unreliable_stream_id: Option<StreamId>,
     /// Reassembly state for the reliable channel's fragmentation (see
     /// [`crate::protocol::message`]); the unreliable channel never fragments.
     reassembly: Framing,
@@ -68,14 +106,31 @@ struct Channels {
     failed_emitted: bool,
 }
 
+impl Channels {
+    fn stream_id(&self, channel: Channel) -> Option<StreamId> {
+        match channel {
+            Channel::Reliable => self.reliable_stream_id,
+            Channel::Unreliable => self.unreliable_stream_id,
+        }
+    }
+
+    fn set_open(&mut self, channel: Channel, stream_id: StreamId) {
+        match channel {
+            Channel::Reliable => self.reliable_stream_id = Some(stream_id),
+            Channel::Unreliable => self.unreliable_stream_id = Some(stream_id),
+        }
+    }
+}
+
 /// A single NetherNet peer-to-peer connection: ICE connectivity, a DTLS handshake, an
 /// SCTP association, and the two data channels the HTTP signaling guide's section 6
 /// mandates, wired together and driven explicitly rather than through a generic peer
 /// connection.
 ///
-/// This type performs no I/O itself: feed it datagrams and ticks via [`Self::handle_packet`]/
-/// [`Self::handle_timeout`], drain the resulting datagrams-to-send/events/messages via
-/// [`Self::poll`], and drive the actual UDP socket externally.
+/// This type performs no I/O itself: feed it datagrams and timer ticks via [`Sans::handle`]
+/// (see [`SessionInput`]), drain the resulting datagrams-to-send/events/messages via
+/// [`Sans::poll`], and drive the actual UDP socket externally. [`SessionOutput::Wait`]
+/// tells the driver how long it may wait before the next [`SessionInput::Timeout`].
 pub struct Session {
     is_controlling: bool,
     local_addr: SocketAddr,
@@ -174,8 +229,8 @@ impl Session {
     /// arrives; for the answerer: immediately, from the offer that prompted creating
     /// this session), plus any candidates embedded in it (full ICE) or already
     /// trickled. DTLS/SCTP aren't started until at least one remote candidate is known
-    /// (here, or via a later [`Self::add_remote_candidate`]).
-    pub fn set_remote_description(
+    /// (here, or via a later [`SessionInput::RemoteCandidate`]).
+    fn set_remote_description(
         &mut self,
         remote: &Description,
         candidates: Vec<Candidate>,
@@ -202,7 +257,7 @@ impl Session {
 
     /// Adds a candidate trickled separately from the description (LAN/trickle-ICE
     /// signaling only).
-    pub fn add_remote_candidate(&mut self, candidate: Candidate) -> Result<(), ProtocolError> {
+    fn add_remote_candidate(&mut self, candidate: Candidate) -> Result<(), ProtocolError> {
         let addr = candidate.addr();
         self.ice.add_remote_candidate(candidate)?;
 
@@ -247,7 +302,7 @@ impl Session {
     }
 
     /// Feeds an inbound datagram received on the local socket.
-    pub fn handle_packet(
+    fn handle_packet(
         &mut self,
         data: &[u8],
         from: SocketAddr,
@@ -277,7 +332,7 @@ impl Session {
         }
     }
 
-    pub fn handle_timeout(&mut self, now: Instant) -> Result<(), ProtocolError> {
+    fn handle_timeout(&mut self, now: Instant) -> Result<(), ProtocolError> {
         self.ice.handle_timeout(now)?;
         if let Some(dtls) = &mut self.dtls {
             dtls.handle_timeout(now)?;
@@ -286,10 +341,15 @@ impl Session {
             sctp.handle_timeout(now);
         }
         self.pump(now)?;
+
+        if let Some(deadline) = self.poll_timeout(now) {
+            self.output
+                .push_back(SessionOutput::Wait(deadline.saturating_duration_since(now)));
+        }
         Ok(())
     }
 
-    pub fn poll_timeout(&mut self, now: Instant) -> Option<Instant> {
+    fn poll_timeout(&mut self, now: Instant) -> Option<Instant> {
         [
             self.ice.poll_timeout(),
             self.dtls.as_ref().and_then(|d| d.poll_timeout(now)),
@@ -300,20 +360,15 @@ impl Session {
         .min()
     }
 
-    /// Drains one queued output (a datagram to send, an event, or a received message).
-    pub fn poll(&mut self) -> Option<SessionOutput> {
-        self.output.pop_front()
-    }
-
     /// Sends a complete application message on the given channel, fragmenting it (per
     /// [`crate::protocol::message`]) if it's too large for one SCTP message and this is
     /// the reliable channel; the unreliable channel never fragments and rejects
     /// anything too large instead.
-    pub fn send(&mut self, channel: Channel, data: bytes::Bytes) -> Result<(), ProtocolError> {
-        let stream_id = match channel {
-            Channel::Reliable => RELIABLE_STREAM_ID,
-            Channel::Unreliable => UNRELIABLE_STREAM_ID,
-        };
+    fn send(&mut self, channel: Channel, data: bytes::Bytes) -> Result<(), ProtocolError> {
+        let stream_id = self
+            .channels
+            .stream_id(channel)
+            .ok_or_else(|| ProtocolError::Other("channel not open yet".to_string()))?;
 
         let sctp = self
             .sctp
@@ -370,7 +425,7 @@ impl Session {
             while let Some(event) = sctp.poll_event() {
                 match event {
                     SctpEvent::Connected => {
-                        open_channels_if_controlling(self.is_controlling, sctp)?
+                        open_channels_if_controlling(self.is_controlling, sctp, &mut self.channels)?
                     }
                     SctpEvent::HandshakeFailed { .. } | SctpEvent::AssociationLost { .. } => {
                         failed = true;
@@ -393,8 +448,8 @@ impl Session {
             self.fail();
         }
 
-        if self.channels.reliable_open
-            && self.channels.unreliable_open
+        if self.channels.reliable_stream_id.is_some()
+            && self.channels.unreliable_stream_id.is_some()
             && !self.channels.ready_emitted
         {
             self.channels.ready_emitted = true;
@@ -414,9 +469,32 @@ impl Session {
     }
 }
 
+impl Sans for Session {
+    type Input = SessionInput;
+    type Output = SessionOutput;
+    type Error = ProtocolError;
+
+    fn handle(&mut self, msg: SessionInput) -> Result<(), ProtocolError> {
+        match msg {
+            SessionInput::Packet(data, from, now) => self.handle_packet(&data, from, now),
+            SessionInput::RemoteDescription(remote, candidates) => {
+                self.set_remote_description(&remote, candidates)
+            }
+            SessionInput::RemoteCandidate(candidate) => self.add_remote_candidate(candidate),
+            SessionInput::Send(channel, data) => self.send(channel, data),
+            SessionInput::Timeout(now) => self.handle_timeout(now),
+        }
+    }
+
+    fn poll(&mut self) -> Option<SessionOutput> {
+        self.output.pop_front()
+    }
+}
+
 fn open_channels_if_controlling(
     is_controlling: bool,
     sctp: &mut SctpLayer,
+    channels: &mut Channels,
 ) -> Result<(), ProtocolError> {
     if !is_controlling {
         return Ok(());
@@ -425,9 +503,13 @@ fn open_channels_if_controlling(
         return Ok(());
     };
 
-    for (stream_id, open) in [
-        (RELIABLE_STREAM_ID, dcep::reliable_open()),
-        (UNRELIABLE_STREAM_ID, dcep::unreliable_open()),
+    for (stream_id, channel, open) in [
+        (RELIABLE_STREAM_ID, Channel::Reliable, dcep::reliable_open()),
+        (
+            UNRELIABLE_STREAM_ID,
+            Channel::Unreliable,
+            dcep::unreliable_open(),
+        ),
     ] {
         let mut stream = assoc
             .open_stream(stream_id, PayloadProtocolIdentifier::Binary)
@@ -436,6 +518,7 @@ fn open_channels_if_controlling(
         stream
             .write_with_ppi(&encoded, dcep::PPI_DCEP)
             .map_err(|e| ProtocolError::Other(format!("{e}")))?;
+        channels.set_open(channel, stream_id);
     }
 
     Ok(())
@@ -465,22 +548,20 @@ fn drain_dcep_and_data(
                 None
             };
             if let Some(channel) = channel {
+                let stream_id = stream.stream_identifier();
                 let ack = dcep::encode_ack()?;
                 stream
                     .write_with_ppi(&ack, dcep::PPI_DCEP)
                     .map_err(|e| ProtocolError::Other(format!("{e}")))?;
-                match channel {
-                    Channel::Reliable => channels.reliable_open = true,
-                    Channel::Unreliable => channels.unreliable_open = true,
-                }
+                channels.set_open(channel, stream_id);
             }
         }
     }
 
-    for (stream_id, channel) in [
-        (RELIABLE_STREAM_ID, Channel::Reliable),
-        (UNRELIABLE_STREAM_ID, Channel::Unreliable),
-    ] {
+    for channel in [Channel::Reliable, Channel::Unreliable] {
+        let Some(stream_id) = channels.stream_id(channel) else {
+            continue;
+        };
         let Ok(mut stream) = assoc.stream(stream_id) else {
             continue;
         };
@@ -491,12 +572,8 @@ fn drain_dcep_and_data(
             };
 
             if is_dcep {
-                if let Ok(DcepMessage::DataChannelAck(_)) = dcep::decode(&data) {
-                    match channel {
-                        Channel::Reliable => channels.reliable_open = true,
-                        Channel::Unreliable => channels.unreliable_open = true,
-                    }
-                }
+                // The controlling side's own opens are already marked open in
+                // `open_channels_if_controlling`; an incoming ack just confirms it.
                 continue;
             }
 
@@ -559,10 +636,16 @@ mod tests {
         let (parsed_answer, answer_candidates) = Description::parse(&answer_sdp).unwrap();
 
         answerer
-            .set_remote_description(&parsed_offer, offer_candidates)
+            .handle(SessionInput::RemoteDescription(
+                parsed_offer,
+                offer_candidates,
+            ))
             .unwrap();
         offerer
-            .set_remote_description(&parsed_answer, answer_candidates)
+            .handle(SessionInput::RemoteDescription(
+                parsed_answer,
+                answer_candidates,
+            ))
             .unwrap();
 
         let mut offerer_ready = false;
@@ -581,11 +664,14 @@ mod tests {
                         panic!("session failed unexpectedly")
                     }
                     SessionOutput::Message(..) => panic!("unexpected message before Ready"),
+                    SessionOutput::Wait(_) => {}
                 }
             }
             for (data, to) in offerer_outbox {
                 assert_eq!(to, addr(40101));
-                answerer.handle_packet(&data, addr(40100), now).unwrap();
+                answerer
+                    .handle(SessionInput::Packet(data.into(), addr(40100), now))
+                    .unwrap();
             }
 
             let mut answerer_outbox = Vec::new();
@@ -598,11 +684,14 @@ mod tests {
                         panic!("session failed unexpectedly")
                     }
                     SessionOutput::Message(..) => panic!("unexpected message before Ready"),
+                    SessionOutput::Wait(_) => {}
                 }
             }
             for (data, to) in answerer_outbox {
                 assert_eq!(to, addr(40100));
-                offerer.handle_packet(&data, addr(40101), now).unwrap();
+                offerer
+                    .handle(SessionInput::Packet(data.into(), addr(40101), now))
+                    .unwrap();
             }
 
             if offerer_ready && answerer_ready {
@@ -610,15 +699,9 @@ mod tests {
             }
 
             if !progressed {
-                let next = [offerer.poll_timeout(now), answerer.poll_timeout(now)]
-                    .into_iter()
-                    .flatten()
-                    .min();
-                now = next
-                    .unwrap_or(now + Duration::from_millis(20))
-                    .max(now + Duration::from_millis(1));
-                offerer.handle_timeout(now).unwrap();
-                answerer.handle_timeout(now).unwrap();
+                now += Duration::from_millis(5);
+                offerer.handle(SessionInput::Timeout(now)).unwrap();
+                answerer.handle(SessionInput::Timeout(now)).unwrap();
             }
         }
 
@@ -629,28 +712,28 @@ mod tests {
 
         // Exchange messages in both directions on both channels.
         offerer
-            .send(
+            .handle(SessionInput::Send(
                 Channel::Reliable,
                 Bytes::from_static(b"hello from offerer (reliable)"),
-            )
+            ))
             .unwrap();
         offerer
-            .send(
+            .handle(SessionInput::Send(
                 Channel::Unreliable,
                 Bytes::from_static(b"hello from offerer (unreliable)"),
-            )
+            ))
             .unwrap();
         answerer
-            .send(
+            .handle(SessionInput::Send(
                 Channel::Reliable,
                 Bytes::from_static(b"hello from answerer (reliable)"),
-            )
+            ))
             .unwrap();
         answerer
-            .send(
+            .handle(SessionInput::Send(
                 Channel::Unreliable,
                 Bytes::from_static(b"hello from answerer (unreliable)"),
-            )
+            ))
             .unwrap();
 
         let mut offerer_received = Vec::new();
@@ -664,12 +747,14 @@ mod tests {
                 progressed = true;
                 match output {
                     SessionOutput::Send(data, to) => offerer_outbox.push((data, to)),
-                    SessionOutput::Event(_) => {}
+                    SessionOutput::Event(_) | SessionOutput::Wait(_) => {}
                     SessionOutput::Message(channel, data) => offerer_received.push((channel, data)),
                 }
             }
             for (data, to) in offerer_outbox {
-                answerer.handle_packet(&data, to, now).unwrap();
+                answerer
+                    .handle(SessionInput::Packet(data.into(), to, now))
+                    .unwrap();
             }
 
             let mut answerer_outbox = Vec::new();
@@ -677,14 +762,16 @@ mod tests {
                 progressed = true;
                 match output {
                     SessionOutput::Send(data, to) => answerer_outbox.push((data, to)),
-                    SessionOutput::Event(_) => {}
+                    SessionOutput::Event(_) | SessionOutput::Wait(_) => {}
                     SessionOutput::Message(channel, data) => {
                         answerer_received.push((channel, data))
                     }
                 }
             }
             for (data, to) in answerer_outbox {
-                offerer.handle_packet(&data, to, now).unwrap();
+                offerer
+                    .handle(SessionInput::Packet(data.into(), to, now))
+                    .unwrap();
             }
 
             if offerer_received.len() >= 2 && answerer_received.len() >= 2 {
@@ -693,8 +780,8 @@ mod tests {
 
             if !progressed {
                 now += Duration::from_millis(5);
-                offerer.handle_timeout(now).unwrap();
-                answerer.handle_timeout(now).unwrap();
+                offerer.handle(SessionInput::Timeout(now)).unwrap();
+                answerer.handle(SessionInput::Timeout(now)).unwrap();
             }
         }
 

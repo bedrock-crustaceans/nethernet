@@ -1,10 +1,12 @@
-use crate::connection::{ConnectionDriver, ConnectionEvent, bind_session_socket};
+use crate::connection::{ConnectionEvent, SessionPool};
 use crate::http_wire;
+use crate::socket::bind_shared_socket;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
-use nethernet::connection::{Connection, IceMode};
+use nethernet::connection::{Connection, ConnectionInput, IceMode};
 use nethernet::error::ProtocolError;
 use nethernet::protocol::Signal;
+use nethernet::sans::Sans;
 use nethernet::session::{Channel, Session};
 use nethernet::signaling::http::join;
 use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
@@ -131,6 +133,7 @@ fn drive_join(state: JoinState) -> JoinStep {
 struct Join {
     state: JoinState,
     connection: Connection,
+    local_ufrag: String,
     session_socket: UdpSocket,
     server_url: String,
 }
@@ -138,7 +141,8 @@ struct Join {
 #[derive(Resource, Default)]
 pub struct NetherHttpClient {
     join: Option<Join>,
-    connection: Option<ConnectionDriver>,
+    pool: Option<SessionPool<()>>,
+    connected: bool,
     connecting_since: Option<Instant>,
     ready: bool,
     events: VecDeque<NetherHttpClientEvent>,
@@ -159,7 +163,8 @@ impl NetherHttpClient {
     /// Only plain HTTP is supported. Replaces any join or connection in progress.
     pub fn connect(&mut self, local_network_id: String, server_url: String) -> std::io::Result<()> {
         self.join = None;
-        self.connection = None;
+        self.pool = None;
+        self.connected = false;
         self.ready = false;
 
         let host = server_url.strip_prefix("http://").ok_or_else(|| {
@@ -170,9 +175,10 @@ impl NetherHttpClient {
             .next()
             .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "could not resolve host"))?;
 
-        let (session_socket, local_addr) = bind_session_socket()?;
+        let (session_socket, local_addr) = bind_shared_socket()?;
         let (session, description) =
             Session::new(local_addr, true).map_err(std::io::Error::other)?;
+        let local_ufrag = description.ice.ufrag.clone();
 
         let connection_id = rand::random::<u64>();
         let (connection, signals) = Connection::connect(
@@ -203,6 +209,7 @@ impl NetherHttpClient {
                 written: 0,
             },
             connection,
+            local_ufrag,
             session_socket,
             server_url,
         });
@@ -212,7 +219,8 @@ impl NetherHttpClient {
 
     pub fn disconnect(&mut self) {
         self.join = None;
-        self.connection = None;
+        self.pool = None;
+        self.connected = false;
         self.connecting_since = None;
         if self.ready {
             self.ready = false;
@@ -229,10 +237,11 @@ impl NetherHttpClient {
     }
 
     fn send_on(&mut self, channel: Channel, data: &[u8]) -> Result<(), ProtocolError> {
-        let Some(connection) = self.connection.as_mut() else {
+        if !self.connected {
             return Err(ProtocolError::Other("not connected".to_string()));
-        };
-        connection.send(channel, data.into())
+        }
+        self.pool.as_mut().unwrap().send((), channel, data.into());
+        Ok(())
     }
 
     pub fn recv(&mut self) -> Option<Box<[u8]>> {
@@ -260,14 +269,25 @@ impl NetherHttpClient {
                     Ok(()) => {
                         let Join {
                             mut connection,
+                            local_ufrag,
                             session_socket,
                             server_url,
                             ..
                         } = join;
                         let answer = Signal::answer(connection.connection_id(), body, server_url);
-                        if connection.handle_signal(&answer).is_ok() {
-                            self.connection =
-                                Some(ConnectionDriver::new(session_socket, connection));
+
+                        // Applied here, before the connection is handed to the pool and
+                        // its socket starts being read - otherwise the server's first
+                        // datagram (sent as soon as it accepted the offer, well before
+                        // this join even completes) can arrive before the remote
+                        // candidate this answer carries is known, and gets registered as
+                        // a peer-reflexive candidate instead, which ICE won't nominate
+                        // for a full extra second (RFC 8445's acceptance grace period).
+                        if connection.handle(ConnectionInput::Signal(answer)).is_ok() {
+                            let mut pool = SessionPool::new(session_socket);
+                            pool.add((), connection, local_ufrag);
+                            self.pool = Some(pool);
+                            self.connected = true;
                         } else {
                             self.connecting_since = None;
                             self.events.push_back(NetherHttpClientEvent::ConnectFailed);
@@ -286,11 +306,11 @@ impl NetherHttpClient {
             }
         }
 
-        if let Some(connection) = self.connection.as_mut() {
+        if let Some(pool) = self.pool.as_mut() {
             let mut events = Vec::new();
-            connection.drive(now, &mut events);
+            pool.drive(&mut events);
 
-            for event in events {
+            for ((), event) in events {
                 match event {
                     ConnectionEvent::Ready if !self.ready => {
                         self.ready = true;
@@ -307,7 +327,8 @@ impl NetherHttpClient {
                     ConnectionEvent::Failed => {
                         let was_ready = self.ready;
                         self.join = None;
-                        self.connection = None;
+                        self.pool = None;
+                        self.connected = false;
                         self.connecting_since = None;
                         self.ready = false;
                         self.events.push_back(if was_ready {
@@ -325,7 +346,8 @@ impl NetherHttpClient {
         {
             let was_ready = self.ready;
             self.join = None;
-            self.connection = None;
+            self.pool = None;
+            self.connected = false;
             self.connecting_since = None;
             self.ready = false;
             self.events.push_back(if was_ready {

@@ -1,4 +1,5 @@
-use crate::connection::{ConnectionDriver, ConnectionEvent, bind_session_socket};
+use crate::connection::{ConnectionEvent, SessionPool};
+use crate::socket::bind_shared_socket;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use nethernet::connection::{Connection, IceMode};
@@ -56,7 +57,9 @@ pub enum NetherClientEvent {
 pub struct NetherClient {
     signaler: LanSignaler,
     socket: UdpSocket,
-    connection: Option<ConnectionDriver>,
+    pool: SessionPool<()>,
+    session_local_addr: SocketAddr,
+    connected: bool,
     connecting_since: Option<Instant>,
     ready: bool,
     received: VecDeque<Box<[u8]>>,
@@ -83,10 +86,14 @@ impl NetherClient {
         socket.set_nonblocking(true)?;
         socket.set_broadcast(true)?;
 
+        let (session_socket, session_local_addr) = bind_shared_socket()?;
+
         Ok(Self {
             signaler: LanSignaler::new(network_id, config),
             socket,
-            connection: None,
+            pool: SessionPool::new(session_socket),
+            session_local_addr,
+            connected: false,
             connecting_since: None,
             ready: false,
             received: VecDeque::new(),
@@ -105,9 +112,9 @@ impl NetherClient {
     }
 
     pub fn connect(&mut self, target_network_id: u64) -> std::io::Result<()> {
-        let (socket, local_addr) = bind_session_socket()?;
         let (session, description) =
-            Session::new(local_addr, true).map_err(std::io::Error::other)?;
+            Session::new(self.session_local_addr, true).map_err(std::io::Error::other)?;
+        let local_ufrag = description.ice.ufrag.clone();
 
         let connection_id = rand::random::<u64>();
         let (connection, signals) = Connection::connect(
@@ -123,7 +130,11 @@ impl NetherClient {
             let _ = self.signaler.handle(LanSignalerInput::Signal(signal, now));
         }
 
-        self.connection = Some(ConnectionDriver::new(socket, connection));
+        if self.connected {
+            self.pool.remove(());
+        }
+        self.pool.add((), connection, local_ufrag);
+        self.connected = true;
         self.connecting_since = Some(now);
         self.ready = false;
         Ok(())
@@ -131,7 +142,10 @@ impl NetherClient {
 
     pub fn disconnect(&mut self) {
         self.connecting_since = None;
-        self.connection = None;
+        if self.connected {
+            self.pool.remove(());
+            self.connected = false;
+        }
         if self.ready {
             self.ready = false;
             self.events.push_back(NetherClientEvent::Disconnected);
@@ -151,12 +165,13 @@ impl NetherClient {
         channel: Channel,
         data: &[u8],
     ) -> Result<(), nethernet::error::ProtocolError> {
-        let Some(connection) = self.connection.as_mut() else {
+        if !self.connected {
             return Err(nethernet::error::ProtocolError::Other(
                 "not connected".to_string(),
             ));
-        };
-        connection.send(channel, data.into())
+        }
+        self.pool.send((), channel, data.into());
+        Ok(())
     }
 
     pub fn recv(&mut self) -> Option<Box<[u8]>> {
@@ -203,14 +218,14 @@ impl NetherClient {
             }
         }
 
-        let Some(connection) = self.connection.as_mut() else {
+        if !self.connected {
             return;
-        };
+        }
 
         let mut events = Vec::new();
-        connection.drive(now, &mut events);
+        self.pool.drive(&mut events);
 
-        for event in events {
+        for ((), event) in events {
             match event {
                 ConnectionEvent::Ready if !self.ready => {
                     self.ready = true;
@@ -224,7 +239,7 @@ impl NetherClient {
                 }
                 ConnectionEvent::Failed => {
                     self.connecting_since = None;
-                    self.connection = None;
+                    self.connected = false;
                     self.events.push_back(NetherClientEvent::Disconnected);
                 }
             }
@@ -234,21 +249,16 @@ impl NetherClient {
             && now.saturating_duration_since(since) >= CONNECT_TIMEOUT
         {
             self.connecting_since = None;
-            self.connection = None;
+            self.pool.remove(());
+            self.connected = false;
             self.events.push_back(NetherClientEvent::Disconnected);
         }
     }
 
     fn handle_signal(&mut self, signal: Signal) {
-        if signal.signal_type == SignalType::Offer {
+        if signal.signal_type == SignalType::Offer || !self.connected {
             return;
         }
-        let Some(connection) = self.connection.as_mut() else {
-            return;
-        };
-        if let Err(e) = connection.handle_signal(&signal) {
-            tracing::debug!("connection rejected signal: {e}");
-            self.disconnect();
-        }
+        self.pool.signal((), &signal);
     }
 }

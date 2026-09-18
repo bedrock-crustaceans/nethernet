@@ -11,3 +11,11 @@ pub(crate) fn local_bind_addr() -> SocketAddr {
 
     SocketAddr::new(probe().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)), 0)
 }
+
+/// Binds the one socket every session of a client or server shares (see
+/// [`crate::connection::SessionPool`]).
+pub(crate) fn bind_shared_socket() -> std::io::Result<(UdpSocket, SocketAddr)> {
+    let socket = UdpSocket::bind(local_bind_addr())?;
+    let addr = socket.local_addr()?;
+    Ok((socket, addr))
+}

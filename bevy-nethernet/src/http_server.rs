@@ -1,6 +1,7 @@
-use crate::connection::{ConnectionDriver, ConnectionEvent, bind_session_socket};
+use crate::connection::{ConnectionEvent, SessionPool};
 use crate::http_wire;
 use crate::server::NetherSessionId;
+use crate::socket::bind_shared_socket;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use nethernet::connection::{Connection, IceMode};
@@ -68,7 +69,6 @@ struct TcpConn {
 }
 
 struct SessionEntry {
-    driver: ConnectionDriver,
     ready: bool,
     created: Instant,
 }
@@ -77,6 +77,8 @@ struct SessionEntry {
 pub struct NetherHttpServer {
     listener: TcpListener,
     signaler: HttpSignaler,
+    pool: SessionPool<NetherSessionId>,
+    session_local_addr: SocketAddr,
     next_conn_id: u64,
     connections: HashMap<u64, TcpConn>,
     sessions: HashMap<NetherSessionId, SessionEntry>,
@@ -96,9 +98,13 @@ impl NetherHttpServer {
         let listener = TcpListener::bind(bind_addr)?;
         listener.set_nonblocking(true)?;
 
+        let (session_socket, session_local_addr) = bind_shared_socket()?;
+
         Ok(Self {
             listener,
             signaler: HttpSignaler::new(config),
+            pool: SessionPool::new(session_socket),
+            session_local_addr,
             next_conn_id: 0,
             connections: HashMap::new(),
             sessions: HashMap::new(),
@@ -147,12 +153,13 @@ impl NetherHttpServer {
         channel: Channel,
         data: &[u8],
     ) -> Result<(), nethernet::error::ProtocolError> {
-        let Some(entry) = self.sessions.get_mut(id) else {
+        if !self.sessions.contains_key(id) {
             return Err(nethernet::error::ProtocolError::Other(
                 "unknown session".to_string(),
             ));
-        };
-        entry.driver.send(channel, data.into())
+        }
+        self.pool.send(id.clone(), channel, data.into());
+        Ok(())
     }
 
     pub fn recv(&mut self) -> Option<(NetherSessionId, Box<[u8]>)> {
@@ -165,6 +172,7 @@ impl NetherHttpServer {
 
     pub fn disconnect(&mut self, id: &NetherSessionId) {
         if self.sessions.remove(id).is_some() {
+            self.pool.remove(id.clone());
             self.events
                 .push_back(NetherHttpServerEvent::SessionDisconnected(id.clone()));
         }
@@ -186,7 +194,7 @@ impl NetherHttpServer {
             self.handle_output(output, now);
         }
 
-        self.drive_sessions(now);
+        self.drive_sessions();
 
         self.connections
             .retain(|_, conn| now.saturating_duration_since(conn.created) < CONNECT_TIMEOUT);
@@ -310,19 +318,20 @@ impl NetherHttpServer {
     }
 
     fn handle_offer(&mut self, offer: Offer, now: Instant) {
-        match accept_offer(&offer) {
-            Ok((answer_sdp, driver)) => {
+        match accept_offer(&offer, self.session_local_addr) {
+            Ok((answer_sdp, connection, local_ufrag)) => {
                 let _ = self.signaler.handle(HttpSignalerInput::Answer {
                     connection_id: offer.connection_id,
                     sdp: answer_sdp,
                 });
+                let id = NetherSessionId {
+                    network_id: offer.network_id,
+                    connection_id: offer.connection_id,
+                };
+                self.pool.add(id.clone(), connection, local_ufrag);
                 self.sessions.insert(
-                    NetherSessionId {
-                        network_id: offer.network_id,
-                        connection_id: offer.connection_id,
-                    },
+                    id,
                     SessionEntry {
-                        driver,
                         ready: false,
                         created: now,
                     },
@@ -337,28 +346,29 @@ impl NetherHttpServer {
         }
     }
 
-    fn drive_sessions(&mut self, now: Instant) {
-        let mut failed = Vec::new();
-        for (id, entry) in self.sessions.iter_mut() {
-            let mut events = Vec::new();
-            entry.driver.drive(now, &mut events);
+    fn drive_sessions(&mut self) {
+        let mut events = Vec::new();
+        self.pool.drive(&mut events);
 
-            for event in events {
-                match event {
-                    ConnectionEvent::Ready if !entry.ready => {
-                        entry.ready = true;
-                        self.events
-                            .push_back(NetherHttpServerEvent::SessionConnected(id.clone()));
-                    }
-                    ConnectionEvent::Ready => {}
-                    ConnectionEvent::Message(Channel::Reliable, data) => {
-                        self.received.push_back((id.clone(), data))
-                    }
-                    ConnectionEvent::Message(Channel::Unreliable, data) => {
-                        self.received_unreliable.push_back((id.clone(), data))
-                    }
-                    ConnectionEvent::Failed => failed.push(id.clone()),
+        let mut failed = Vec::new();
+        for (id, event) in events {
+            let Some(entry) = self.sessions.get_mut(&id) else {
+                continue;
+            };
+            match event {
+                ConnectionEvent::Ready if !entry.ready => {
+                    entry.ready = true;
+                    self.events
+                        .push_back(NetherHttpServerEvent::SessionConnected(id));
                 }
+                ConnectionEvent::Ready => {}
+                ConnectionEvent::Message(Channel::Reliable, data) => {
+                    self.received.push_back((id, data))
+                }
+                ConnectionEvent::Message(Channel::Unreliable, data) => {
+                    self.received_unreliable.push_back((id, data))
+                }
+                ConnectionEvent::Failed => failed.push(id),
             }
         }
 
@@ -368,13 +378,15 @@ impl NetherHttpServer {
     }
 }
 
-fn accept_offer(offer: &Offer) -> Result<(String, ConnectionDriver), RejectReason> {
+fn accept_offer(
+    offer: &Offer,
+    session_local_addr: SocketAddr,
+) -> Result<(String, Connection, String), RejectReason> {
     let (remote_description, remote_candidates) =
         Description::parse(&offer.sdp).map_err(|_| RejectReason::Unavailable)?;
-    let (session_socket, local_addr) =
-        bind_session_socket().map_err(|_| RejectReason::Unavailable)?;
     let (session, description) =
-        Session::new(local_addr, false).map_err(|_| RejectReason::Unavailable)?;
+        Session::new(session_local_addr, false).map_err(|_| RejectReason::Unavailable)?;
+    let local_ufrag = description.ice.ufrag.clone();
 
     let offer_signal = Signal::offer(
         offer.connection_id,
@@ -396,8 +408,5 @@ fn accept_offer(offer: &Offer) -> Result<(String, ConnectionDriver), RejectReaso
         .next()
         .ok_or(RejectReason::Unavailable)?;
 
-    Ok((
-        answer.data,
-        ConnectionDriver::new(session_socket, connection),
-    ))
+    Ok((answer.data, connection, local_ufrag))
 }

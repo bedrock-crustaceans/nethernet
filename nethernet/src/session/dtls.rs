@@ -11,6 +11,7 @@ use rtc::dtls::config::{ClientAuthType, ConfigBuilder};
 use rtc::dtls::crypto::Certificate;
 use rtc::dtls::endpoint::Endpoint;
 pub use rtc::dtls::endpoint::EndpointEvent;
+use rtc::dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 use rtc::shared::{TransportProtocol, error::Error as SharedError};
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
@@ -64,6 +65,14 @@ impl DtlsLayer {
             .with_insecure_skip_verify(true)
             .with_client_auth(ClientAuthType::RequireAnyClientCert)
             .with_verify_peer_certificate(Some(verify_fingerprint(remote_fingerprint)))
+            // No SRTP is ever carried, but a peer's WebRTC stack (e.g. Pion) still
+            // requires the shared DTLS transport to negotiate a protection profile
+            // through `use_srtp`, or it refuses the otherwise-complete handshake.
+            .with_srtp_protection_profiles(vec![
+                SrtpProtectionProfile::Srtp_Aead_Aes_256_Gcm,
+                SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
+                SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
+            ])
             .build(is_client, Some(remote_addr))
             .map_err(|e| ProtocolError::Other(format!("build DTLS config: {e}")))?;
         let config = Arc::new(config);
@@ -147,7 +156,10 @@ fn verify_fingerprint(expected: (String, String)) -> rtc::dtls::config::VerifyPe
             .collect::<Vec<_>>()
             .join(":");
 
-        if expected.0.eq_ignore_ascii_case("sha-256") && hex == expected.1 {
+        // RFC 4572 specifies uppercase hex, but real peers (e.g. Pion, which formats
+        // with Go's lowercase `%x`) don't all follow that, so the comparison has to be
+        // case-insensitive to interoperate.
+        if expected.0.eq_ignore_ascii_case("sha-256") && hex.eq_ignore_ascii_case(&expected.1) {
             Ok(())
         } else {
             Err(SharedError::ErrFingerprintMismatch)
@@ -211,6 +223,81 @@ mod tests {
             while let Some((data, to)) = server.poll_transmit() {
                 progressed = true;
                 assert_eq!(to, addr(40010));
+                for event in client.handle_read(&data, now).unwrap() {
+                    if matches!(event, EndpointEvent::HandshakeComplete) {
+                        client_done = true;
+                    }
+                }
+            }
+
+            if client_done && server_done {
+                break;
+            }
+
+            if !progressed {
+                let next = [client.poll_timeout(now), server.poll_timeout(now)]
+                    .into_iter()
+                    .flatten()
+                    .min();
+                now = next
+                    .unwrap_or(now + Duration::from_millis(20))
+                    .max(now + Duration::from_millis(1));
+                client.handle_timeout(now).unwrap();
+                server.handle_timeout(now).unwrap();
+            }
+        }
+
+        assert!(client_done, "client handshake never completed");
+        assert!(server_done, "server handshake never completed");
+    }
+
+    /// Pion (and so `go-nethernet`/gophertunnel) formats fingerprints with Go's
+    /// lowercase `%x`, while this crate always signals uppercase; the check has to
+    /// tolerate that mismatch or every non-Rust peer fails the handshake.
+    #[test]
+    fn a_lowercase_remote_fingerprint_still_verifies() {
+        let mut now = Instant::now();
+
+        let client_cert = certificate::generate().unwrap();
+        let server_cert = certificate::generate().unwrap();
+        let (algorithm, client_fp) = certificate::fingerprint(&client_cert).unwrap();
+        let server_fp = certificate::fingerprint(&server_cert).unwrap();
+
+        let mut client = DtlsLayer::new(
+            addr(40012),
+            addr(40013),
+            ResolvedRole::Client,
+            client_cert,
+            server_fp,
+        )
+        .unwrap();
+        let mut server = DtlsLayer::new(
+            addr(40013),
+            addr(40012),
+            ResolvedRole::Server,
+            server_cert,
+            (algorithm, client_fp.to_lowercase()),
+        )
+        .unwrap();
+
+        let mut client_done = false;
+        let mut server_done = false;
+
+        for _ in 0..2000 {
+            let mut progressed = false;
+
+            while let Some((data, to)) = client.poll_transmit() {
+                progressed = true;
+                assert_eq!(to, addr(40013));
+                for event in server.handle_read(&data, now).unwrap() {
+                    if matches!(event, EndpointEvent::HandshakeComplete) {
+                        server_done = true;
+                    }
+                }
+            }
+            while let Some((data, to)) = server.poll_transmit() {
+                progressed = true;
+                assert_eq!(to, addr(40012));
                 for event in client.handle_read(&data, now).unwrap() {
                     if matches!(event, EndpointEvent::HandshakeComplete) {
                         client_done = true;

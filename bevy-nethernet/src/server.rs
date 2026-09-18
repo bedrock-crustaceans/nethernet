@@ -1,4 +1,5 @@
-use crate::connection::{ConnectionDriver, ConnectionEvent, bind_session_socket};
+use crate::connection::{ConnectionEvent, SessionPool};
+use crate::socket::bind_shared_socket;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use nethernet::connection::{Connection, IceMode};
@@ -59,7 +60,6 @@ pub enum NetherServerEvent {
 }
 
 struct SessionEntry {
-    driver: ConnectionDriver,
     ready: bool,
     created: Instant,
 }
@@ -68,6 +68,8 @@ struct SessionEntry {
 pub struct NetherServer {
     signaler: LanSignaler,
     socket: UdpSocket,
+    pool: SessionPool<NetherSessionId>,
+    session_local_addr: SocketAddr,
     sessions: HashMap<NetherSessionId, SessionEntry>,
     received: VecDeque<(NetherSessionId, Box<[u8]>)>,
     received_unreliable: VecDeque<(NetherSessionId, Box<[u8]>)>,
@@ -87,9 +89,13 @@ impl NetherServer {
         socket.set_nonblocking(true)?;
         socket.set_broadcast(true)?;
 
+        let (session_socket, session_local_addr) = bind_shared_socket()?;
+
         Ok(Self {
             signaler: LanSignaler::new(network_id, config),
             socket,
+            pool: SessionPool::new(session_socket),
+            session_local_addr,
             sessions: HashMap::new(),
             received: VecDeque::new(),
             received_unreliable: VecDeque::new(),
@@ -133,12 +139,13 @@ impl NetherServer {
         channel: Channel,
         data: &[u8],
     ) -> Result<(), nethernet::error::ProtocolError> {
-        let Some(entry) = self.sessions.get_mut(id) else {
+        if !self.sessions.contains_key(id) {
             return Err(nethernet::error::ProtocolError::Other(
                 "unknown session".to_string(),
             ));
-        };
-        entry.driver.send(channel, data.into())
+        }
+        self.pool.send(id.clone(), channel, data.into());
+        Ok(())
     }
 
     pub fn recv(&mut self) -> Option<(NetherSessionId, Box<[u8]>)> {
@@ -151,6 +158,7 @@ impl NetherServer {
 
     pub fn disconnect(&mut self, id: &NetherSessionId) {
         if self.sessions.remove(id).is_some() {
+            self.pool.remove(id.clone());
             self.events
                 .push_back(NetherServerEvent::SessionDisconnected(id.clone()));
         }
@@ -189,27 +197,28 @@ impl NetherServer {
             }
         }
 
-        let mut failed = Vec::new();
-        for (id, entry) in self.sessions.iter_mut() {
-            let mut events = Vec::new();
-            entry.driver.drive(now, &mut events);
+        let mut events = Vec::new();
+        self.pool.drive(&mut events);
 
-            for event in events {
-                match event {
-                    ConnectionEvent::Ready if !entry.ready => {
-                        entry.ready = true;
-                        self.events
-                            .push_back(NetherServerEvent::SessionConnected(id.clone()));
-                    }
-                    ConnectionEvent::Ready => {}
-                    ConnectionEvent::Message(Channel::Reliable, data) => {
-                        self.received.push_back((id.clone(), data))
-                    }
-                    ConnectionEvent::Message(Channel::Unreliable, data) => {
-                        self.received_unreliable.push_back((id.clone(), data))
-                    }
-                    ConnectionEvent::Failed => failed.push(id.clone()),
+        let mut failed = Vec::new();
+        for (id, event) in events {
+            let Some(entry) = self.sessions.get_mut(&id) else {
+                continue;
+            };
+            match event {
+                ConnectionEvent::Ready if !entry.ready => {
+                    entry.ready = true;
+                    self.events
+                        .push_back(NetherServerEvent::SessionConnected(id));
                 }
+                ConnectionEvent::Ready => {}
+                ConnectionEvent::Message(Channel::Reliable, data) => {
+                    self.received.push_back((id, data))
+                }
+                ConnectionEvent::Message(Channel::Unreliable, data) => {
+                    self.received_unreliable.push_back((id, data))
+                }
+                ConnectionEvent::Failed => failed.push(id),
             }
         }
 
@@ -232,10 +241,8 @@ impl NetherServer {
             network_id: signal.network_id.clone(),
             connection_id: signal.connection_id,
         };
-        if let Some(entry) = self.sessions.get_mut(&id)
-            && let Err(e) = entry.driver.handle_signal(&signal)
-        {
-            tracing::debug!("session rejected signal: {e}");
+        if self.sessions.contains_key(&id) {
+            self.pool.signal(id, &signal);
         }
     }
 
@@ -251,12 +258,10 @@ impl NetherServer {
         let Ok((remote_description, remote_candidates)) = Connection::parse_offer(&offer) else {
             return;
         };
-        let Ok((socket, local_addr)) = bind_session_socket() else {
+        let Ok((session, description)) = Session::new(self.session_local_addr, false) else {
             return;
         };
-        let Ok((session, description)) = Session::new(local_addr, false) else {
-            return;
-        };
+        let local_ufrag = description.ice.ufrag.clone();
         let Ok((connection, signals)) = Connection::accept(
             session,
             description,
@@ -272,10 +277,10 @@ impl NetherServer {
             let _ = self.signaler.handle(LanSignalerInput::Signal(signal, now));
         }
 
+        self.pool.add(id.clone(), connection, local_ufrag);
         self.sessions.insert(
             id,
             SessionEntry {
-                driver: ConnectionDriver::new(socket, connection),
                 ready: false,
                 created: now,
             },

@@ -5,8 +5,9 @@ use crate::session::{AcceptedSession, Command, Session};
 use crate::signaling::ServerSignaling;
 use crate::transport::{ConnectionConfig, local_bind_addr};
 use futures::{Stream, StreamExt};
-use nethernet::connection::{Connection as SansConnection, IceMode};
+use nethernet::connection::{Connection as SansConnection, ConnectionInput, IceMode};
 use nethernet::identity::{PlayerInfo, validate_sdp};
+use nethernet::sans::Sans;
 use nethernet::session::Session as SansSession;
 use nethernet::util::candidate;
 use std::collections::HashMap;
@@ -276,11 +277,8 @@ impl NetherServer {
         if config.infer_peer_candidates && !candidate::has_routable_host_candidate(&signal.data) {
             for line in candidate::inferred_peer_candidates(&signal.data, remote_address) {
                 tracing::debug!("Inferred candidate for the peer: {}", line);
-                if let Err(e) = connection.handle_signal(&Signal::candidate(
-                    connection_id,
-                    line,
-                    network_id.clone(),
-                )) {
+                let signal = Signal::candidate(connection_id, line, network_id.clone());
+                if let Err(e) = connection.handle(ConnectionInput::Signal(signal)) {
                     tracing::warn!("Failed to add inferred candidate: {}", e);
                 }
             }

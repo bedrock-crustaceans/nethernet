@@ -96,46 +96,154 @@ pub fn inferred_peer_candidates(sdp: &str, signaled_from: Option<SocketAddr>) ->
         .collect()
 }
 
-/// Drops every candidate whose address is not in `allowed`.
+/// Priority a translated candidate is announced at: RFC 8445 §5.1.2.1's server-reflexive
+/// preference, below any host.
+const TRANSLATED_PRIORITY: u32 = (100 << 24) | (65535 << 8) | 255;
+
+/// Foundation the translated candidates are numbered from.
+const TRANSLATED_FOUNDATION: u32 = 80_000_000;
+
+/// Drops every host candidate whose address is not in `allowed`, and, for an allowed
+/// address this host never actually gathered, announces it as a server-reflexive
+/// candidate translated from a host candidate of the same address family.
 ///
 /// ICE gathers a candidate on every interface it can see, which on a host network
 /// includes container and overlay addresses that are unreachable from outside. Each one
 /// costs the remote connection a round of connectivity checks before it gives up, so a
-/// host that knows which of its addresses are reachable can announce only those. If
-/// nothing would be left the description is returned untouched, since no candidates at
+/// host that knows which of its addresses are reachable can announce only those.
+/// Reflexive and relayed candidates always stay, since they already describe what the
+/// outside sees rather than an interface.
+///
+/// The translation covers a server sitting behind a NAT or a port forward that never
+/// shows up in what ICE gathers locally, but that a peer can still reach: the port a
+/// forward maps to is normally the same one the host candidate uses, since consumer NATs
+/// and forwards alike preserve it. If nothing would be left - no held candidate and
+/// nothing to translate - the description is returned untouched, since no candidates at
 /// all can never connect.
 pub fn with_advertised_candidates(sdp: &str, allowed: &[String]) -> String {
     if allowed.is_empty() {
         return sdp.to_string();
     }
 
-    let allowed: HashSet<String> = allowed.iter().map(|address| normalized(address)).collect();
+    let lines: Vec<&str> = sdp
+        .split(['\r', '\n'])
+        .filter(|line| !line.is_empty())
+        .collect();
 
-    let mut out = String::with_capacity(sdp.len());
-    let mut kept = false;
-    let mut dropped = false;
-
-    for line in sdp.split(['\r', '\n']).filter(|line| !line.is_empty()) {
-        if line.starts_with(ATTRIBUTE_PREFIX) {
-            match address(line) {
-                Some(address) if allowed.contains(&normalized(address)) => kept = true,
-                _ => {
-                    dropped = true;
-                    continue;
-                }
-            }
+    let mut gathered: HashSet<String> = HashSet::new();
+    let mut hosts: Vec<Vec<&str>> = Vec::new();
+    for line in &lines {
+        if !line.starts_with(ATTRIBUTE_PREFIX) {
+            continue;
         }
-        out.push_str(line);
-        out.push_str("\r\n");
+        if let Some(address) = address(line) {
+            gathered.insert(normalized(address));
+        }
+        let parts: Vec<&str> = line.split(' ').collect();
+        if is_host_candidate(line) && parts.get(2).is_some_and(|p| p.eq_ignore_ascii_case("udp")) {
+            hosts.push(parts);
+        }
     }
 
-    if !kept && dropped {
+    let mut held: HashSet<String> = HashSet::new();
+    let mut foreign: Vec<String> = Vec::new();
+    for address in allowed {
+        let address = normalized(address);
+        if gathered.contains(&address) {
+            held.insert(address);
+        } else {
+            foreign.push(address);
+        }
+    }
+    foreign.sort();
+    // A held host is the more honest base for a translation, so it goes first for its family.
+    hosts.sort_by_key(|host| !held.contains(&normalized(host[4])));
+
+    let mut translated = translated_candidates(&hosts, &foreign);
+    if held.is_empty() && translated.is_empty() {
         tracing::warn!(
             "none of the gathered candidates match the advertised addresses, announcing all of them instead"
         );
         return sdp.to_string();
     }
+
+    let mut out = String::with_capacity(sdp.len());
+    let mut seen_candidates = false;
+    for line in &lines {
+        if line.starts_with(ATTRIBUTE_PREFIX) {
+            seen_candidates = true;
+            if !held.is_empty() && !is_reflexive_or_relayed(line) {
+                match address(line) {
+                    Some(address) if held.contains(&normalized(address)) => {}
+                    _ => continue,
+                }
+            }
+        } else if seen_candidates && !translated.is_empty() {
+            // Translations join the end of the candidate block, ahead of end-of-candidates.
+            for candidate in translated.drain(..) {
+                out.push_str(&candidate);
+                out.push_str("\r\n");
+            }
+        }
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    for candidate in translated.drain(..) {
+        out.push_str(&candidate);
+        out.push_str("\r\n");
+    }
     out
+}
+
+/// A server-reflexive candidate for every foreign address, based on a host candidate of
+/// the same family. One per address and port, since every interface shares the socket
+/// and would otherwise give the same line.
+fn translated_candidates(hosts: &[Vec<&str>], foreign: &[String]) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut emitted: HashSet<(&str, &str)> = HashSet::new();
+    let mut foundation = TRANSLATED_FOUNDATION;
+
+    for address in foreign {
+        let Some(target) = endpoint::parse(address) else {
+            tracing::warn!(
+                "advertised address {address} is not an IP literal, so it cannot be announced"
+            );
+            continue;
+        };
+
+        for host in hosts {
+            let same_family = matches!(
+                (target, endpoint::parse(host[4])),
+                (IpAddr::V4(_), Some(IpAddr::V4(_))) | (IpAddr::V6(_), Some(IpAddr::V6(_)))
+            );
+            if !same_family || !emitted.insert((address.as_str(), host[5])) {
+                continue;
+            }
+
+            candidates.push(format!(
+                "{ATTRIBUTE_PREFIX}{} 1 {} {TRANSLATED_PRIORITY} {} {} typ srflx raddr {} rport {}",
+                foundation, host[2], address, host[5], host[4], host[5]
+            ));
+            foundation += 1;
+        }
+    }
+
+    candidates
+}
+
+fn candidate_type(candidate: &str) -> Option<&str> {
+    let parts: Vec<&str> = candidate.split(' ').collect();
+    (parts.len() >= 8 && parts[6] == "typ").then(|| parts[7])
+}
+
+fn is_host_candidate(candidate: &str) -> bool {
+    candidate_type(candidate) == Some("host")
+}
+
+/// Whether a STUN or TURN exchange produced the candidate, describing the outside rather
+/// than an interface.
+fn is_reflexive_or_relayed(candidate: &str) -> bool {
+    matches!(candidate_type(candidate), Some("srflx" | "prflx" | "relay"))
 }
 
 /// The candidate lines of a description, with their attribute prefix left in place.
@@ -232,9 +340,52 @@ mod tests {
     }
 
     #[test]
-    fn a_description_that_would_lose_every_candidate_is_left_alone() {
-        let filtered = with_advertised_candidates(OFFER, &["203.0.113.1".to_string()]);
+    fn a_foreign_address_is_announced_as_a_translated_candidate() {
+        let translated = with_advertised_candidates(OFFER, &["203.0.113.1".to_string()]);
+
+        // Never gathered locally, so every host candidate stays (nothing is "held" to
+        // filter down to) and a translation is appended for each host's port.
+        assert!(translated.contains("192.168.1.10"));
+        assert!(translated.contains("10.0.0.5"));
+        assert!(translated.contains(
+            "a=candidate:80000000 1 udp 1694498815 203.0.113.1 54321 typ srflx \
+             raddr 192.168.1.10 rport 54321"
+        ));
+        assert!(translated.contains(
+            "a=candidate:80000001 1 udp 1694498815 203.0.113.1 54322 typ srflx \
+             raddr 10.0.0.5 rport 54322"
+        ));
+    }
+
+    #[test]
+    fn a_description_that_would_lose_every_candidate_and_cannot_be_translated_is_left_alone() {
+        let filtered = with_advertised_candidates(OFFER, &["not-an-ip-literal".to_string()]);
 
         assert_eq!(filtered, OFFER);
+    }
+
+    #[test]
+    fn a_held_host_is_preferred_as_the_translation_base_for_its_family() {
+        // 192.168.1.10 is held (advertised and actually gathered), so its translation
+        // - not 10.0.0.5's - comes first for the shared IPv4 family.
+        let translated = with_advertised_candidates(
+            OFFER,
+            &["192.168.1.10".to_string(), "203.0.113.1".to_string()],
+        );
+
+        let from_held = translated.find("raddr 192.168.1.10").unwrap();
+        let from_other = translated.find("raddr 10.0.0.5").unwrap();
+        assert!(from_held < from_other, "{translated}");
+    }
+
+    #[test]
+    fn reflexive_and_relayed_candidates_are_never_dropped() {
+        let sdp = "a=candidate:1 1 udp 2130706431 192.168.1.10 54321 typ host\r\n\
+            a=candidate:2 1 udp 1694498815 203.0.113.1 40000 typ srflx raddr 192.168.1.10 rport 54321\r\n";
+
+        let filtered = with_advertised_candidates(sdp, &["192.168.1.10".to_string()]);
+
+        assert!(filtered.contains("typ host"));
+        assert!(filtered.contains("typ srflx"));
     }
 }

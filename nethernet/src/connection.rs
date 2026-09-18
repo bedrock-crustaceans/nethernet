@@ -10,7 +10,8 @@ use crate::error::ProtocolError;
 use crate::protocol::webrtc::Description;
 use crate::protocol::webrtc::candidate::{format_ice_candidate, parse_ice_candidate};
 use crate::protocol::{Signal, SignalType};
-use crate::session::{Channel, Session, SessionOutput};
+use crate::sans::Sans;
+use crate::session::{Channel, Session, SessionInput, SessionOutput};
 use bytes::Bytes;
 use rtc::ice::candidate::Candidate;
 use std::net::SocketAddr;
@@ -39,10 +40,10 @@ enum SignalKind {
 ///
 /// This type performs no I/O and knows nothing about any specific signaling
 /// transport: [`Self::connect`]/[`Self::accept`] return the [`Signal`]s to send, and
-/// [`Self::handle_signal`] applies ones received - the caller is responsible for
+/// [`ConnectionInput::Signal`] applies ones received - the caller is responsible for
 /// actually moving them across whichever signaler is in use. Everything else
-/// (datagrams, timeouts, application data) is a thin pass-through to the wrapped
-/// [`Session`].
+/// (datagrams, timeouts, application data - see [`Sans`]) is a thin pass-through to
+/// the wrapped [`Session`].
 ///
 /// `connect`/`accept` take an already-created [`Session`] and its returned
 /// [`Description`] (from [`Session::new`]) rather than constructing them internally:
@@ -123,7 +124,10 @@ impl Connection {
         }
 
         let remote_identity = remote_description.identity.clone();
-        session.set_remote_description(&remote_description, remote_candidates)?;
+        session.handle(SessionInput::RemoteDescription(
+            remote_description,
+            remote_candidates,
+        ))?;
 
         let signals = Self::describe(
             &session,
@@ -178,7 +182,7 @@ impl Connection {
     /// (and, under trickle ICE, the answerer's candidate); for the answerer, the
     /// offerer's trickled candidate (its description was already applied in
     /// [`Self::accept`]). Signals for a different connection or network are ignored.
-    pub fn handle_signal(&mut self, signal: &Signal) -> Result<(), ProtocolError> {
+    fn handle_signal(&mut self, signal: &Signal) -> Result<(), ProtocolError> {
         if signal.connection_id != self.connection_id || signal.network_id != self.remote_network_id
         {
             return Ok(());
@@ -189,11 +193,12 @@ impl Connection {
                 let (description, candidates) = Description::parse(&signal.data)?;
                 self.remote_identity = description.identity.clone();
                 self.session
-                    .set_remote_description(&description, candidates)?;
+                    .handle(SessionInput::RemoteDescription(description, candidates))?;
             }
             SignalType::Candidate => {
                 let candidate = parse_ice_candidate(&signal.data)?;
-                self.session.add_remote_candidate(candidate)?;
+                self.session
+                    .handle(SessionInput::RemoteCandidate(candidate))?;
             }
             SignalType::Error => {
                 return Err(ProtocolError::Other(format!(
@@ -209,7 +214,8 @@ impl Connection {
 
     /// The remote's raw, unverified `a=identity` attribute value, once known (from the
     /// offer, for the answerer; from the answer, for the offerer, once
-    /// [`Self::handle_signal`] has applied it). `None` if the remote didn't send one.
+    /// [`ConnectionInput::Signal`] has applied it). `None` if the remote didn't send
+    /// one.
     ///
     /// This is not verified by `Connection` itself - use
     /// [`crate::protocol::webrtc::identity::parse_identity`] and the verification
@@ -218,34 +224,6 @@ impl Connection {
     /// parsed answer you already have on hand).
     pub fn remote_identity(&self) -> Option<&str> {
         self.remote_identity.as_deref()
-    }
-
-    /// Feeds an inbound datagram received on the local socket.
-    pub fn handle_packet(
-        &mut self,
-        data: &[u8],
-        from: SocketAddr,
-        now: Instant,
-    ) -> Result<(), ProtocolError> {
-        self.session.handle_packet(data, from, now)
-    }
-
-    pub fn handle_timeout(&mut self, now: Instant) -> Result<(), ProtocolError> {
-        self.session.handle_timeout(now)
-    }
-
-    pub fn poll_timeout(&mut self, now: Instant) -> Option<Instant> {
-        self.session.poll_timeout(now)
-    }
-
-    /// Drains one queued output (a datagram to send, an event, or a received message).
-    pub fn poll(&mut self) -> Option<SessionOutput> {
-        self.session.poll()
-    }
-
-    /// Sends a complete application message on the given channel.
-    pub fn send(&mut self, channel: Channel, data: Bytes) -> Result<(), ProtocolError> {
-        self.session.send(channel, data)
     }
 
     /// The remote peer's address, once known.
@@ -261,6 +239,47 @@ impl Connection {
     /// The connection ID this attempt was signaled under.
     pub fn connection_id(&self) -> u64 {
         self.connection_id
+    }
+}
+
+/// Input fed to a [`Connection`] (see [`Sans`]): a thin pass-through to the wrapped
+/// [`Session`] (see [`SessionInput`]), plus the `Signal` choreography
+/// [`Connection::handle_signal`] applies.
+pub enum ConnectionInput {
+    /// An inbound datagram received on the local socket.
+    Packet(Box<[u8]>, SocketAddr, Instant),
+
+    /// Drives ICE/DTLS/SCTP retransmission and keepalive timers; the only input that
+    /// produces a [`SessionOutput::Wait`].
+    Timeout(Instant),
+
+    /// A signal received for this connection - see [`Connection::handle_signal`].
+    Signal(Signal),
+
+    /// A complete application message to send on a channel.
+    Send(Channel, Bytes),
+}
+
+impl Sans for Connection {
+    type Input = ConnectionInput;
+    type Output = SessionOutput;
+    type Error = ProtocolError;
+
+    fn handle(&mut self, msg: ConnectionInput) -> Result<(), ProtocolError> {
+        match msg {
+            ConnectionInput::Packet(data, from, now) => {
+                self.session.handle(SessionInput::Packet(data, from, now))
+            }
+            ConnectionInput::Timeout(now) => self.session.handle(SessionInput::Timeout(now)),
+            ConnectionInput::Signal(signal) => self.handle_signal(&signal),
+            ConnectionInput::Send(channel, data) => {
+                self.session.handle(SessionInput::Send(channel, data))
+            }
+        }
+    }
+
+    fn poll(&mut self) -> Option<SessionOutput> {
+        self.session.poll()
     }
 }
 
@@ -310,14 +329,14 @@ mod tests {
         let answer = answer_iter.next().unwrap();
         assert_eq!(answer.signal_type, SignalType::Answer);
 
-        offerer.handle_signal(&answer).unwrap();
+        offerer.handle(ConnectionInput::Signal(answer)).unwrap();
 
         // Trickled candidates (if any) flow after the offer/answer.
         for signal in offer_iter {
-            answerer.handle_signal(&signal).unwrap();
+            answerer.handle(ConnectionInput::Signal(signal)).unwrap();
         }
         for signal in answer_iter {
-            offerer.handle_signal(&signal).unwrap();
+            offerer.handle(ConnectionInput::Signal(signal)).unwrap();
         }
 
         let mut offerer_ready = false;
@@ -336,10 +355,13 @@ mod tests {
                         panic!("session failed unexpectedly")
                     }
                     SessionOutput::Message(..) => {}
+                    SessionOutput::Wait(_) => {}
                 }
             }
             for (data, to) in outbox {
-                answerer.handle_packet(&data, to, now).unwrap();
+                answerer
+                    .handle(ConnectionInput::Packet(data.into(), to, now))
+                    .unwrap();
             }
 
             let mut outbox = Vec::new();
@@ -352,10 +374,13 @@ mod tests {
                         panic!("session failed unexpectedly")
                     }
                     SessionOutput::Message(..) => {}
+                    SessionOutput::Wait(_) => {}
                 }
             }
             for (data, to) in outbox {
-                offerer.handle_packet(&data, to, now).unwrap();
+                offerer
+                    .handle(ConnectionInput::Packet(data.into(), to, now))
+                    .unwrap();
             }
 
             if offerer_ready && answerer_ready {
@@ -363,15 +388,9 @@ mod tests {
             }
 
             if !progressed {
-                let next = [offerer.poll_timeout(now), answerer.poll_timeout(now)]
-                    .into_iter()
-                    .flatten()
-                    .min();
-                now = next
-                    .unwrap_or(now + Duration::from_millis(20))
-                    .max(now + Duration::from_millis(1));
-                offerer.handle_timeout(now).unwrap();
-                answerer.handle_timeout(now).unwrap();
+                now += Duration::from_millis(5);
+                offerer.handle(ConnectionInput::Timeout(now)).unwrap();
+                answerer.handle(ConnectionInput::Timeout(now)).unwrap();
             }
         }
 
@@ -396,7 +415,7 @@ mod tests {
             Connection::connect(session, description, 1, 7.to_string(), IceMode::Full);
         let unrelated = Signal::answer(999, "irrelevant".to_string(), "7".to_string());
         // Wrong connection_id: ignored, not an error.
-        offerer.handle_signal(&unrelated).unwrap();
+        offerer.handle(ConnectionInput::Signal(unrelated)).unwrap();
     }
 
     fn decode_cpk(claims: &serde_json::Value) -> Vec<u8> {
@@ -474,7 +493,9 @@ mod tests {
         .unwrap();
         let answer = answer_signals.into_iter().next().unwrap();
 
-        offerer.handle_signal(&answer).unwrap();
+        offerer
+            .handle(ConnectionInput::Signal(answer.clone()))
+            .unwrap();
 
         // Offerer: verify the answerer's identity after applying the answer.
         let (answer_description, _) = Description::parse(&answer.data).unwrap();

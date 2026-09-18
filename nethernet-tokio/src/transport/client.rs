@@ -6,7 +6,8 @@ use crate::signaling::ClientSignaling;
 use crate::transport::{ConnectionConfig, local_bind_addr};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-use nethernet::connection::{Connection as SansConnection, IceMode};
+use nethernet::connection::{Connection as SansConnection, ConnectionInput, IceMode};
+use nethernet::sans::Sans;
 use nethernet::session::Session as SansSession;
 use rand::Rng;
 use std::io;
@@ -244,19 +245,21 @@ impl NetherClient {
 
             match signal.signal_type {
                 SignalType::Answer => {
-                    connection.handle_signal(&signal).map_err(|e| {
-                        (
-                            Some(SignalErrorCode::FailedToSetRemoteDescription),
-                            NetherError::from(e),
-                        )
-                    })?;
+                    connection
+                        .handle(ConnectionInput::Signal(signal))
+                        .map_err(|e| {
+                            (
+                                Some(SignalErrorCode::FailedToSetRemoteDescription),
+                                NetherError::from(e),
+                            )
+                        })?;
                     if !need_candidate {
                         break;
                     }
                 }
                 SignalType::Candidate => {
                     connection
-                        .handle_signal(&signal)
+                        .handle(ConnectionInput::Signal(signal))
                         .map_err(|e| (Some(SignalErrorCode::Ice), NetherError::from(e)))?;
                     need_candidate = false;
                 }

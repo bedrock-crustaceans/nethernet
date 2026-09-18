@@ -17,8 +17,9 @@ pub(crate) use command::Command;
 use crate::addr::Addr;
 use crate::error::{NetherError, Result};
 use bytes::Bytes;
-use nethernet::connection::Connection as SansConnection;
+use nethernet::connection::{Connection as SansConnection, ConnectionInput};
 use nethernet::identity::PlayerInfo;
+use nethernet::sans::Sans;
 pub use nethernet::session::Channel;
 use nethernet::session::{SessionEvent, SessionOutput};
 use std::sync::Arc;
@@ -188,7 +189,8 @@ impl Session {
                     received = socket.recv_from(&mut buf) => match received {
                         Ok((n, from)) => {
                             let now = Instant::now();
-                            if let Err(e) = connection.handle_packet(&buf[..n], from, now) {
+                            let input = ConnectionInput::Packet(buf[..n].into(), from, now);
+                            if let Err(e) = connection.handle(input) {
                                 tracing::debug!("packet handling error: {e}");
                             }
                         }
@@ -196,10 +198,13 @@ impl Session {
                     },
                     command = commands.recv() => match command {
                         Some(Command::Send(channel, data, reply)) => {
-                            let _ = reply.send(connection.send(channel, data).map_err(NetherError::from));
+                            let result = connection
+                                .handle(ConnectionInput::Send(channel, data))
+                                .map_err(NetherError::from);
+                            let _ = reply.send(result);
                         }
                         Some(Command::Signal(signal)) => {
-                            if let Err(e) = connection.handle_signal(&signal) {
+                            if let Err(e) = connection.handle(ConnectionInput::Signal(signal)) {
                                 tracing::debug!("signal handling error: {e}");
                             }
                         }
@@ -219,7 +224,7 @@ impl Session {
                     },
                     _ = tokio::time::sleep_until(wake.into()) => {
                         let now = Instant::now();
-                        if let Err(e) = connection.handle_timeout(now) {
+                        if let Err(e) = connection.handle(ConnectionInput::Timeout(now)) {
                             tracing::debug!("timeout handling error: {e}");
                         }
                     }
@@ -250,13 +255,13 @@ impl Session {
                         SessionOutput::Message(Channel::Unreliable, data) => {
                             let _ = unreliable_tx.try_send(Bytes::from(data));
                         }
+                        SessionOutput::Wait(wait) => {
+                            wake = Instant::now() + wait.min(MAX_IDLE);
+                        }
                     }
                 }
 
                 rtt = connection.rtt();
-
-                let now = Instant::now();
-                wake = connection.poll_timeout(now).unwrap_or(now + MAX_IDLE);
             }
 
             close_token.cancel();
