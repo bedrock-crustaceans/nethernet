@@ -21,7 +21,7 @@ use error::LanSignalerError;
 use input::LanSignalerInput;
 use output::LanSignalerOutput;
 use std::collections::{HashMap, VecDeque};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 /// Keepalive clients broadcast between their discovery requests. It is not a negotiation
@@ -281,9 +281,20 @@ impl LanSignaler {
             return Ok(());
         }
 
-        let buf = encode(&Packets::Request(RequestPacket), self.network_id)?;
+        let buf: Box<[u8]> = encode(&Packets::Request(RequestPacket), self.network_id)?.into();
         self.output
-            .push_back(LanSignalerOutput::Datagram(buf.into(), addr));
+            .push_back(LanSignalerOutput::Datagram(buf.clone(), addr));
+
+        // Some sandboxed/containerized environments do not route
+        // 255.255.255.255 back into the local network namespace. The loopback
+        // copy preserves discovery of same-host servers without changing LAN
+        // behavior.
+        let loopback = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), addr.port());
+        if loopback != addr {
+            self.output
+                .push_back(LanSignalerOutput::Datagram(buf, loopback));
+        }
+
         self.last_broadcast = Some(now);
 
         Ok(())
