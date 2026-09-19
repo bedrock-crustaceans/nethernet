@@ -12,6 +12,7 @@
 //! directly, terminated by `a=end-of-candidates`).
 
 use crate::error::ProtocolError;
+use crate::protocol::constants::SCTP_MAX_MESSAGE_SIZE;
 use crate::protocol::webrtc::candidate;
 use rtc::ice::agent::Credentials;
 use rtc::ice::candidate::Candidate;
@@ -110,9 +111,12 @@ impl Description {
             }
         };
 
-        let sctp_max_message_size = attribute(media, ATTR_KEY_MAX_MESSAGE_SIZE)?
-            .parse::<u32>()
-            .map_err(|e| ProtocolError::Other(format!("parse max-message-size attribute: {e}")))?;
+        let sctp_max_message_size = match attribute(media, ATTR_KEY_MAX_MESSAGE_SIZE) {
+            Ok(value) => value
+                .parse::<u32>()
+                .map_err(|e| ProtocolError::Other(format!("parse max-message-size attribute: {e}")))?,
+            Err(_) => SCTP_MAX_MESSAGE_SIZE,
+        };
 
         let mut candidates = Vec::new();
         for attr in &media.attributes {
