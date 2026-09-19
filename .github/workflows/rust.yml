@@ -1,4 +1,4 @@
-name: Rust
+name: Rust CI
 
 on:
   push:
@@ -6,14 +6,15 @@ on:
   pull_request:
 
 env:
+  RUSTFLAGS: -Dwarnings
+  CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
 
 jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -23,15 +24,14 @@ jobs:
   clippy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2.8.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: rust-${{ hashFiles('**/Cargo.lock') }}
-          add-job-id-key: false
-          add-rust-environment-hash-key: false
+          prefix-key: clippy
+          shared-key: stable
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -40,13 +40,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2.8.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: rust-${{ hashFiles('**/Cargo.lock') }}
-          add-job-id-key: false
-          add-rust-environment-hash-key: false
+          prefix-key: test
+          shared-key: stable
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -58,16 +57,14 @@ jobs:
       RUSTDOCFLAGS: -Dwarnings
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rust-docs
-      - uses: Swatinem/rust-cache@v2.8.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: rust-${{ hashFiles('**/Cargo.lock') }}
-          add-job-id-key: false
-          add-rust-environment-hash-key: false
-          cache-on-failure: false
+          prefix-key: docs
+          shared-key: stable
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - run: cargo doc --workspace --no-deps
