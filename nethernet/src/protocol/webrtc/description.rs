@@ -112,9 +112,9 @@ impl Description {
         };
 
         let sctp_max_message_size = match attribute(media, ATTR_KEY_MAX_MESSAGE_SIZE) {
-            Ok(value) => value
-                .parse::<u32>()
-                .map_err(|e| ProtocolError::Other(format!("parse max-message-size attribute: {e}")))?,
+            Ok(value) => value.parse::<u32>().map_err(|e| {
+                ProtocolError::Other(format!("parse max-message-size attribute: {e}"))
+            })?,
             Err(_) => SCTP_MAX_MESSAGE_SIZE,
         };
 
