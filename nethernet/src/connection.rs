@@ -244,7 +244,6 @@ impl Connection {
 
 /// Input fed to a [`Connection`] (see [`Sans`]): a thin pass-through to the wrapped
 /// [`Session`] (see [`SessionInput`]), plus the `Signal` choreography
-/// [`Connection::handle_signal`] applies.
 pub enum ConnectionInput {
     /// An inbound datagram received on the local socket.
     Packet(Box<[u8]>, SocketAddr, Instant),
@@ -253,7 +252,7 @@ pub enum ConnectionInput {
     /// produces a [`SessionOutput::Wait`].
     Timeout(Instant),
 
-    /// A signal received for this connection - see [`Connection::handle_signal`].
+    /// A signal received for this connection - see `Connection::handle_signal`.
     Signal(Signal),
 
     /// A complete application message to send on a channel.
