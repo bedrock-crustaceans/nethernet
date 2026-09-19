@@ -4,7 +4,7 @@
 //! (see the HTTP signaling guide, section 6) - there is no STUN/TURN relay to authenticate
 //! against, so nothing in this crate currently consumes these. The types are kept for
 //! signaling implementations that decode them off the wire (e.g. as part of a broader
-//! session-info payload) and for [`crate::signaling::Signaling::credentials`] callers.
+//! session-info payload) and for callers that still carry them across the wire.
 
 use serde::{Deserialize, Serialize};
 

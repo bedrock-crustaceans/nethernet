@@ -73,3 +73,54 @@ pub fn write_bytes_u32<W: Write>(writer: &mut W, data: &[u8]) -> Result<()> {
     writer.write_all(data)?;
     Ok(())
 }
+
+/// Reads an unsigned LEB128 `u32` (Minecraft's `varuint32`).
+pub fn read_varuint32<R: Read>(reader: &mut R) -> Result<u32> {
+    let mut value: u32 = 0;
+    for shift in (0..35).step_by(7) {
+        let byte = reader.read_u8()?;
+        value |= u32::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(ProtocolError::Other(
+        "varuint32 did not terminate after 5 bytes".to_string(),
+    ))
+}
+
+/// Writes an unsigned LEB128 `u32` (Minecraft's `varuint32`).
+pub fn write_varuint32<W: Write>(writer: &mut W, mut value: u32) -> Result<()> {
+    while value >= 0x80 {
+        writer.write_u8((value as u8) | 0x80)?;
+        value >>= 7;
+    }
+    writer.write_u8(value as u8)?;
+    Ok(())
+}
+
+/// Reads a zigzag-encoded `varint32`.
+pub fn read_varint32<R: Read>(reader: &mut R) -> Result<i32> {
+    let raw = read_varuint32(reader)?;
+    Ok(((raw >> 1) as i32) ^ -((raw & 1) as i32))
+}
+
+/// Writes a zigzag-encoded `varint32`.
+pub fn write_varint32<W: Write>(writer: &mut W, value: i32) -> Result<()> {
+    write_varuint32(writer, ((value << 1) ^ (value >> 31)) as u32)
+}
+
+/// Reads a `varuint32`-length-prefixed byte array.
+pub fn read_bytes_varuint<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
+    let len = read_varuint32(reader)? as usize;
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+/// Writes `data` prefixed by its length as a `varuint32`.
+pub fn write_bytes_varuint<W: Write>(writer: &mut W, data: &[u8]) -> Result<()> {
+    write_varuint32(writer, data.len() as u32)?;
+    writer.write_all(data)?;
+    Ok(())
+}
