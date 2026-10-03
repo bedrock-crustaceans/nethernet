@@ -19,7 +19,7 @@ Thank you for your interest in contributing to `nethernet`!
 Run the full test suite, including unit and integration tests:
 
 ```bash
-cargo test
+cargo test --workspace
 ```
 
 ## Pull Requests
