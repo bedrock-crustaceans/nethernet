@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -221,12 +221,13 @@ impl NetherServer {
             )
         })?;
 
-        let (session, description) = SansSession::new(bound_addr, false).map_err(|e| {
-            (
-                Some(SignalErrorCode::FailedToCreatePeerConnection),
-                NetherError::from(e),
-            )
-        })?;
+        let (session, description) =
+            SansSession::new(bound_addr, false, Instant::now()).map_err(|e| {
+                (
+                    Some(SignalErrorCode::FailedToCreatePeerConnection),
+                    NetherError::from(e),
+                )
+            })?;
 
         // Non-trickle connections carry every local candidate in the answer itself
         let ice_mode = if signaling.disable_trickle_ice() {
@@ -242,6 +243,7 @@ impl NetherServer {
             remote_description,
             remote_candidates,
             ice_mode,
+            Instant::now(),
         )
         .map_err(|e| (Some(SignalErrorCode::FailedToCreateAnswer), e.into()))?;
 
@@ -278,7 +280,7 @@ impl NetherServer {
             for line in candidate::inferred_peer_candidates(&signal.data, remote_address) {
                 tracing::debug!("Inferred candidate for the peer: {}", line);
                 let signal = Signal::candidate(connection_id, line, network_id.clone());
-                if let Err(e) = connection.handle(ConnectionInput::Signal(signal)) {
+                if let Err(e) = connection.handle(ConnectionInput::Signal(signal, Instant::now())) {
                     tracing::warn!("Failed to add inferred candidate: {}", e);
                 }
             }

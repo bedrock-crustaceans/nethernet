@@ -179,7 +179,7 @@ impl NetherHttpClient {
 
         let (session_socket, local_addr) = bind_shared_socket()?;
         let (session, description) =
-            Session::new(local_addr, true).map_err(std::io::Error::other)?;
+            Session::new(local_addr, true, Instant::now()).map_err(std::io::Error::other)?;
         let local_ufrag = description.ice.ufrag.clone();
 
         let connection_id = rand::random::<u64>();
@@ -286,7 +286,10 @@ impl NetherHttpClient {
                         // candidate this answer carries is known, and gets registered as
                         // a peer-reflexive candidate instead, which ICE won't nominate
                         // for a full extra second (RFC 8445's acceptance grace period).
-                        if connection.handle(ConnectionInput::Signal(answer)).is_ok() {
+                        if connection
+                            .handle(ConnectionInput::Signal(answer, now))
+                            .is_ok()
+                        {
                             let mut pool = SessionPool::new(session_socket);
                             pool.add((), connection, local_ufrag);
                             self.pool = Some(pool);

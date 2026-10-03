@@ -112,8 +112,8 @@ impl NetherClient {
     }
 
     pub fn connect(&mut self, target_network_id: u64) -> std::io::Result<()> {
-        let (session, description) =
-            Session::new(self.session_local_addr, true).map_err(std::io::Error::other)?;
+        let (session, description) = Session::new(self.session_local_addr, true, Instant::now())
+            .map_err(std::io::Error::other)?;
         let local_ufrag = description.ice.ufrag.clone();
 
         let connection_id = rand::random::<u64>();

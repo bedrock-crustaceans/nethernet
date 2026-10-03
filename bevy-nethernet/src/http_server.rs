@@ -318,7 +318,7 @@ impl NetherHttpServer {
     }
 
     fn handle_offer(&mut self, offer: Offer, now: Instant) {
-        match accept_offer(&offer, self.session_local_addr) {
+        match accept_offer(&offer, self.session_local_addr, now) {
             Ok((answer_sdp, connection, local_ufrag)) => {
                 let _ = self.signaler.handle(HttpSignalerInput::Answer {
                     connection_id: offer.connection_id,
@@ -381,11 +381,12 @@ impl NetherHttpServer {
 fn accept_offer(
     offer: &Offer,
     session_local_addr: SocketAddr,
+    now: Instant,
 ) -> Result<(String, Connection, String), RejectReason> {
     let (remote_description, remote_candidates) =
         Description::parse(&offer.sdp).map_err(|_| RejectReason::Unavailable)?;
     let (session, description) =
-        Session::new(session_local_addr, false).map_err(|_| RejectReason::Unavailable)?;
+        Session::new(session_local_addr, false, now).map_err(|_| RejectReason::Unavailable)?;
     let local_ufrag = description.ice.ufrag.clone();
 
     let offer_signal = Signal::offer(
@@ -400,6 +401,7 @@ fn accept_offer(
         remote_description,
         remote_candidates,
         IceMode::Full,
+        now,
     )
     .map_err(|_| RejectReason::Unavailable)?;
 
