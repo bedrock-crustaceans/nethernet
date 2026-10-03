@@ -155,7 +155,10 @@ impl LanSignaler {
                 }
             }
             Packets::Message(message) => {
-                if message.data == PING || message.recipient_id != self.network_id {
+                if message.data.is_empty()
+                    || message.data == PING
+                    || message.recipient_id != self.network_id
+                {
                     return Ok(());
                 }
 
