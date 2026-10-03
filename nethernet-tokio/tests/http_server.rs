@@ -114,7 +114,6 @@ async fn the_status_endpoint_advertises_the_server_data() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore] // This test is flaky on CI, but works locally.
 async fn a_peer_holding_too_many_connections_is_refused() {
     let config = HttpServerConfig {
         signaler: HttpSignalerConfig {

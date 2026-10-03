@@ -31,7 +31,7 @@ impl ServerDataVersion {
             6 => Ok(Self::V6),
             7 => Ok(Self::V7),
             _ => Err(ProtocolError::Other(format!(
-                "unsupported version: got {}, want 4, 5, 6 or 7",
+                "unsupported version: got {}",
                 byte
             ))),
         }
