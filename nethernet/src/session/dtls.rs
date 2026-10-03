@@ -6,6 +6,7 @@
 //! check.
 
 use crate::error::ProtocolError;
+use crate::protocol::webrtc::certificate::crypto_provider;
 use bytes::BytesMut;
 use rtc::dtls::config::{ClientAuthType, ConfigBuilder};
 use rtc::dtls::crypto::Certificate;
@@ -16,7 +17,7 @@ use rtc::shared::{TransportProtocol, error::Error as SharedError};
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// The role this side actually resolves to for the DTLS handshake, per RFC 5763 §5:
 /// whichever side announced `active` in its own SDP acts as the client (it dials);
@@ -57,10 +58,12 @@ impl DtlsLayer {
         role: ResolvedRole,
         certificate: Certificate,
         remote_fingerprint: (String, String),
+        now: Instant,
     ) -> Result<DtlsLayer, ProtocolError> {
         let is_client = role == ResolvedRole::Client;
 
         let config = ConfigBuilder::default()
+            .with_crypto_provider(crypto_provider()?)
             .with_certificates(vec![certificate])
             .with_insecure_skip_verify(true)
             .with_client_auth(ClientAuthType::RequireAnyClientCert)
@@ -85,7 +88,7 @@ impl DtlsLayer {
 
         if is_client {
             endpoint
-                .connect(remote_addr, config, None)
+                .connect(now, remote_addr, config, None)
                 .map_err(|e| ProtocolError::Other(format!("start DTLS handshake: {e}")))?;
         }
 
@@ -108,9 +111,9 @@ impl DtlsLayer {
     }
 
     /// Queues application data (an SCTP packet) to be DTLS-encrypted and sent.
-    pub fn write(&mut self, data: &[u8]) -> Result<(), ProtocolError> {
+    pub fn write(&mut self, data: &[u8], now: Instant) -> Result<(), ProtocolError> {
         self.endpoint
-            .write(self.remote_addr, data)
+            .write(now, self.remote_addr, data)
             .map_err(|e| ProtocolError::Other(format!("{e}")))
     }
 
@@ -133,11 +136,8 @@ impl DtlsLayer {
 
     /// The next time `handle_timeout` should be called, if a handshake retransmission
     /// is pending.
-    pub fn poll_timeout(&self, now: Instant) -> Option<Instant> {
-        let sentinel = now + Duration::from_secs(3600);
-        let mut eto = sentinel;
-        self.endpoint.poll_timeout(self.remote_addr, &mut eto).ok();
-        (eto != sentinel).then_some(eto)
+    pub fn poll_timeout(&self) -> Option<Instant> {
+        self.endpoint.poll_timeout(&self.remote_addr)
     }
 }
 
@@ -172,6 +172,7 @@ mod tests {
     use super::*;
     use crate::protocol::webrtc::certificate;
     use std::net::Ipv4Addr;
+    use std::time::Duration;
 
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
@@ -194,6 +195,7 @@ mod tests {
             ResolvedRole::Client,
             client_cert,
             server_fp,
+            now,
         )
         .unwrap();
         let mut server = DtlsLayer::new(
@@ -202,6 +204,7 @@ mod tests {
             ResolvedRole::Server,
             server_cert,
             client_fp,
+            now,
         )
         .unwrap();
 
@@ -235,7 +238,7 @@ mod tests {
             }
 
             if !progressed {
-                let next = [client.poll_timeout(now), server.poll_timeout(now)]
+                let next = [client.poll_timeout(), server.poll_timeout()]
                     .into_iter()
                     .flatten()
                     .min();
@@ -269,6 +272,7 @@ mod tests {
             ResolvedRole::Client,
             client_cert,
             server_fp,
+            now,
         )
         .unwrap();
         let mut server = DtlsLayer::new(
@@ -277,6 +281,7 @@ mod tests {
             ResolvedRole::Server,
             server_cert,
             (algorithm, client_fp.to_lowercase()),
+            now,
         )
         .unwrap();
 
@@ -310,7 +315,7 @@ mod tests {
             }
 
             if !progressed {
-                let next = [client.poll_timeout(now), server.poll_timeout(now)]
+                let next = [client.poll_timeout(), server.poll_timeout()]
                     .into_iter()
                     .flatten()
                     .min();
@@ -325,7 +330,7 @@ mod tests {
         assert!(client_done, "client handshake never completed");
         assert!(server_done, "server handshake never completed");
 
-        client.write(b"hello from client").unwrap();
+        client.write(b"hello from client", now).unwrap();
         let mut delivered = None;
         for _ in 0..10 {
             if let Some((data, _)) = client.poll_transmit() {

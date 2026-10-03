@@ -5,12 +5,20 @@
 //! fresh self-signed certificate is generated per session.
 
 use crate::error::ProtocolError;
+use rtc::crypto::RTCCryptoProvider;
 use rtc::dtls::crypto::Certificate;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+
+/// The crypto backend handed to every rtc layer, which no longer picks one on its own.
+pub(crate) fn crypto_provider() -> Result<Arc<dyn RTCCryptoProvider>, ProtocolError> {
+    rtc::crypto::default_provider()
+        .map_err(|e| ProtocolError::Other(format!("crypto provider: {e}")))
+}
 
 /// Generates a fresh self-signed certificate for a single DTLS session.
 pub fn generate() -> Result<Certificate, ProtocolError> {
-    Certificate::generate_self_signed(vec!["nethernet".to_string()])
+    Certificate::generate_self_signed(vec!["nethernet".to_string()], crypto_provider()?.crypto())
         .map_err(|e| ProtocolError::Other(format!("generate certificate: {e}")))
 }
 

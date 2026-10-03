@@ -185,6 +185,7 @@ dependencies = [
  "async-channel",
  "bevy_app",
  "bevy_ecs",
+ "bevy_platform",
  "http",
  "httparse",
  "libc",

@@ -149,6 +149,11 @@ pub struct Session {
     dtls: Option<DtlsLayer>,
     sctp: Option<SctpLayer>,
 
+    /// The latest time seen on a [`SessionInput::Packet`] or [`SessionInput::Timeout`].
+    /// The other inputs carry no clock of their own, but rtc still wants one for every
+    /// write and handshake start.
+    now: Instant,
+
     channels: Channels,
     output: VecDeque<SessionOutput>,
 }
@@ -170,7 +175,8 @@ impl Session {
         local_addr: SocketAddr,
         is_controlling: bool,
     ) -> Result<(Session, Description), ProtocolError> {
-        let ice = IceLayer::new(local_addr, is_controlling)?;
+        let now = Instant::now();
+        let ice = IceLayer::new(local_addr, is_controlling, now)?;
         let certificate = certificate::generate()?;
         let fingerprint = certificate::fingerprint(&certificate)?;
 
@@ -198,6 +204,7 @@ impl Session {
             remote: None,
             dtls: None,
             sctp: None,
+            now,
             channels: Channels::default(),
             output: VecDeque::new(),
         };
@@ -286,12 +293,14 @@ impl Session {
             resolved_role,
             certificate,
             remote_fingerprint,
+            self.now,
         )?;
         let sctp = SctpLayer::new(
             self.local_addr,
             remote_addr,
             resolved_role,
             self.local_description.sctp_max_message_size,
+            self.now,
         )?;
 
         self.remote = Some(RemoteInfo { addr: remote_addr });
@@ -308,6 +317,8 @@ impl Session {
         from: SocketAddr,
         now: Instant,
     ) -> Result<(), ProtocolError> {
+        self.now = self.now.max(now);
+
         if self.ice.handle_read(data, from, now)? {
             self.pump(now)?;
             return Ok(());
@@ -333,6 +344,8 @@ impl Session {
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), ProtocolError> {
+        self.now = self.now.max(now);
+
         self.ice.handle_timeout(now)?;
         if let Some(dtls) = &mut self.dtls {
             dtls.handle_timeout(now)?;
@@ -342,17 +355,17 @@ impl Session {
         }
         self.pump(now)?;
 
-        if let Some(deadline) = self.poll_timeout(now) {
+        if let Some(deadline) = self.poll_timeout() {
             self.output
                 .push_back(SessionOutput::Wait(deadline.saturating_duration_since(now)));
         }
         Ok(())
     }
 
-    fn poll_timeout(&mut self, now: Instant) -> Option<Instant> {
+    fn poll_timeout(&mut self) -> Option<Instant> {
         [
             self.ice.poll_timeout(),
-            self.dtls.as_ref().and_then(|d| d.poll_timeout(now)),
+            self.dtls.as_ref().and_then(|d| d.poll_timeout()),
             self.sctp.as_ref().and_then(|s| s.poll_timeout()),
         ]
         .into_iter()
@@ -385,14 +398,18 @@ impl Session {
             Channel::Reliable => {
                 for segment in Framing::split_into_segments(data)? {
                     stream
-                        .write_with_ppi(&segment.encode(), PayloadProtocolIdentifier::Binary)
+                        .write_with_ppi(
+                            self.now,
+                            &segment.encode(),
+                            PayloadProtocolIdentifier::Binary,
+                        )
                         .map_err(|e| ProtocolError::Other(format!("{e}")))?;
                 }
             }
             Channel::Unreliable => {
                 let encoded = Framing::encode_unreliable(data)?;
                 stream
-                    .write_with_ppi(&encoded, PayloadProtocolIdentifier::Binary)
+                    .write_with_ppi(self.now, &encoded, PayloadProtocolIdentifier::Binary)
                     .map_err(|e| ProtocolError::Other(format!("{e}")))?;
             }
         }
@@ -424,9 +441,12 @@ impl Session {
         if let (Some(sctp), Some(dtls)) = (&mut self.sctp, &mut self.dtls) {
             while let Some(event) = sctp.poll_event() {
                 match event {
-                    SctpEvent::Connected => {
-                        open_channels_if_controlling(self.is_controlling, sctp, &mut self.channels)?
-                    }
+                    SctpEvent::Connected => open_channels_if_controlling(
+                        self.is_controlling,
+                        sctp,
+                        &mut self.channels,
+                        now,
+                    )?,
                     SctpEvent::HandshakeFailed { .. } | SctpEvent::AssociationLost { .. } => {
                         failed = true;
                     }
@@ -434,10 +454,10 @@ impl Session {
                 }
             }
 
-            drain_dcep_and_data(sctp, &mut self.channels, &mut self.output)?;
+            drain_dcep_and_data(sctp, &mut self.channels, &mut self.output, now)?;
 
             while let Some(packet) = sctp.poll_transmit(now) {
-                dtls.write(&packet)?;
+                dtls.write(&packet, now)?;
             }
 
             while let Some((data, to)) = dtls.poll_transmit() {
@@ -495,6 +515,7 @@ fn open_channels_if_controlling(
     is_controlling: bool,
     sctp: &mut SctpLayer,
     channels: &mut Channels,
+    now: Instant,
 ) -> Result<(), ProtocolError> {
     if !is_controlling {
         return Ok(());
@@ -516,7 +537,7 @@ fn open_channels_if_controlling(
             .map_err(|e| ProtocolError::Other(format!("{e}")))?;
         let encoded = dcep::encode_open(open)?;
         stream
-            .write_with_ppi(&encoded, dcep::PPI_DCEP)
+            .write_with_ppi(now, &encoded, dcep::PPI_DCEP)
             .map_err(|e| ProtocolError::Other(format!("{e}")))?;
         channels.set_open(channel, stream_id);
     }
@@ -530,6 +551,7 @@ fn drain_dcep_and_data(
     sctp: &mut SctpLayer,
     channels: &mut Channels,
     output: &mut VecDeque<SessionOutput>,
+    now: Instant,
 ) -> Result<(), ProtocolError> {
     let Some(assoc) = sctp.association_mut() else {
         return Ok(());
@@ -551,7 +573,7 @@ fn drain_dcep_and_data(
                 let stream_id = stream.stream_identifier();
                 let ack = dcep::encode_ack()?;
                 stream
-                    .write_with_ppi(&ack, dcep::PPI_DCEP)
+                    .write_with_ppi(now, &ack, dcep::PPI_DCEP)
                     .map_err(|e| ProtocolError::Other(format!("{e}")))?;
                 channels.set_open(channel, stream_id);
             }
