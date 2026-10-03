@@ -14,6 +14,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UdpSocket;
 use tokio_util::io::StreamReader;
@@ -164,12 +165,13 @@ impl NetherClient {
             .local_addr()
             .map_err(|e| (None, NetherError::from(e)))?;
 
-        let (session, description) = SansSession::new(bound_addr, true).map_err(|e| {
-            (
-                Some(SignalErrorCode::FailedToCreatePeerConnection),
-                NetherError::from(e),
-            )
-        })?;
+        let (session, description) =
+            SansSession::new(bound_addr, true, Instant::now()).map_err(|e| {
+                (
+                    Some(SignalErrorCode::FailedToCreatePeerConnection),
+                    NetherError::from(e),
+                )
+            })?;
 
         let ice_mode = if signaling.disable_trickle_ice() {
             IceMode::Full
@@ -246,7 +248,7 @@ impl NetherClient {
             match signal.signal_type {
                 SignalType::Answer => {
                     connection
-                        .handle(ConnectionInput::Signal(signal))
+                        .handle(ConnectionInput::Signal(signal, Instant::now()))
                         .map_err(|e| {
                             (
                                 Some(SignalErrorCode::FailedToSetRemoteDescription),
@@ -259,7 +261,7 @@ impl NetherClient {
                 }
                 SignalType::Candidate => {
                     connection
-                        .handle(ConnectionInput::Signal(signal))
+                        .handle(ConnectionInput::Signal(signal, Instant::now()))
                         .map_err(|e| (Some(SignalErrorCode::Ice), NetherError::from(e)))?;
                     need_candidate = false;
                 }

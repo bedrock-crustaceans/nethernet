@@ -29,6 +29,6 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 rustls-pemfile = "2"
-rtc = "0.20"
+rtc = "0.21"
 ring = "0.17"
 byteorder = "1"

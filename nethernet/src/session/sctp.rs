@@ -36,6 +36,7 @@ impl SctpLayer {
         remote_addr: SocketAddr,
         role: ResolvedRole,
         max_message_size: u32,
+        now: Instant,
     ) -> Result<SctpLayer, ProtocolError> {
         let transport = TransportConfig::default()
             .with_sctp_port(SCTP_PORT)
@@ -50,7 +51,7 @@ impl SctpLayer {
 
         let association = if role == ResolvedRole::Client {
             let (handle, assoc) = endpoint
-                .connect(ClientConfig::new(transport), remote_addr)
+                .connect(now, ClientConfig::new(transport), remote_addr)
                 .map_err(|e| ProtocolError::Other(format!("{e}")))?;
             Some((handle, assoc))
         } else {
@@ -83,6 +84,7 @@ impl SctpLayer {
                     assoc.handle_event(event);
                 }
             }
+            _ => {}
         }
     }
 
@@ -154,9 +156,9 @@ mod tests {
         let mut now = Instant::now();
 
         let mut client =
-            SctpLayer::new(addr(40020), addr(40021), ResolvedRole::Client, 65536).unwrap();
+            SctpLayer::new(addr(40020), addr(40021), ResolvedRole::Client, 65536, now).unwrap();
         let mut server =
-            SctpLayer::new(addr(40021), addr(40020), ResolvedRole::Server, 65536).unwrap();
+            SctpLayer::new(addr(40021), addr(40020), ResolvedRole::Server, 65536, now).unwrap();
 
         let mut client_connected = false;
         let mut server_connected = false;
@@ -212,7 +214,7 @@ mod tests {
             let mut stream = assoc
                 .open_stream(0, PayloadProtocolIdentifier::Binary)
                 .unwrap();
-            stream.write(b"hello over sctp").unwrap();
+            stream.write(now, b"hello over sctp").unwrap();
         }
 
         let mut delivered = None;

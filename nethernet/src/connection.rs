@@ -61,7 +61,7 @@ pub struct Connection {
 
 impl Connection {
     /// Starts an outgoing connection attempt (the offerer) from a session and
-    /// description already created via `Session::new(local_addr, true)` - set
+    /// description already created via `Session::new(local_addr, true, now)` - set
     /// `description.identity` first if this side needs to assert one (guide section
     /// 5.1). Returns the connection and the signal(s) to send: always an offer, plus -
     /// under [`IceMode::Trickle`] - a separate candidate signal.
@@ -104,7 +104,7 @@ impl Connection {
     }
 
     /// Answers an incoming offer (the answerer), given a session and description
-    /// already created via `Session::new(local_addr, false)` (set
+    /// already created via `Session::new(local_addr, false, now)` (set
     /// `description.identity` first - the guide's section 5.2 requires one on every
     /// answer, regardless of signaling transport) and the offer's already-parsed
     /// remote description (see [`Self::parse_offer`] - typically called first to
@@ -118,6 +118,7 @@ impl Connection {
         remote_description: Description,
         remote_candidates: Vec<Candidate>,
         ice_mode: IceMode,
+        now: Instant,
     ) -> Result<(Connection, Vec<Signal>), ProtocolError> {
         if offer.signal_type != SignalType::Offer {
             return Err(ProtocolError::Other("expected an offer signal".to_string()));
@@ -127,6 +128,7 @@ impl Connection {
         session.handle(SessionInput::RemoteDescription(
             remote_description,
             remote_candidates,
+            now,
         ))?;
 
         let signals = Self::describe(
@@ -182,7 +184,7 @@ impl Connection {
     /// (and, under trickle ICE, the answerer's candidate); for the answerer, the
     /// offerer's trickled candidate (its description was already applied in
     /// [`Self::accept`]). Signals for a different connection or network are ignored.
-    fn handle_signal(&mut self, signal: &Signal) -> Result<(), ProtocolError> {
+    fn handle_signal(&mut self, signal: &Signal, now: Instant) -> Result<(), ProtocolError> {
         if signal.connection_id != self.connection_id || signal.network_id != self.remote_network_id
         {
             return Ok(());
@@ -192,13 +194,16 @@ impl Connection {
             SignalType::Answer => {
                 let (description, candidates) = Description::parse(&signal.data)?;
                 self.remote_identity = description.identity.clone();
-                self.session
-                    .handle(SessionInput::RemoteDescription(description, candidates))?;
+                self.session.handle(SessionInput::RemoteDescription(
+                    description,
+                    candidates,
+                    now,
+                ))?;
             }
             SignalType::Candidate => {
                 let candidate = parse_ice_candidate(&signal.data)?;
                 self.session
-                    .handle(SessionInput::RemoteCandidate(candidate))?;
+                    .handle(SessionInput::RemoteCandidate(candidate, now))?;
             }
             SignalType::Error => {
                 return Err(ProtocolError::Other(format!(
@@ -253,10 +258,10 @@ pub enum ConnectionInput {
     Timeout(Instant),
 
     /// A signal received for this connection - see `Connection::handle_signal`.
-    Signal(Signal),
+    Signal(Signal, Instant),
 
     /// A complete application message to send on a channel.
-    Send(Channel, Bytes),
+    Send(Channel, Bytes, Instant),
 }
 
 impl Sans for Connection {
@@ -270,9 +275,9 @@ impl Sans for Connection {
                 self.session.handle(SessionInput::Packet(data, from, now))
             }
             ConnectionInput::Timeout(now) => self.session.handle(SessionInput::Timeout(now)),
-            ConnectionInput::Signal(signal) => self.handle_signal(&signal),
-            ConnectionInput::Send(channel, data) => {
-                self.session.handle(SessionInput::Send(channel, data))
+            ConnectionInput::Signal(signal, now) => self.handle_signal(&signal, now),
+            ConnectionInput::Send(channel, data, now) => {
+                self.session.handle(SessionInput::Send(channel, data, now))
             }
         }
     }
@@ -301,7 +306,7 @@ mod tests {
     fn assert_connects(ice_mode: IceMode) {
         let mut now = Instant::now();
 
-        let (offer_session, offer_description) = Session::new(addr(40200), true).unwrap();
+        let (offer_session, offer_description) = Session::new(addr(40200), true, now).unwrap();
         let (mut offerer, offer_signals) = Connection::connect(
             offer_session,
             offer_description,
@@ -314,7 +319,7 @@ mod tests {
         assert_eq!(offer.signal_type, SignalType::Offer);
 
         let (remote_description, remote_candidates) = Connection::parse_offer(&offer).unwrap();
-        let (answer_session, answer_description) = Session::new(addr(40201), false).unwrap();
+        let (answer_session, answer_description) = Session::new(addr(40201), false, now).unwrap();
         let (mut answerer, answer_signals) = Connection::accept(
             answer_session,
             answer_description,
@@ -322,20 +327,27 @@ mod tests {
             remote_description,
             remote_candidates,
             ice_mode,
+            now,
         )
         .unwrap();
         let mut answer_iter = answer_signals.into_iter();
         let answer = answer_iter.next().unwrap();
         assert_eq!(answer.signal_type, SignalType::Answer);
 
-        offerer.handle(ConnectionInput::Signal(answer)).unwrap();
+        offerer
+            .handle(ConnectionInput::Signal(answer, now))
+            .unwrap();
 
         // Trickled candidates (if any) flow after the offer/answer.
         for signal in offer_iter {
-            answerer.handle(ConnectionInput::Signal(signal)).unwrap();
+            answerer
+                .handle(ConnectionInput::Signal(signal, now))
+                .unwrap();
         }
         for signal in answer_iter {
-            offerer.handle(ConnectionInput::Signal(signal)).unwrap();
+            offerer
+                .handle(ConnectionInput::Signal(signal, now))
+                .unwrap();
         }
 
         let mut offerer_ready = false;
@@ -409,12 +421,15 @@ mod tests {
 
     #[test]
     fn signals_for_a_different_connection_are_ignored() {
-        let (session, description) = Session::new(addr(40210), true).unwrap();
+        let now = Instant::now();
+        let (session, description) = Session::new(addr(40210), true, now).unwrap();
         let (mut offerer, _) =
             Connection::connect(session, description, 1, 7.to_string(), IceMode::Full);
         let unrelated = Signal::answer(999, "irrelevant".to_string(), "7".to_string());
         // Wrong connection_id: ignored, not an error.
-        offerer.handle(ConnectionInput::Signal(unrelated)).unwrap();
+        offerer
+            .handle(ConnectionInput::Signal(unrelated, now))
+            .unwrap();
     }
 
     fn decode_cpk(claims: &serde_json::Value) -> Vec<u8> {
@@ -430,10 +445,11 @@ mod tests {
     /// which the offerer in turn verifies once `handle_signal` applies it.
     #[test]
     fn identity_assertions_flow_and_verify_in_both_directions() {
+        let now = Instant::now();
         let (offerer_keypair, _) = identity::generate_keypair().unwrap();
         let (answerer_keypair, _) = identity::generate_keypair().unwrap();
 
-        let (offer_session, mut offer_description) = Session::new(addr(40220), true).unwrap();
+        let (offer_session, mut offer_description) = Session::new(addr(40220), true, now).unwrap();
         let offerer_token =
             identity::build_server_token(&offerer_keypair, serde_json::Map::new(), None).unwrap();
         offer_description.identity = Some(
@@ -468,7 +484,8 @@ mod tests {
             )
             .unwrap();
 
-        let (answer_session, mut answer_description) = Session::new(addr(40221), false).unwrap();
+        let (answer_session, mut answer_description) =
+            Session::new(addr(40221), false, now).unwrap();
         let answerer_token =
             identity::build_server_token(&answerer_keypair, serde_json::Map::new(), None).unwrap();
         answer_description.identity = Some(
@@ -488,12 +505,13 @@ mod tests {
             remote_description,
             remote_candidates,
             IceMode::Full,
+            now,
         )
         .unwrap();
         let answer = answer_signals.into_iter().next().unwrap();
 
         offerer
-            .handle(ConnectionInput::Signal(answer.clone()))
+            .handle(ConnectionInput::Signal(answer.clone(), now))
             .unwrap();
 
         // Offerer: verify the answerer's identity after applying the answer.

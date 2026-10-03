@@ -258,7 +258,7 @@ impl NetherServer {
         let Ok((remote_description, remote_candidates)) = Connection::parse_offer(&offer) else {
             return;
         };
-        let Ok((session, description)) = Session::new(self.session_local_addr, false) else {
+        let Ok((session, description)) = Session::new(self.session_local_addr, false, now) else {
             return;
         };
         let local_ufrag = description.ice.ufrag.clone();
@@ -269,6 +269,7 @@ impl NetherServer {
             remote_description,
             remote_candidates,
             IceMode::Trickle,
+            now,
         ) else {
             return;
         };

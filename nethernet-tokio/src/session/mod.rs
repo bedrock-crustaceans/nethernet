@@ -199,12 +199,12 @@ impl Session {
                     command = commands.recv() => match command {
                         Some(Command::Send(channel, data, reply)) => {
                             let result = connection
-                                .handle(ConnectionInput::Send(channel, data))
+                                .handle(ConnectionInput::Send(channel, data, Instant::now()))
                                 .map_err(NetherError::from);
                             let _ = reply.send(result);
                         }
                         Some(Command::Signal(signal)) => {
-                            if let Err(e) = connection.handle(ConnectionInput::Signal(signal)) {
+                            if let Err(e) = connection.handle(ConnectionInput::Signal(signal, Instant::now())) {
                                 tracing::debug!("signal handling error: {e}");
                             }
                         }

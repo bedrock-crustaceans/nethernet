@@ -7,6 +7,7 @@ edition = "2024"
 async-channel = "2.5.0"
 bevy_app = { version = "0.19.1", default-features = false }
 bevy_ecs = { version = "0.19.1", default-features = false, features = ["std"] }
+bevy_platform = { version = "0.19.1", default-features = false }
 nethernet = { path = "../nethernet" }
 tracing = "0.1"
 rand = "0.10"

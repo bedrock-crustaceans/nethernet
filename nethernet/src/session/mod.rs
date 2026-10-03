@@ -71,14 +71,14 @@ pub enum SessionInput {
 
     /// Applies the remote's description once known, plus any candidates embedded in
     /// it (full ICE) or already trickled.
-    RemoteDescription(Description, Vec<Candidate>),
+    RemoteDescription(Description, Vec<Candidate>, Instant),
 
     /// Adds a candidate trickled separately from the description (LAN/trickle-ICE
     /// signaling only).
-    RemoteCandidate(Candidate),
+    RemoteCandidate(Candidate, Instant),
 
     /// A complete application message to send on a channel.
-    Send(Channel, bytes::Bytes),
+    Send(Channel, bytes::Bytes, Instant),
 
     /// Drives ICE/DTLS/SCTP retransmission and keepalive timers. The only input that
     /// produces a [`SessionOutput::Wait`], matching
@@ -169,8 +169,9 @@ impl Session {
     pub fn new(
         local_addr: SocketAddr,
         is_controlling: bool,
+        now: Instant,
     ) -> Result<(Session, Description), ProtocolError> {
-        let ice = IceLayer::new(local_addr, is_controlling)?;
+        let ice = IceLayer::new(local_addr, is_controlling, now)?;
         let certificate = certificate::generate()?;
         let fingerprint = certificate::fingerprint(&certificate)?;
 
@@ -234,6 +235,7 @@ impl Session {
         &mut self,
         remote: &Description,
         candidates: Vec<Candidate>,
+        now: Instant,
     ) -> Result<(), ProtocolError> {
         self.ice
             .set_remote_credentials(remote.ice.ufrag.clone(), remote.ice.pwd.clone())?;
@@ -246,7 +248,7 @@ impl Session {
         }
 
         if let Some(candidate) = candidates.into_iter().next() {
-            self.start_transports(candidate.addr(), resolved_role, fingerprint)?;
+            self.start_transports(candidate.addr(), resolved_role, fingerprint, now)?;
         } else {
             // Trickle ICE: remember the role/fingerprint for when a candidate arrives.
             self.pending_role_fingerprint = Some((resolved_role, fingerprint));
@@ -257,14 +259,18 @@ impl Session {
 
     /// Adds a candidate trickled separately from the description (LAN/trickle-ICE
     /// signaling only).
-    fn add_remote_candidate(&mut self, candidate: Candidate) -> Result<(), ProtocolError> {
+    fn add_remote_candidate(
+        &mut self,
+        candidate: Candidate,
+        now: Instant,
+    ) -> Result<(), ProtocolError> {
         let addr = candidate.addr();
         self.ice.add_remote_candidate(candidate)?;
 
         if self.remote.is_none()
             && let Some((resolved_role, fingerprint)) = self.pending_role_fingerprint.take()
         {
-            self.start_transports(addr, resolved_role, fingerprint)?;
+            self.start_transports(addr, resolved_role, fingerprint, now)?;
         }
 
         Ok(())
@@ -275,6 +281,7 @@ impl Session {
         remote_addr: SocketAddr,
         resolved_role: ResolvedRole,
         remote_fingerprint: (String, String),
+        now: Instant,
     ) -> Result<(), ProtocolError> {
         let certificate = self
             .certificate
@@ -286,12 +293,14 @@ impl Session {
             resolved_role,
             certificate,
             remote_fingerprint,
+            now,
         )?;
         let sctp = SctpLayer::new(
             self.local_addr,
             remote_addr,
             resolved_role,
             self.local_description.sctp_max_message_size,
+            now,
         )?;
 
         self.remote = Some(RemoteInfo { addr: remote_addr });
@@ -342,17 +351,17 @@ impl Session {
         }
         self.pump(now)?;
 
-        if let Some(deadline) = self.poll_timeout(now) {
+        if let Some(deadline) = self.poll_timeout() {
             self.output
                 .push_back(SessionOutput::Wait(deadline.saturating_duration_since(now)));
         }
         Ok(())
     }
 
-    fn poll_timeout(&mut self, now: Instant) -> Option<Instant> {
+    fn poll_timeout(&mut self) -> Option<Instant> {
         [
             self.ice.poll_timeout(),
-            self.dtls.as_ref().and_then(|d| d.poll_timeout(now)),
+            self.dtls.as_ref().and_then(|d| d.poll_timeout()),
             self.sctp.as_ref().and_then(|s| s.poll_timeout()),
         ]
         .into_iter()
@@ -364,7 +373,12 @@ impl Session {
     /// [`crate::protocol::message`]) if it's too large for one SCTP message and this is
     /// the reliable channel; the unreliable channel never fragments and rejects
     /// anything too large instead.
-    fn send(&mut self, channel: Channel, data: bytes::Bytes) -> Result<(), ProtocolError> {
+    fn send(
+        &mut self,
+        channel: Channel,
+        data: bytes::Bytes,
+        now: Instant,
+    ) -> Result<(), ProtocolError> {
         let stream_id = self
             .channels
             .stream_id(channel)
@@ -385,14 +399,14 @@ impl Session {
             Channel::Reliable => {
                 for segment in Framing::split_into_segments(data)? {
                     stream
-                        .write_with_ppi(&segment.encode(), PayloadProtocolIdentifier::Binary)
+                        .write_with_ppi(now, &segment.encode(), PayloadProtocolIdentifier::Binary)
                         .map_err(|e| ProtocolError::Other(format!("{e}")))?;
                 }
             }
             Channel::Unreliable => {
                 let encoded = Framing::encode_unreliable(data)?;
                 stream
-                    .write_with_ppi(&encoded, PayloadProtocolIdentifier::Binary)
+                    .write_with_ppi(now, &encoded, PayloadProtocolIdentifier::Binary)
                     .map_err(|e| ProtocolError::Other(format!("{e}")))?;
             }
         }
@@ -424,9 +438,12 @@ impl Session {
         if let (Some(sctp), Some(dtls)) = (&mut self.sctp, &mut self.dtls) {
             while let Some(event) = sctp.poll_event() {
                 match event {
-                    SctpEvent::Connected => {
-                        open_channels_if_controlling(self.is_controlling, sctp, &mut self.channels)?
-                    }
+                    SctpEvent::Connected => open_channels_if_controlling(
+                        self.is_controlling,
+                        sctp,
+                        &mut self.channels,
+                        now,
+                    )?,
                     SctpEvent::HandshakeFailed { .. } | SctpEvent::AssociationLost { .. } => {
                         failed = true;
                     }
@@ -434,10 +451,10 @@ impl Session {
                 }
             }
 
-            drain_dcep_and_data(sctp, &mut self.channels, &mut self.output)?;
+            drain_dcep_and_data(sctp, &mut self.channels, &mut self.output, now)?;
 
             while let Some(packet) = sctp.poll_transmit(now) {
-                dtls.write(&packet)?;
+                dtls.write(&packet, now)?;
             }
 
             while let Some((data, to)) = dtls.poll_transmit() {
@@ -477,11 +494,13 @@ impl Sans for Session {
     fn handle(&mut self, msg: SessionInput) -> Result<(), ProtocolError> {
         match msg {
             SessionInput::Packet(data, from, now) => self.handle_packet(&data, from, now),
-            SessionInput::RemoteDescription(remote, candidates) => {
-                self.set_remote_description(&remote, candidates)
+            SessionInput::RemoteDescription(remote, candidates, now) => {
+                self.set_remote_description(&remote, candidates, now)
             }
-            SessionInput::RemoteCandidate(candidate) => self.add_remote_candidate(candidate),
-            SessionInput::Send(channel, data) => self.send(channel, data),
+            SessionInput::RemoteCandidate(candidate, now) => {
+                self.add_remote_candidate(candidate, now)
+            }
+            SessionInput::Send(channel, data, now) => self.send(channel, data, now),
             SessionInput::Timeout(now) => self.handle_timeout(now),
         }
     }
@@ -495,6 +514,7 @@ fn open_channels_if_controlling(
     is_controlling: bool,
     sctp: &mut SctpLayer,
     channels: &mut Channels,
+    now: Instant,
 ) -> Result<(), ProtocolError> {
     if !is_controlling {
         return Ok(());
@@ -516,7 +536,7 @@ fn open_channels_if_controlling(
             .map_err(|e| ProtocolError::Other(format!("{e}")))?;
         let encoded = dcep::encode_open(open)?;
         stream
-            .write_with_ppi(&encoded, dcep::PPI_DCEP)
+            .write_with_ppi(now, &encoded, dcep::PPI_DCEP)
             .map_err(|e| ProtocolError::Other(format!("{e}")))?;
         channels.set_open(channel, stream_id);
     }
@@ -530,6 +550,7 @@ fn drain_dcep_and_data(
     sctp: &mut SctpLayer,
     channels: &mut Channels,
     output: &mut VecDeque<SessionOutput>,
+    now: Instant,
 ) -> Result<(), ProtocolError> {
     let Some(assoc) = sctp.association_mut() else {
         return Ok(());
@@ -551,7 +572,7 @@ fn drain_dcep_and_data(
                 let stream_id = stream.stream_identifier();
                 let ack = dcep::encode_ack()?;
                 stream
-                    .write_with_ppi(&ack, dcep::PPI_DCEP)
+                    .write_with_ppi(now, &ack, dcep::PPI_DCEP)
                     .map_err(|e| ProtocolError::Other(format!("{e}")))?;
                 channels.set_open(channel, stream_id);
             }
@@ -622,8 +643,8 @@ mod tests {
     fn full_handshake_and_bidirectional_data_exchange() {
         let mut now = Instant::now();
 
-        let (mut offerer, offer) = Session::new(addr(40100), true).unwrap();
-        let (mut answerer, answer) = Session::new(addr(40101), false).unwrap();
+        let (mut offerer, offer) = Session::new(addr(40100), true, now).unwrap();
+        let (mut answerer, answer) = Session::new(addr(40101), false, now).unwrap();
 
         // Round-trip through the real SDP codec (full ICE, as HTTP signaling would
         // deliver it) rather than passing the structs directly, since DtlsRole::Auto
@@ -639,12 +660,14 @@ mod tests {
             .handle(SessionInput::RemoteDescription(
                 parsed_offer,
                 offer_candidates,
+                now,
             ))
             .unwrap();
         offerer
             .handle(SessionInput::RemoteDescription(
                 parsed_answer,
                 answer_candidates,
+                now,
             ))
             .unwrap();
 
@@ -715,24 +738,28 @@ mod tests {
             .handle(SessionInput::Send(
                 Channel::Reliable,
                 Bytes::from_static(b"hello from offerer (reliable)"),
+                now,
             ))
             .unwrap();
         offerer
             .handle(SessionInput::Send(
                 Channel::Unreliable,
                 Bytes::from_static(b"hello from offerer (unreliable)"),
+                now,
             ))
             .unwrap();
         answerer
             .handle(SessionInput::Send(
                 Channel::Reliable,
                 Bytes::from_static(b"hello from answerer (reliable)"),
+                now,
             ))
             .unwrap();
         answerer
             .handle(SessionInput::Send(
                 Channel::Unreliable,
                 Bytes::from_static(b"hello from answerer (unreliable)"),
+                now,
             ))
             .unwrap();
 

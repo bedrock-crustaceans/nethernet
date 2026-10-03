@@ -3,6 +3,7 @@ use crate::http_wire;
 use crate::socket::bind_shared_socket;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
+use bevy_platform::cell::SyncCell;
 use nethernet::connection::{Connection, ConnectionInput, IceMode};
 use nethernet::error::ProtocolError;
 use nethernet::protocol::Signal;
@@ -132,7 +133,8 @@ fn drive_join(state: JoinState) -> JoinStep {
 
 struct Join {
     state: JoinState,
-    connection: Connection,
+    // rtc's DTLS state isn't Sync, which a resource has to be
+    connection: SyncCell<Connection>,
     local_ufrag: String,
     session_socket: UdpSocket,
     server_url: String,
@@ -177,7 +179,7 @@ impl NetherHttpClient {
 
         let (session_socket, local_addr) = bind_shared_socket()?;
         let (session, description) =
-            Session::new(local_addr, true).map_err(std::io::Error::other)?;
+            Session::new(local_addr, true, Instant::now()).map_err(std::io::Error::other)?;
         let local_ufrag = description.ice.ufrag.clone();
 
         let connection_id = rand::random::<u64>();
@@ -208,7 +210,7 @@ impl NetherHttpClient {
                 request,
                 written: 0,
             },
-            connection,
+            connection: SyncCell::new(connection),
             local_ufrag,
             session_socket,
             server_url,
@@ -268,12 +270,13 @@ impl NetherHttpClient {
                 JoinStep::Done(code, body) => match join::validate_join_response(code, &body) {
                     Ok(()) => {
                         let Join {
-                            mut connection,
+                            connection,
                             local_ufrag,
                             session_socket,
                             server_url,
                             ..
                         } = join;
+                        let mut connection = SyncCell::to_inner(connection);
                         let answer = Signal::answer(connection.connection_id(), body, server_url);
 
                         // Applied here, before the connection is handed to the pool and
@@ -283,7 +286,10 @@ impl NetherHttpClient {
                         // candidate this answer carries is known, and gets registered as
                         // a peer-reflexive candidate instead, which ICE won't nominate
                         // for a full extra second (RFC 8445's acceptance grace period).
-                        if connection.handle(ConnectionInput::Signal(answer)).is_ok() {
+                        if connection
+                            .handle(ConnectionInput::Signal(answer, now))
+                            .is_ok()
+                        {
                             let mut pool = SessionPool::new(session_socket);
                             pool.add((), connection, local_ufrag);
                             self.pool = Some(pool);

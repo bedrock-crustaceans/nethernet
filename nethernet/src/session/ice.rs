@@ -2,6 +2,7 @@
 //! only, no STUN/TURN (see the NetherNet HTTP signaling guide, section 6).
 
 use crate::error::ProtocolError;
+use crate::protocol::webrtc::certificate;
 use bytes::BytesMut;
 use rtc::ice::agent::agent_config::AgentConfig;
 use rtc::ice::agent::{Agent, Credentials, Event};
@@ -25,7 +26,11 @@ pub struct IceLayer {
 impl IceLayer {
     /// Creates an ICE layer for the given locally bound address. `is_controlling`
     /// matches the WebRTC offerer/answerer split: the offering side controls.
-    pub fn new(local_addr: SocketAddr, is_controlling: bool) -> Result<IceLayer, ProtocolError> {
+    pub fn new(
+        local_addr: SocketAddr,
+        is_controlling: bool,
+        now: Instant,
+    ) -> Result<IceLayer, ProtocolError> {
         let config = AgentConfig {
             local_ufrag: rtc::ice::rand::generate_ufrag(),
             local_pwd: rtc::ice::rand::generate_pwd(),
@@ -35,8 +40,8 @@ impl IceLayer {
             ..Default::default()
         };
 
-        let mut agent =
-            Agent::new(Arc::new(config)).map_err(|e| ProtocolError::Other(format!("{e}")))?;
+        let mut agent = Agent::new(now, Arc::new(config), certificate::crypto_provider()?)
+            .map_err(|e| ProtocolError::Other(format!("{e}")))?;
 
         let candidate = CandidateHostConfig {
             base_config: CandidateConfig {
@@ -126,7 +131,7 @@ impl IceLayer {
 
     /// Returns the next connection-state or selected-pair event, if any.
     pub fn poll_event(&mut self) -> Option<Event> {
-        self.agent.poll_event()
+        self.agent.poll_event().map(|tagged| tagged.event)
     }
 
     pub fn handle_timeout(&mut self, now: Instant) -> Result<(), ProtocolError> {
@@ -170,8 +175,8 @@ mod tests {
     #[test]
     fn two_agents_connect_over_loopback() {
         let mut now = Instant::now();
-        let mut a = IceLayer::new(addr(40000), true).unwrap();
-        let mut b = IceLayer::new(addr(40001), false).unwrap();
+        let mut a = IceLayer::new(addr(40000), true, now).unwrap();
+        let mut b = IceLayer::new(addr(40001), false, now).unwrap();
 
         let a_creds = a.local_credentials().clone();
         let b_creds = b.local_credentials().clone();

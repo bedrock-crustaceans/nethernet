@@ -202,14 +202,16 @@ fn drive<K: Eq + Hash + Clone>(
                 }
                 Ok(Command::Signal(id, signal)) => {
                     if let Some(entry) = entries.get_mut(&id)
-                        && let Err(e) = entry.connection.handle(ConnectionInput::Signal(signal))
+                        && let Err(e) = entry
+                            .connection
+                            .handle(ConnectionInput::Signal(signal, now))
                     {
                         tracing::debug!("signal handling error: {e}");
                     }
                 }
                 Ok(Command::Send(id, channel, data)) => {
                     if let Some(entry) = entries.get_mut(&id) {
-                        let input = ConnectionInput::Send(channel, data.into());
+                        let input = ConnectionInput::Send(channel, data.into(), now);
                         if let Err(e) = entry.connection.handle(input) {
                             tracing::debug!("send error: {e}");
                         }
