@@ -30,6 +30,13 @@ fn client_config() -> ConnectionConfig {
     }
 }
 
+// reqwest is built without a default TLS provider, and these tests may run before
+// anything else in the process has installed one.
+fn http_client() -> reqwest::ClientBuilder {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
+}
+
 async fn serve(config: HttpServerConfig) -> (String, NetherServer) {
     let signaling = HttpSignalingServer::bind("127.0.0.1:0".parse().unwrap(), config)
         .await
@@ -102,7 +109,11 @@ async fn an_offer_without_an_identity_is_turned_away() {
 async fn the_status_endpoint_advertises_the_server_data() {
     let (url, _listener) = serve(server_config()).await;
 
-    let body = reqwest::get(format!("{url}/v1/join"))
+    let body = http_client()
+        .build()
+        .unwrap()
+        .get(format!("{url}/v1/join"))
+        .send()
         .await
         .unwrap()
         .text()
@@ -130,10 +141,7 @@ async fn a_peer_holding_too_many_connections_is_refused() {
     let held = tokio::net::TcpStream::connect(&addr).await.unwrap();
 
     // The second connection is accepted by the kernel and closed without an answer
-    let client = reqwest::Client::builder()
-        .pool_max_idle_per_host(0)
-        .build()
-        .unwrap();
+    let client = http_client().pool_max_idle_per_host(0).build().unwrap();
     let refused = client
         .get(format!("{url}/v1/join"))
         .timeout(Duration::from_secs(5))
