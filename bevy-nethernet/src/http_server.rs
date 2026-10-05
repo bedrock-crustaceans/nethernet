@@ -7,7 +7,7 @@ use bevy_ecs::prelude::*;
 use nethernet::connection::{Connection, IceMode};
 use nethernet::prelude::{
     HttpSignaler, HttpSignalerConfig, HttpSignalerInput, HttpSignalerOutput, Offer, RejectReason,
-    Sans, ServerData,
+    Sans, ServerData, ServerIdentity,
 };
 use nethernet::protocol::Signal;
 use nethernet::protocol::webrtc::Description;
@@ -79,6 +79,7 @@ pub struct NetherHttpServer {
     signaler: HttpSignaler,
     pool: SessionPool<NetherSessionId>,
     session_local_addr: SocketAddr,
+    identity: Option<ServerIdentity>,
     next_conn_id: u64,
     connections: HashMap<u64, TcpConn>,
     sessions: HashMap<NetherSessionId, SessionEntry>,
@@ -105,6 +106,7 @@ impl NetherHttpServer {
             signaler: HttpSignaler::new(config),
             pool: SessionPool::new(session_socket),
             session_local_addr,
+            identity: None,
             next_conn_id: 0,
             connections: HashMap::new(),
             sessions: HashMap::new(),
@@ -116,6 +118,10 @@ impl NetherHttpServer {
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.listener.local_addr()
+    }
+
+    pub fn set_identity(&mut self, identity: ServerIdentity) {
+        self.identity = Some(identity);
     }
 
     pub fn set_server_data(&mut self, data: ServerData) {
@@ -318,7 +324,16 @@ impl NetherHttpServer {
     }
 
     fn handle_offer(&mut self, offer: Offer, now: Instant) {
-        match accept_offer(&offer, self.session_local_addr, now) {
+        let accepted = accept_offer(&offer, self.session_local_addr, now).and_then(
+            |(sdp, connection, ufrag)| match &self.identity {
+                Some(identity) => identity
+                    .augment(&sdp)
+                    .map(|sdp| (sdp, connection, ufrag))
+                    .map_err(|_| RejectReason::Unavailable),
+                None => Ok((sdp, connection, ufrag)),
+            },
+        );
+        match accepted {
             Ok((answer_sdp, connection, local_ufrag)) => {
                 let _ = self.signaler.handle(HttpSignalerInput::Answer {
                     connection_id: offer.connection_id,
