@@ -1,5 +1,5 @@
 use crate::connection::{ConnectionEvent, SessionPool};
-use crate::socket::bind_shared_socket;
+use crate::socket::{bind_discovery_socket, bind_shared_socket, send_discovery};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use nethernet::connection::{Connection, IceMode};
@@ -85,9 +85,7 @@ impl NetherServer {
         let mut config = LanSignalerConfig::default();
         conf(&mut config);
 
-        let socket = UdpSocket::bind(bind_addr)?;
-        socket.set_nonblocking(true)?;
-        socket.set_broadcast(true)?;
+        let socket = bind_discovery_socket(bind_addr)?;
 
         let (session_socket, session_local_addr) = bind_shared_socket()?;
 
@@ -176,7 +174,7 @@ impl NetherServer {
                 Ok((len, addr)) => {
                     let _ = self.signaler.handle(LanSignalerInput::Datagram(
                         self.buf[..len].into(),
-                        addr,
+                        SocketAddr::new(addr.ip().to_canonical(), addr.port()),
                         now,
                     ));
                 }
@@ -190,7 +188,7 @@ impl NetherServer {
         while let Some(output) = self.signaler.poll() {
             match output {
                 LanSignalerOutput::Datagram(buf, addr) => {
-                    let _ = self.socket.send_to(&buf, addr);
+                    let _ = send_discovery(&self.socket, &buf, addr);
                 }
                 LanSignalerOutput::Signal(signal) => self.handle_signal(signal, now),
                 LanSignalerOutput::ServerDiscovered(..) | LanSignalerOutput::Wait(_) => {}

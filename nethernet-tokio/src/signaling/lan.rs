@@ -8,8 +8,9 @@ use nethernet::prelude::{
     LanSignaler, LanSignalerInput, LanSignalerOutput, Packets, RequestPacket, Sans, ServerData,
 };
 use nethernet::protocol::packet::discovery::encode;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -58,8 +59,7 @@ impl LanSignaling {
         bind_addr: SocketAddr,
         mut config: LanConfig,
     ) -> Result<Self> {
-        let socket = UdpSocket::bind(bind_addr).await?;
-        socket.set_broadcast(true)?;
+        let socket = bind_discovery_socket(bind_addr)?;
 
         if config.broadcast_address.is_none() && bind_addr.port() != config.discovery_port {
             config.broadcast_address = Some(SocketAddr::new(
@@ -185,12 +185,14 @@ impl LanSignaling {
             let mut wake = Instant::now();
             let mut discovered: HashMap<u64, ServerData> = HashMap::new();
             let mut addresses: HashMap<u64, SocketAddr> = HashMap::new();
+            let dual_stack = socket.local_addr().is_ok_and(|addr| addr.is_ipv6());
 
             loop {
                 tokio::select! {
                     _ = cancel_token.cancelled() => break,
                     received = socket.recv_from(&mut buf) => match received {
                         Ok((len, addr)) => {
+                            let addr = SocketAddr::new(addr.ip().to_canonical(), addr.port());
                             let input = LanSignalerInput::Datagram(
                                 buf[..len].into(),
                                 addr,
@@ -228,7 +230,9 @@ impl LanSignaling {
                 while let Some(output) = signaler.poll() {
                     match output {
                         LanSignalerOutput::Datagram(buf, addr) => {
-                            if let Err(e) = socket.send_to(&buf, addr).await {
+                            if let Err(e) =
+                                socket.send_to(&buf, socket_family(addr, dual_stack)).await
+                            {
                                 tracing::debug!("Failed to send to {}: {}", addr, e);
                             }
                         }
@@ -247,6 +251,34 @@ impl LanSignaling {
                 addresses = signaler.addresses().collect();
             }
         })
+    }
+}
+
+fn bind_discovery_socket(addr: SocketAddr) -> std::io::Result<UdpSocket> {
+    let socket = match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => bind_dual_stack(addr)?,
+        _ => std::net::UdpSocket::bind(addr)?,
+    };
+    socket.set_nonblocking(true)?;
+    socket.set_broadcast(true)?;
+    UdpSocket::from_std(socket)
+}
+
+fn bind_dual_stack(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    let Ok(socket) = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)) else {
+        return std::net::UdpSocket::bind(addr);
+    };
+    socket.set_only_v6(false)?;
+    socket.bind(&SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), addr.port()).into())?;
+    Ok(socket.into())
+}
+
+fn socket_family(addr: SocketAddr, dual_stack: bool) -> SocketAddr {
+    match addr {
+        SocketAddr::V4(v4) if dual_stack => {
+            SocketAddr::new(v4.ip().to_ipv6_mapped().into(), v4.port())
+        }
+        _ => addr,
     }
 }
 

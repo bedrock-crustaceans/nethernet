@@ -128,9 +128,17 @@ impl LanSignaler {
         now: Instant,
     ) -> Result<(), LanSignalerError> {
         // Anything that is not a discovery packet belongs to another service on the port
-        let Ok((packet, sender)) = decode(buf) else {
-            tracing::trace!("ignoring unrecognized packet from {}", addr);
-            return Ok(());
+        let (packet, sender) = match decode(buf) {
+            Ok(decoded) => decoded,
+            Err(e) => {
+                tracing::trace!(
+                    "ignoring unrecognized packet from {}: {} ({})",
+                    addr,
+                    e,
+                    hex::encode(buf)
+                );
+                return Ok(());
+            }
         };
 
         if sender == self.network_id {
