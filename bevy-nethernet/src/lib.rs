@@ -18,5 +18,7 @@ pub mod prelude {
     pub use crate::server::{
         NetherServer, NetherServerEvent, NetherServerPlugin, NetherServerSet, NetherSessionId,
     };
-    pub use nethernet::prelude::{HttpSignalerConfig, LanSignalerConfig, ServerData, ServerIdentity};
+    pub use nethernet::prelude::{
+        HttpSignalerConfig, LanSignalerConfig, ServerData, ServerIdentity,
+    };
 }
