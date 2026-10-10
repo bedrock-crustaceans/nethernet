@@ -2,5 +2,4 @@
 
 pub mod identity;
 pub mod jwks;
-pub mod secret;
 pub mod tls;
