@@ -1,6 +1,7 @@
 use crate::connection::{ConnectionEvent, SessionPool};
 use crate::http_wire;
 use crate::socket::bind_shared_socket;
+use crate::tcp_wire::{Inbound, Wire, WireError};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use bevy_platform::cell::SyncCell;
@@ -13,12 +14,13 @@ use nethernet::session::{Channel, Session};
 use nethernet::signaling::http::join;
 use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
 use std::collections::VecDeque;
-use std::io::{ErrorKind, Read, Write};
-use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::io::ErrorKind;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
+#[cfg(feature = "tls")]
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const READ_CHUNK: usize = 4096;
 
 pub struct NetherHttpClientPlugin;
 
@@ -59,14 +61,84 @@ pub enum NetherHttpClientEvent {
     Disconnected,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum JoinError {
+    #[error("the server url has no scheme")]
+    MissingScheme,
+    #[error("only http and https server urls are supported")]
+    UnsupportedScheme,
+    #[error("the server url has no host")]
+    MissingHost,
+    #[error("the server url has an invalid port")]
+    InvalidPort,
+    #[error("https joins need the tls feature")]
+    TlsUnavailable,
+    #[cfg(feature = "tls")]
+    #[error("the server url host is not a valid tls server name")]
+    InvalidServerName,
+    #[cfg(feature = "tls")]
+    #[error("tls setup failed: {0}")]
+    Tls(#[from] rustls::Error),
+}
+
+impl From<JoinError> for std::io::Error {
+    fn from(error: JoinError) -> Self {
+        std::io::Error::new(ErrorKind::InvalidInput, error)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JoinTarget {
+    secure: bool,
+    host: String,
+    port: u16,
+    authority: String,
+}
+
+impl JoinTarget {
+    fn parse(url: &str) -> Result<Self, JoinError> {
+        let (scheme, rest) = url.split_once("://").ok_or(JoinError::MissingScheme)?;
+        let (secure, default_port) = match scheme.to_ascii_lowercase().as_str() {
+            "http" => (false, 80),
+            "https" => (true, 443),
+            _ => return Err(JoinError::UnsupportedScheme),
+        };
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let host_and_port = authority.rsplit('@').next().unwrap_or_default();
+        let (host, port_text) = match host_and_port.strip_prefix('[') {
+            Some(bracketed) => {
+                let (host, after) = bracketed.split_once(']').ok_or(JoinError::MissingHost)?;
+                (host, after.strip_prefix(':'))
+            }
+            None => match host_and_port.rsplit_once(':') {
+                Some((host, port)) => (host, Some(port)),
+                None => (host_and_port, None),
+            },
+        };
+        if host.is_empty() {
+            return Err(JoinError::MissingHost);
+        }
+        let port = match port_text {
+            Some(text) => text.parse().map_err(|_| JoinError::InvalidPort)?,
+            None => default_port,
+        };
+        Ok(Self {
+            secure,
+            host: host.to_string(),
+            port,
+            authority: host_and_port.to_string(),
+        })
+    }
+}
+
 enum JoinState {
     Sending {
-        socket: Socket,
+        wire: Wire,
         request: Vec<u8>,
         written: usize,
     },
     Receiving {
-        socket: Socket,
+        wire: Wire,
         buf: Vec<u8>,
     },
 }
@@ -80,55 +152,45 @@ enum JoinStep {
 fn drive_join(state: JoinState) -> JoinStep {
     match state {
         JoinState::Sending {
-            mut socket,
+            mut wire,
             request,
             mut written,
-        } => match socket.write(&request[written..]) {
+        } => match wire.write(&request[written..]) {
             Ok(0) => JoinStep::Failed,
             Ok(n) => {
                 written += n;
                 if written == request.len() {
                     JoinStep::Pending(JoinState::Receiving {
-                        socket,
+                        wire,
                         buf: Vec::new(),
                     })
                 } else {
                     JoinStep::Pending(JoinState::Sending {
-                        socket,
+                        wire,
                         request,
                         written,
                     })
                 }
             }
-            Err(e) if e.kind() == ErrorKind::WouldBlock => JoinStep::Pending(JoinState::Sending {
-                socket,
-                request,
-                written,
-            }),
+            Err(WireError::Io(e)) if e.kind() == ErrorKind::WouldBlock => {
+                JoinStep::Pending(JoinState::Sending {
+                    wire,
+                    request,
+                    written,
+                })
+            }
             Err(_) => JoinStep::Failed,
         },
-        JoinState::Receiving {
-            mut socket,
-            mut buf,
-        } => {
-            let mut chunk = [0u8; READ_CHUNK];
-            match socket.read(&mut chunk) {
-                Ok(0) => JoinStep::Failed,
-                Ok(n) => {
-                    buf.extend_from_slice(&chunk[..n]);
-                    match http_wire::parse_response(&buf) {
-                        Ok(Some((code, body))) => JoinStep::Done(code, body),
-                        Ok(None) if buf.len() > http_wire::MAX_BODY => JoinStep::Failed,
-                        Ok(None) => JoinStep::Pending(JoinState::Receiving { socket, buf }),
-                        Err(_) => JoinStep::Failed,
-                    }
-                }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    JoinStep::Pending(JoinState::Receiving { socket, buf })
-                }
+        JoinState::Receiving { mut wire, mut buf } => match wire.read(&mut buf) {
+            Ok(Inbound::Closed) | Err(_) => JoinStep::Failed,
+            Ok(Inbound::Idle) => JoinStep::Pending(JoinState::Receiving { wire, buf }),
+            Ok(Inbound::Received) => match http_wire::parse_response(&buf) {
+                Ok(Some((code, body))) => JoinStep::Done(code, body),
+                Ok(None) if buf.len() > http_wire::MAX_BODY => JoinStep::Failed,
+                Ok(None) => JoinStep::Pending(JoinState::Receiving { wire, buf }),
                 Err(_) => JoinStep::Failed,
-            }
-        }
+            },
+        },
     }
 }
 
@@ -151,6 +213,8 @@ pub struct NetherHttpClient {
     remote_addr: Option<SocketAddr>,
     rtt: Option<Duration>,
     identity: Option<ServerIdentity>,
+    #[cfg(feature = "tls")]
+    tls_config: Option<Arc<rustls::ClientConfig>>,
     events: VecDeque<NetherHttpClientEvent>,
     received: VecDeque<Box<[u8]>>,
     received_unreliable: VecDeque<Box<[u8]>>,
@@ -163,6 +227,11 @@ impl NetherHttpClient {
 
     pub fn set_identity(&mut self, identity: ServerIdentity) {
         self.identity = Some(identity);
+    }
+
+    #[cfg(feature = "tls")]
+    pub fn set_tls_config(&mut self, config: Arc<rustls::ClientConfig>) {
+        self.tls_config = Some(config);
     }
 
     pub fn is_connected(&self) -> bool {
@@ -178,7 +247,8 @@ impl NetherHttpClient {
     }
 
     /// Starts joining the server at `server_url` (e.g. `http://example.com:19132`).
-    /// Only plain HTTP is supported. Replaces any join or connection in progress.
+    /// `https://` needs the `tls` feature and verifies the server against the platform
+    /// trust store unless `set_tls_config` supplies another configuration. Replaces any join or connection in progress.
     pub fn connect(&mut self, local_network_id: String, server_url: String) -> std::io::Result<()> {
         self.join = None;
         self.pool = None;
@@ -187,10 +257,8 @@ impl NetherHttpClient {
         self.remote_addr = None;
         self.rtt = None;
 
-        let host = server_url.strip_prefix("http://").ok_or_else(|| {
-            std::io::Error::new(ErrorKind::InvalidInput, "only http:// URLs are supported")
-        })?;
-        let addr = host
+        let target = JoinTarget::parse(&server_url)?;
+        let addr = (target.host.as_str(), target.port)
             .to_socket_addrs()?
             .next()
             .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "could not resolve host"))?;
@@ -221,17 +289,17 @@ impl NetherHttpClient {
         };
 
         let request = http_wire::encode_post(
-            host,
+            &target.authority,
             &join::join_path(&local_network_id),
             join::CONTENT_TYPE,
             &offer_data,
         );
 
-        let socket = connect(addr)?;
+        let wire = self.open_wire(&target, addr)?;
 
         self.join = Some(Join {
             state: JoinState::Sending {
-                socket,
+                wire,
                 request,
                 written: 0,
             },
@@ -242,6 +310,36 @@ impl NetherHttpClient {
         });
         self.connecting_since = Some(Instant::now());
         Ok(())
+    }
+
+    fn open_wire(&self, target: &JoinTarget, addr: SocketAddr) -> std::io::Result<Wire> {
+        if !target.secure {
+            return Ok(Wire::plain(connect(addr)?));
+        }
+        #[cfg(feature = "tls")]
+        {
+            let config = match &self.tls_config {
+                Some(config) => config.clone(),
+                None => Self::platform_tls_config().map_err(JoinError::from)?,
+            };
+            let name = rustls::pki_types::ServerName::try_from(target.host.clone())
+                .map_err(|_| JoinError::InvalidServerName)?;
+            let wire = Wire::tls_client(connect(addr)?, config, name).map_err(JoinError::from)?;
+            Ok(wire)
+        }
+        #[cfg(not(feature = "tls"))]
+        Err(JoinError::TlsUnavailable.into())
+    }
+
+    #[cfg(feature = "tls")]
+    fn platform_tls_config() -> Result<Arc<rustls::ClientConfig>, rustls::Error> {
+        use rustls_platform_verifier::BuilderVerifierExt;
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()?
+            .with_platform_verifier()?
+            .with_no_client_auth();
+        Ok(Arc::new(config))
     }
 
     pub fn disconnect(&mut self) {
@@ -415,7 +513,7 @@ fn connect_in_progress(e: &std::io::Error) -> bool {
     }
 }
 
-fn connect(addr: SocketAddr) -> std::io::Result<Socket> {
+fn connect(addr: SocketAddr) -> std::io::Result<TcpStream> {
     let socket = Socket::new(
         Domain::for_address(addr),
         Type::STREAM,
@@ -427,5 +525,5 @@ fn connect(addr: SocketAddr) -> std::io::Result<Socket> {
         Err(e) if connect_in_progress(&e) => {}
         Err(e) => return Err(e),
     }
-    Ok(socket)
+    Ok(socket.into())
 }

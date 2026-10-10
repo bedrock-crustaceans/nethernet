@@ -191,7 +191,11 @@ dependencies = [
  "libc",
  "nethernet",
  "rand 0.10.3",
+ "rcgen",
+ "rustls",
+ "rustls-platform-verifier",
  "socket2",
+ "thiserror 2.0.21",
  "tracing",
 ]
 

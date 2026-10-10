@@ -1,6 +1,7 @@
 mod connection;
 mod http_wire;
 mod socket;
+mod tcp_wire;
 
 pub mod client;
 pub mod http_client;
@@ -10,7 +11,8 @@ pub mod server;
 pub mod prelude {
     pub use crate::client::{NetherClient, NetherClientEvent, NetherClientPlugin, NetherClientSet};
     pub use crate::http_client::{
-        NetherHttpClient, NetherHttpClientEvent, NetherHttpClientPlugin, NetherHttpClientSet,
+        JoinError, NetherHttpClient, NetherHttpClientEvent, NetherHttpClientPlugin,
+        NetherHttpClientSet,
     };
     pub use crate::http_server::{
         NetherHttpServer, NetherHttpServerEvent, NetherHttpServerPlugin, NetherHttpServerSet,
