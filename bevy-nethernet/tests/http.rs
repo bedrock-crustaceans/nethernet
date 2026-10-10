@@ -388,6 +388,19 @@ mod raw {
     }
 
     #[test]
+    fn a_non_utf8_body_is_answered_with_400() {
+        let (mut server, addr) = bind(|_| {});
+        let mut stream = connect(addr);
+        stream
+            .write_all(b"POST /v1/join HTTP/1.1\r\nhost: x\r\ncontent-length: 2\r\n\r\n\xff\xfe")
+            .unwrap();
+
+        let reply = collect(&mut server, &mut stream, Duration::from_millis(500));
+
+        assert!(reply.text.starts_with("HTTP/1.1 400"), "{}", reply.text);
+    }
+
+    #[test]
     fn content_length_with_transfer_encoding_is_answered_with_400() {
         let (mut server, addr) = bind(|_| {});
         let mut stream = connect(addr);

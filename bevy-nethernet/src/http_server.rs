@@ -1,8 +1,9 @@
 use crate::connection::{ConnectionEvent, SessionPool};
+use crate::http_stream::{Drain, HttpStream, ServerTls, Shutdown};
 use crate::http_wire;
 use crate::server::NetherSessionId;
 use crate::socket::bind_shared_socket;
-use crate::tcp_wire::{Inbound, Wire, WireError};
+use crate::tcp_wire::Inbound;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use http::{Response, StatusCode};
@@ -68,11 +69,8 @@ enum ProxyHeader {
 }
 
 struct TcpConn {
-    wire: Wire,
+    stream: HttpStream,
     proxy_header: ProxyHeader,
-    read_buf: Vec<u8>,
-    write_buf: Vec<u8>,
-    written: usize,
     close_after_write: bool,
     continued: bool,
     last_active: Instant,
@@ -83,21 +81,17 @@ impl TcpConn {
         if !matches!(self.proxy_header, ProxyHeader::Expected) {
             return;
         }
-        self.proxy_header = match proxy_protocol::read(&self.read_buf) {
+        self.proxy_header = match proxy_protocol::read(&self.stream.inbound) {
             proxy_protocol::Header::Proxied { source, length } => {
-                self.read_buf.drain(..length);
+                self.stream.inbound.drain(..length);
                 ProxyHeader::Read(source)
             }
             proxy_protocol::Header::Absent => ProxyHeader::Read(None),
-            proxy_protocol::Header::Incomplete if self.read_buf.len() >= MAX_PROXY_HEADER => {
+            proxy_protocol::Header::Incomplete if self.stream.inbound.len() >= MAX_PROXY_HEADER => {
                 ProxyHeader::Read(None)
             }
             proxy_protocol::Header::Incomplete => ProxyHeader::Expected,
         };
-    }
-
-    fn wire_drained(&mut self) -> bool {
-        self.wire.finish().is_err() || !self.wire.has_pending_output()
     }
 
     fn refuse(&mut self, status: StatusCode) {
@@ -105,10 +99,10 @@ impl TcpConn {
             .status(status)
             .body(String::new())
             .expect("a status and an empty body are always a valid response");
-        self.write_buf
-            .extend_from_slice(&http_wire::encode_response(&response, false));
+        self.stream
+            .queue(&http_wire::ResponseWriter::encode(&response, false));
         self.close_after_write = true;
-        self.read_buf.clear();
+        self.stream.inbound.clear();
     }
 }
 
@@ -132,8 +126,7 @@ pub struct NetherHttpServer {
     infer_peer_candidates: bool,
     timeouts: Timeouts,
     idle_timeout: Duration,
-    #[cfg(feature = "tls")]
-    tls: Option<Arc<rustls::ServerConfig>>,
+    tls: ServerTls,
     next_conn_id: u64,
     connections: HashMap<u64, TcpConn>,
     sessions: HashMap<NetherSessionId, SessionEntry>,
@@ -165,8 +158,7 @@ impl NetherHttpServer {
             infer_peer_candidates: true,
             timeouts: Timeouts::default(),
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
-            #[cfg(feature = "tls")]
-            tls: None,
+            tls: ServerTls::default(),
             next_conn_id: 0,
             connections: HashMap::new(),
             sessions: HashMap::new(),
@@ -190,7 +182,7 @@ impl NetherHttpServer {
 
     #[cfg(feature = "tls")]
     pub fn set_tls(&mut self, tls: Arc<rustls::ServerConfig>) {
-        self.tls = Some(tls);
+        self.tls = ServerTls::with_config(tls);
     }
 
     pub fn set_timeouts(&mut self, timeouts: Timeouts) {
@@ -331,22 +323,11 @@ impl NetherHttpServer {
                 false => ProxyHeader::Read(None),
             };
 
-            #[cfg(feature = "tls")]
-            let wire = match &self.tls {
-                Some(config) => Wire::tls(stream, config.clone()),
-                None => Wire::plain(stream),
-            };
-            #[cfg(not(feature = "tls"))]
-            let wire = Wire::plain(stream);
-
             self.connections.insert(
                 id,
                 TcpConn {
-                    wire,
+                    stream: self.tls.accept(stream),
                     proxy_header,
-                    read_buf: Vec::new(),
-                    write_buf: Vec::new(),
-                    written: 0,
                     close_after_write: false,
                     continued: false,
                     last_active: now,
@@ -363,42 +344,32 @@ impl NetherHttpServer {
         let mut requests = Vec::new();
 
         for (&id, conn) in self.connections.iter_mut() {
-            if conn.write_buf.is_empty() && conn.close_after_write {
-                if conn.wire_drained() {
+            if !conn.stream.has_outbound() && conn.close_after_write {
+                if conn.stream.close() == Shutdown::Done {
                     closed.push(id);
                 }
                 continue;
             }
 
-            if !conn.write_buf.is_empty() {
-                match conn.wire.write(&conn.write_buf[conn.written..]) {
-                    Ok(0) => {
-                        closed.push(id);
-                        continue;
-                    }
-                    Ok(n) => {
-                        conn.written += n;
-                        conn.last_active = now;
-                        if conn.written == conn.write_buf.len() {
-                            conn.write_buf.clear();
-                            conn.written = 0;
-                            if conn.close_after_write {
-                                if conn.wire_drained() {
-                                    closed.push(id);
-                                }
-                                continue;
-                            }
+            match conn.stream.drain() {
+                Err(_) => {
+                    closed.push(id);
+                    continue;
+                }
+                Ok(Drain::Empty | Drain::Blocked) => {}
+                Ok(Drain::Partial) => conn.last_active = now,
+                Ok(Drain::Complete) => {
+                    conn.last_active = now;
+                    if conn.close_after_write {
+                        if conn.stream.close() == Shutdown::Done {
+                            closed.push(id);
                         }
-                    }
-                    Err(WireError::Io(e)) if e.kind() == ErrorKind::WouldBlock => {}
-                    Err(_) => {
-                        closed.push(id);
                         continue;
                     }
                 }
             }
 
-            match conn.wire.read(&mut conn.read_buf) {
+            match conn.stream.fill() {
                 Ok(Inbound::Closed) | Err(_) => {
                     closed.push(id);
                     continue;
@@ -412,27 +383,25 @@ impl NetherHttpServer {
                 continue;
             };
 
-            #[cfg(feature = "tls")]
-            if conn.wire.awaiting_session() {
-                let leftover = std::mem::take(&mut conn.read_buf);
-                let started = conn
-                    .wire
-                    .begin_session(leftover)
-                    .and_then(|()| conn.wire.read(&mut conn.read_buf));
-                if matches!(started, Ok(Inbound::Closed) | Err(_)) {
-                    closed.push(id);
-                    continue;
-                }
-            }
-            if conn.wire.flush().is_err() {
+            if matches!(conn.stream.establish(), Ok(Inbound::Closed) | Err(_))
+                || conn.stream.flush().is_err()
+            {
                 closed.push(id);
                 continue;
             }
 
             loop {
-                match http_wire::parse_request(&conn.read_buf) {
+                match http_wire::RequestReader::parse(&conn.stream.inbound) {
                     Ok(http_wire::Parsed::Complete(request, consumed)) => {
-                        conn.read_buf.drain(..consumed);
+                        let request = match http_wire::TextBody::request(*request) {
+                            Ok(request) => request,
+                            Err(error) => {
+                                tracing::debug!("refusing an unreadable http request: {error}");
+                                conn.refuse(StatusCode::BAD_REQUEST);
+                                break;
+                            }
+                        };
+                        conn.stream.inbound.drain(..consumed);
                         conn.continued = false;
                         tracing::debug!(
                             "http request {} {} with {} headers",
@@ -440,10 +409,10 @@ impl NetherHttpServer {
                             request.uri(),
                             request.headers().len()
                         );
-                        requests.push((id, *request, proxied));
+                        requests.push((id, request, proxied));
                     }
                     Ok(http_wire::Parsed::Partial { .. })
-                        if conn.read_buf.len() > http_wire::MAX_BODY =>
+                        if conn.stream.inbound.len() > http_wire::MAX_BODY =>
                     {
                         conn.refuse(StatusCode::PAYLOAD_TOO_LARGE);
                         break;
@@ -451,8 +420,8 @@ impl NetherHttpServer {
                     Ok(http_wire::Parsed::Partial { expects_continue }) => {
                         if expects_continue && !conn.continued {
                             conn.continued = true;
-                            conn.write_buf
-                                .extend_from_slice(http_wire::CONTINUE_RESPONSE);
+                            conn.stream
+                                .queue(&http_wire::ResponseWriter::continue_interim());
                         }
                         break;
                     }
@@ -494,8 +463,8 @@ impl NetherHttpServer {
                 keep_alive,
             } => {
                 if let Some(conn) = self.connections.get_mut(&connection) {
-                    conn.write_buf
-                        .extend_from_slice(&http_wire::encode_response(&response, keep_alive));
+                    conn.stream
+                        .queue(&http_wire::ResponseWriter::encode(&response, keep_alive));
                     conn.close_after_write = !keep_alive;
                 }
             }

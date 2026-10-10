@@ -1,7 +1,8 @@
 use crate::connection::{ConnectionEvent, SessionPool};
+use crate::http_stream::{ClientTls, Drain, HttpStream};
 use crate::http_wire;
 use crate::socket::bind_shared_socket;
-use crate::tcp_wire::{Inbound, Wire, WireError};
+use crate::tcp_wire::Inbound;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use bevy_platform::cell::SyncCell;
@@ -13,10 +14,9 @@ use nethernet::protocol::Signal;
 use nethernet::sans::Sans;
 use nethernet::session::{Channel, Session};
 use nethernet::signaling::http::join::{self, StatusResponseError};
-use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
 use std::collections::VecDeque;
 use std::io::ErrorKind;
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 #[cfg(feature = "tls")]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -143,15 +143,15 @@ impl JoinTarget {
 }
 
 enum JoinState {
-    Sending {
-        wire: Wire,
-        request: Vec<u8>,
-        written: usize,
-    },
-    Receiving {
-        wire: Wire,
-        buf: Vec<u8>,
-    },
+    Sending(HttpStream),
+    Receiving(HttpStream),
+}
+
+impl JoinState {
+    fn sending(mut stream: HttpStream, request: &[u8]) -> Self {
+        stream.queue(request);
+        Self::Sending(stream)
+    }
 }
 
 enum JoinStep {
@@ -162,43 +162,30 @@ enum JoinStep {
 
 fn drive_join(state: JoinState) -> JoinStep {
     match state {
-        JoinState::Sending {
-            mut wire,
-            request,
-            mut written,
-        } => match wire.write(&request[written..]) {
-            Ok(0) => JoinStep::Failed,
-            Ok(n) => {
-                written += n;
-                if written == request.len() {
-                    JoinStep::Pending(JoinState::Receiving {
-                        wire,
-                        buf: Vec::new(),
-                    })
-                } else {
-                    JoinStep::Pending(JoinState::Sending {
-                        wire,
-                        request,
-                        written,
-                    })
-                }
-            }
-            Err(WireError::Io(e)) if e.kind() == ErrorKind::WouldBlock => {
-                JoinStep::Pending(JoinState::Sending {
-                    wire,
-                    request,
-                    written,
-                })
-            }
+        JoinState::Sending(mut stream) => match stream.drain() {
+            Ok(Drain::Blocked | Drain::Partial) => JoinStep::Pending(JoinState::Sending(stream)),
+            Ok(Drain::Complete | Drain::Empty) => JoinStep::Pending(JoinState::Receiving(stream)),
             Err(_) => JoinStep::Failed,
         },
-        JoinState::Receiving { mut wire, mut buf } => match wire.read(&mut buf) {
+        JoinState::Receiving(mut stream) => match stream.fill() {
             Ok(Inbound::Closed) | Err(_) => JoinStep::Failed,
-            Ok(Inbound::Idle) => JoinStep::Pending(JoinState::Receiving { wire, buf }),
-            Ok(Inbound::Received) => match http_wire::parse_response(&buf) {
-                Ok(Some((code, body))) => JoinStep::Done(code, body),
-                Ok(None) if buf.len() > http_wire::MAX_BODY => JoinStep::Failed,
-                Ok(None) => JoinStep::Pending(JoinState::Receiving { wire, buf }),
+            Ok(Inbound::Idle) => JoinStep::Pending(JoinState::Receiving(stream)),
+            Ok(Inbound::Received) => match http_wire::ResponseReader::parse(&stream.inbound) {
+                Ok(http_wire::Parsed::Complete(response, _)) => {
+                    let (parts, body) = response.into_parts();
+                    match http_wire::TextBody::decode(body) {
+                        Ok(body) => JoinStep::Done(parts.status.as_u16(), body),
+                        Err(_) => JoinStep::Failed,
+                    }
+                }
+                Ok(http_wire::Parsed::Partial { .. })
+                    if stream.inbound.len() > http_wire::MAX_BODY =>
+                {
+                    JoinStep::Failed
+                }
+                Ok(http_wire::Parsed::Partial { .. }) => {
+                    JoinStep::Pending(JoinState::Receiving(stream))
+                }
                 Err(_) => JoinStep::Failed,
             },
         },
@@ -237,8 +224,7 @@ pub struct NetherHttpClient {
     remote_addr: Option<SocketAddr>,
     rtt: Option<Duration>,
     identity: Option<ServerIdentity>,
-    #[cfg(feature = "tls")]
-    tls_config: Option<Arc<rustls::ClientConfig>>,
+    tls: ClientTls,
     events: VecDeque<NetherHttpClientEvent>,
     received: VecDeque<Box<[u8]>>,
     received_unreliable: VecDeque<Box<[u8]>>,
@@ -261,8 +247,7 @@ impl Default for NetherHttpClient {
             remote_addr: None,
             rtt: None,
             identity: None,
-            #[cfg(feature = "tls")]
-            tls_config: None,
+            tls: ClientTls::default(),
             events: VecDeque::new(),
             received: VecDeque::new(),
             received_unreliable: VecDeque::new(),
@@ -285,13 +270,11 @@ impl NetherHttpClient {
 
     pub fn query_server_data(&mut self, url: &str) -> std::io::Result<()> {
         let (target, addr) = Self::resolve(url)?;
-        let wire = self.open_wire(&target, addr)?;
+        let stream = self.open_stream(&target, addr)?;
+        let request = http_wire::RequestWriter::get(&target.authority, join::STATUS_PATH)
+            .map_err(std::io::Error::other)?;
         self.query = Some(Query {
-            state: JoinState::Sending {
-                wire,
-                request: http_wire::StatusRequest::encode(&target.authority),
-                written: 0,
-            },
+            state: JoinState::sending(stream, &request),
             deadline: Instant::now() + self.timeouts.negotiation,
         });
         Ok(())
@@ -334,7 +317,7 @@ impl NetherHttpClient {
 
     #[cfg(feature = "tls")]
     pub fn set_tls_config(&mut self, config: Arc<rustls::ClientConfig>) {
-        self.tls_config = Some(config);
+        self.tls = ClientTls::with_config(config);
     }
 
     pub fn is_connected(&self) -> bool {
@@ -396,21 +379,18 @@ impl NetherHttpClient {
             None => offer.data,
         };
 
-        let request = http_wire::encode_post(
+        let request = http_wire::RequestWriter::post(
             &target.authority,
             &join::join_path(&self.local_network_id),
             join::CONTENT_TYPE,
             &offer_data,
-        );
+        )
+        .map_err(std::io::Error::other)?;
 
-        let wire = self.open_wire(&target, addr)?;
+        let stream = self.open_stream(&target, addr)?;
 
         self.join = Some(Join {
-            state: JoinState::Sending {
-                wire,
-                request,
-                written: 0,
-            },
+            state: JoinState::sending(stream, &request),
             connection: SyncCell::new(connection),
             local_ufrag,
             session_socket,
@@ -420,34 +400,8 @@ impl NetherHttpClient {
         Ok(())
     }
 
-    fn open_wire(&self, target: &JoinTarget, addr: SocketAddr) -> std::io::Result<Wire> {
-        if !target.secure {
-            return Ok(Wire::plain(connect(addr)?));
-        }
-        #[cfg(feature = "tls")]
-        {
-            let config = match &self.tls_config {
-                Some(config) => config.clone(),
-                None => Self::platform_tls_config().map_err(JoinError::from)?,
-            };
-            let name = rustls::pki_types::ServerName::try_from(target.host.clone())
-                .map_err(|_| JoinError::InvalidServerName)?;
-            let wire = Wire::tls_client(connect(addr)?, config, name).map_err(JoinError::from)?;
-            Ok(wire)
-        }
-        #[cfg(not(feature = "tls"))]
-        Err(JoinError::TlsUnavailable.into())
-    }
-
-    #[cfg(feature = "tls")]
-    fn platform_tls_config() -> Result<Arc<rustls::ClientConfig>, rustls::Error> {
-        use rustls_platform_verifier::BuilderVerifierExt;
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let config = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()?
-            .with_platform_verifier()?
-            .with_no_client_auth();
-        Ok(Arc::new(config))
+    fn open_stream(&self, target: &JoinTarget, addr: SocketAddr) -> std::io::Result<HttpStream> {
+        self.tls.dial(target.secure, &target.host, addr)
     }
 
     pub fn disconnect(&mut self) {
@@ -607,36 +561,4 @@ impl NetherHttpClient {
             });
         }
     }
-}
-
-/// A non-blocking `connect()` reports that it hasn't completed yet as `EWOULDBLOCK` on
-/// Windows (mapped to [`ErrorKind::WouldBlock`]), but as `EINPROGRESS` on Unix, which
-/// `ErrorKind` has no variant for.
-fn connect_in_progress(e: &std::io::Error) -> bool {
-    if e.kind() == ErrorKind::WouldBlock {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        e.raw_os_error() == Some(libc::EINPROGRESS)
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
-}
-
-fn connect(addr: SocketAddr) -> std::io::Result<TcpStream> {
-    let socket = Socket::new(
-        Domain::for_address(addr),
-        Type::STREAM,
-        Some(SocketProtocol::TCP),
-    )?;
-    socket.set_nonblocking(true)?;
-    match socket.connect(&addr.into()) {
-        Ok(()) => {}
-        Err(e) if connect_in_progress(&e) => {}
-        Err(e) => return Err(e),
-    }
-    Ok(socket.into())
 }

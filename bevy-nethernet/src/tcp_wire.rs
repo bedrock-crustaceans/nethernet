@@ -18,6 +18,8 @@ pub(crate) enum WireError {
     #[cfg(feature = "tls")]
     #[error("the tls handshake has not begun")]
     TlsNotStarted,
+    #[error("the peer accepted no bytes")]
+    WriteZero,
 }
 
 #[derive(Debug, PartialEq, Eq)]

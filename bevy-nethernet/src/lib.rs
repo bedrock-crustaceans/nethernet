@@ -1,4 +1,5 @@
 mod connection;
+mod http_stream;
 mod http_wire;
 mod socket;
 mod tcp_wire;
