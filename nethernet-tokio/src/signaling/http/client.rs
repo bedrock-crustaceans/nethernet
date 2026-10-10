@@ -81,7 +81,7 @@ impl HttpSignaling {
     /// Returns the URL the capability check of the remote network is read from.
     fn status_url(&self, network_id: &str) -> Result<Url> {
         let mut url = self.join_url(network_id)?;
-        url.set_path(join::join_path("").trim_end_matches('/'));
+        url.set_path(join::STATUS_PATH);
         Ok(url)
     }
 
@@ -96,18 +96,11 @@ impl HttpSignaling {
             .map_err(|e| NetherError::Other(format!("request server data: {}", e)))?;
 
         let status = response.status();
-        if !status.is_success() {
-            return Err(NetherError::Other(format!(
-                "server data request answered {}",
-                status
-            )));
-        }
-
         let body = response
-            .text()
+            .bytes()
             .await
             .map_err(|e| NetherError::Other(format!("read server data: {}", e)))?;
-        Ok(ServerData::from_json(&body)?)
+        Ok(join::validate_status_response(status.as_u16(), &body)?)
     }
 
     /// Sends the offer to the endpoint of the remote network and returns its answer.

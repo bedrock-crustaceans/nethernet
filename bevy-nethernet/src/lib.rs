@@ -12,7 +12,7 @@ pub mod prelude {
     pub use crate::client::{NetherClient, NetherClientEvent, NetherClientPlugin, NetherClientSet};
     pub use crate::http_client::{
         JoinError, NetherHttpClient, NetherHttpClientEvent, NetherHttpClientPlugin,
-        NetherHttpClientSet,
+        NetherHttpClientSet, QueryError,
     };
     pub use crate::http_server::{
         NetherHttpServer, NetherHttpServerEvent, NetherHttpServerPlugin, NetherHttpServerSet,

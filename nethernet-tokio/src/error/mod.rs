@@ -1,6 +1,7 @@
 use nethernet::admission::AdmissionError;
 use nethernet::error::ProtocolError;
 use nethernet::identity::error::IdentityError;
+use nethernet::signaling::http::join::StatusResponseError;
 use std::io;
 use thiserror::Error;
 
@@ -36,6 +37,10 @@ pub enum NetherError {
     /// Signaling error
     #[error("Signaling error: {0}")]
     Signaling(#[from] SignalingError),
+
+    /// The status endpoint did not answer with usable server data
+    #[error("Status error: {0}")]
+    Status(#[from] StatusResponseError),
 
     /// IO error
     #[error("IO error: {0}")]

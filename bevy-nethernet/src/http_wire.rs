@@ -234,6 +234,24 @@ pub(crate) fn encode_post(host: &str, path: &str, content_type: &str, body: &str
     out
 }
 
+pub(crate) struct StatusRequest;
+
+impl StatusRequest {
+    pub(crate) fn encode(host: &str) -> Vec<u8> {
+        format!(
+            "GET {} HTTP/1.1
+host: {host}
+user-agent: {}
+connection: close
+
+",
+            join::STATUS_PATH,
+            join::CLIENT_USER_AGENT
+        )
+        .into_bytes()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +266,20 @@ mod tests {
 
         assert_eq!(request.body(), "hello world");
         assert_eq!(consumed, wire.len());
+    }
+
+    #[test]
+    fn a_status_request_is_a_bodiless_get_of_the_status_path() {
+        let Ok(Parsed::Complete(request, consumed)) =
+            parse_request(&StatusRequest::encode("example.com:19132"))
+        else {
+            panic!("the request was not parsed as complete");
+        };
+
+        assert_eq!(request.method(), http::Method::GET);
+        assert_eq!(request.uri().path(), join::STATUS_PATH);
+        assert_eq!(request.headers()["host"], "example.com:19132");
+        assert!(request.body().is_empty());
+        assert_eq!(consumed, StatusRequest::encode("example.com:19132").len());
     }
 }

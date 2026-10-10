@@ -7,11 +7,12 @@ use bevy_ecs::prelude::*;
 use bevy_platform::cell::SyncCell;
 use nethernet::connection::{Connection, ConnectionInput, IceMode, Timeouts};
 use nethernet::error::ProtocolError;
+use nethernet::prelude::ServerData;
 use nethernet::prelude::ServerIdentity;
 use nethernet::protocol::Signal;
 use nethernet::sans::Sans;
 use nethernet::session::{Channel, Session};
-use nethernet::signaling::http::join;
+use nethernet::signaling::http::join::{self, StatusResponseError};
 use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
 use std::collections::VecDeque;
 use std::io::ErrorKind;
@@ -52,11 +53,23 @@ impl NetherHttpClientPlugin {
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NetherHttpClientSet;
 
-#[derive(Message, Clone, Copy, Debug)]
+#[derive(Message, Debug)]
 pub enum NetherHttpClientEvent {
     Connected,
     ConnectFailed,
     Disconnected,
+    ServerData(Box<ServerData>),
+    QueryFailed(QueryError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum QueryError {
+    #[error("the connection to the server failed")]
+    Connection,
+    #[error("the server did not answer in time")]
+    TimedOut,
+    #[error(transparent)]
+    Response(#[from] StatusResponseError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -201,11 +214,17 @@ struct Join {
     server_url: String,
 }
 
+struct Query {
+    state: JoinState,
+    deadline: Instant,
+}
+
 const DEFAULT_ATTEMPTS: u32 = 3;
 
 #[derive(Resource)]
 pub struct NetherHttpClient {
     join: Option<Join>,
+    query: Option<Query>,
     pool: Option<SessionPool<()>>,
     connected: bool,
     connecting_deadline: Option<Instant>,
@@ -229,6 +248,7 @@ impl Default for NetherHttpClient {
     fn default() -> Self {
         Self {
             join: None,
+            query: None,
             pool: None,
             connected: false,
             connecting_deadline: None,
@@ -261,6 +281,51 @@ impl NetherHttpClient {
 
     pub fn set_timeouts(&mut self, timeouts: Timeouts) {
         self.timeouts = timeouts;
+    }
+
+    pub fn query_server_data(&mut self, url: &str) -> std::io::Result<()> {
+        let (target, addr) = Self::resolve(url)?;
+        let wire = self.open_wire(&target, addr)?;
+        self.query = Some(Query {
+            state: JoinState::Sending {
+                wire,
+                request: http_wire::StatusRequest::encode(&target.authority),
+                written: 0,
+            },
+            deadline: Instant::now() + self.timeouts.negotiation,
+        });
+        Ok(())
+    }
+
+    fn resolve(url: &str) -> std::io::Result<(JoinTarget, SocketAddr)> {
+        let target = JoinTarget::parse(url)?;
+        let addr = (target.host.as_str(), target.port)
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "could not resolve host"))?;
+        Ok((target, addr))
+    }
+
+    fn update_query(&mut self, now: Instant) {
+        let Some(query) = self.query.take() else {
+            return;
+        };
+        let Query { state, deadline } = query;
+        match drive_join(state) {
+            JoinStep::Pending(_) if now >= deadline => self
+                .events
+                .push_back(NetherHttpClientEvent::QueryFailed(QueryError::TimedOut)),
+            JoinStep::Pending(state) => self.query = Some(Query { state, deadline }),
+            JoinStep::Done(code, body) => self.events.push_back(
+                match join::validate_status_response(code, body.as_bytes()) {
+                    Ok(data) => NetherHttpClientEvent::ServerData(Box::new(data)),
+                    Err(e) => NetherHttpClientEvent::QueryFailed(e.into()),
+                },
+            ),
+            JoinStep::Failed => self
+                .events
+                .push_back(NetherHttpClientEvent::QueryFailed(QueryError::Connection)),
+        }
     }
 
     pub fn set_attempts(&mut self, attempts: u32) {
@@ -304,11 +369,7 @@ impl NetherHttpClient {
     fn begin_join(&mut self) -> std::io::Result<()> {
         self.attempts_left = self.attempts_left.saturating_sub(1);
         let server_url = self.server_url.clone();
-        let target = JoinTarget::parse(&server_url)?;
-        let addr = (target.host.as_str(), target.port)
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "could not resolve host"))?;
+        let (target, addr) = Self::resolve(&server_url)?;
 
         let (session_socket, local_addr) = bind_shared_socket()?;
         let (session, description) =
@@ -432,6 +493,7 @@ impl NetherHttpClient {
 
     pub fn update(&mut self) {
         let now = Instant::now();
+        self.update_query(now);
 
         if let Some(mut join) = self.join.take() {
             match drive_join(join.state) {

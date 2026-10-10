@@ -505,3 +505,55 @@ fn a_join_that_times_out_is_retried_on_a_fresh_connection_until_attempts_run_out
 fn a_single_attempt_joins_exactly_once() {
     assert_eq!(accepts_before_failure(1), 1);
 }
+
+#[test]
+fn a_query_reads_the_server_data_a_server_advertises() {
+    let mut server = NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |config| {
+        config.token_trust = None;
+    })
+    .unwrap();
+    server.set_server_data(ServerData::new("Test Server".into(), "World".into()));
+    let server_url = format!("http://{}", server.local_addr().unwrap());
+
+    let mut client = NetherHttpClient::new();
+    client.query_server_data(&server_url).unwrap();
+
+    let mut name = None;
+    spin(Instant::now() + Duration::from_secs(5), || {
+        server.update();
+        client.update();
+        while let Some(event) = client.next_event() {
+            if let NetherHttpClientEvent::ServerData(data) = event {
+                name = Some(data.server_name);
+            }
+        }
+        name.is_some()
+    });
+    assert_eq!(name.as_deref(), Some("Test Server"));
+}
+
+#[test]
+fn a_query_that_is_never_answered_fails_after_the_negotiation_timeout() {
+    let silent_server = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let server_url = format!("http://{}", silent_server.local_addr().unwrap());
+
+    let mut client = NetherHttpClient::new();
+    client.set_timeouts(nethernet::connection::Timeouts {
+        negotiation: Duration::from_millis(200),
+        ..Default::default()
+    });
+    client.query_server_data(&server_url).unwrap();
+
+    let mut failed = false;
+    spin(Instant::now() + Duration::from_secs(2), || {
+        client.update();
+        while let Some(event) = client.next_event() {
+            failed |= matches!(
+                event,
+                NetherHttpClientEvent::QueryFailed(QueryError::TimedOut)
+            );
+        }
+        failed
+    });
+    assert!(failed, "no QueryFailed within the negotiation timeout");
+}

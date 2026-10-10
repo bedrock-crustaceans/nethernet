@@ -3,7 +3,8 @@
 //! Transport-agnostic: building and sending the actual request, and reading the response
 //! off the wire, is left to the caller.
 
-use crate::error::SignalErrorCode;
+use crate::error::{ProtocolError, SignalErrorCode};
+use crate::protocol::packet::discovery::ServerData;
 use crate::signaling::http::JOIN_PATH;
 use thiserror::Error;
 
@@ -15,6 +16,9 @@ pub const CLIENT_USER_AGENT: &str = "libhttpclient/1.0.0.0";
 
 /// Largest answer accepted from a server.
 pub const MAX_ANSWER_SIZE: usize = 1 << 20;
+
+/// The path the server data of a network is read from.
+pub const STATUS_PATH: &str = JOIN_PATH;
 
 /// The path a peer posts its offer to on the given network.
 pub fn join_path(network_id: &str) -> String {
@@ -39,6 +43,27 @@ pub enum JoinResponseError {
     Rejected(SignalErrorCode),
 }
 
+/// Why a status response could not be read as server data.
+#[derive(Debug, Error)]
+pub enum StatusResponseError {
+    #[error("server answered with status {0}")]
+    Status(u16),
+
+    #[error("server sent malformed server data: {0}")]
+    Malformed(#[source] ProtocolError),
+}
+
+/// Reads the server data out of the response of the status endpoint.
+pub fn validate_status_response(
+    status: u16,
+    body: &[u8],
+) -> Result<ServerData, StatusResponseError> {
+    if !(200..300).contains(&status) {
+        return Err(StatusResponseError::Status(status));
+    }
+    ServerData::from_json(&String::from_utf8_lossy(body)).map_err(StatusResponseError::Malformed)
+}
+
 /// Checks a join response's status and body for the answer, per the HTTP signaling
 /// guide's section 5.
 pub fn validate_join_response(status: u16, body: &str) -> Result<(), JoinResponseError> {
@@ -61,6 +86,37 @@ pub fn validate_join_response(status: u16, body: &str) -> Result<(), JoinRespons
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const VANILLA_STATUS: &str = "{\"name\":\"Server\",\"protocol\":0,\"version\":\"\",\"level\":\"World\",\"players\":1,\"maxPlayers\":8,\"gameType\":0}";
+
+    #[test]
+    fn the_status_path_is_the_join_path() {
+        assert_eq!(STATUS_PATH, "/v1/join");
+    }
+
+    #[test]
+    fn a_status_body_is_read_as_server_data() {
+        let data = validate_status_response(200, VANILLA_STATUS.as_bytes()).unwrap();
+        assert_eq!(data, ServerData::from_json(VANILLA_STATUS).unwrap());
+        assert_eq!(data.server_name, "Server");
+        assert_eq!(data.max_player_count, 8);
+    }
+
+    #[test]
+    fn a_failed_status_response_is_rejected() {
+        assert!(matches!(
+            validate_status_response(404, b""),
+            Err(StatusResponseError::Status(404))
+        ));
+    }
+
+    #[test]
+    fn garbage_status_body_is_malformed() {
+        assert!(matches!(
+            validate_status_response(200, b"not json"),
+            Err(StatusResponseError::Malformed(_))
+        ));
+    }
 
     #[test]
     fn the_join_path_names_the_network() {
