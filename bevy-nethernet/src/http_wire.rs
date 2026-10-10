@@ -1,7 +1,7 @@
 use http::{Request, Response};
 use nethernet::signaling::http::join;
 
-const MAX_HEADERS: usize = 32;
+const MAX_HEADERS: usize = 100;
 pub(crate) const MAX_BODY: usize = 1 << 20;
 
 fn content_length(headers: &[httparse::Header]) -> Result<usize, ()> {
@@ -18,30 +18,41 @@ fn content_length(headers: &[httparse::Header]) -> Result<usize, ()> {
         .ok_or(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RequestError {
+    TooManyHeaders,
+    Malformed,
+}
+
 /// Parses a complete HTTP/1.x request out of the front of `buf`, once one is fully
 /// buffered. `Ok(None)` means more bytes are needed.
-pub(crate) fn parse_request(buf: &[u8]) -> Result<Option<(Request<String>, usize)>, ()> {
+pub(crate) fn parse_request(buf: &[u8]) -> Result<Option<(Request<String>, usize)>, RequestError> {
     let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
     let mut parsed = httparse::Request::new(&mut headers);
-    let httparse::Status::Complete(header_len) = parsed.parse(buf).map_err(|_| ())? else {
+    let status = parsed.parse(buf).map_err(|e| match e {
+        httparse::Error::TooManyHeaders => RequestError::TooManyHeaders,
+        _ => RequestError::Malformed,
+    })?;
+    let httparse::Status::Complete(header_len) = status else {
         return Ok(None);
     };
 
-    let body_len = content_length(parsed.headers)?;
+    let body_len = content_length(parsed.headers).map_err(|_| RequestError::Malformed)?;
     let total = header_len + body_len;
     if buf.len() < total {
         return Ok(None);
     }
 
     let mut builder = Request::builder()
-        .method(parsed.method.ok_or(())?)
-        .uri(parsed.path.ok_or(())?);
+        .method(parsed.method.ok_or(RequestError::Malformed)?)
+        .uri(parsed.path.ok_or(RequestError::Malformed)?);
     for header in parsed.headers.iter() {
         builder = builder.header(header.name, header.value);
     }
 
-    let body = String::from_utf8(buf[header_len..total].to_vec()).map_err(|_| ())?;
-    let request = builder.body(body).map_err(|_| ())?;
+    let body =
+        String::from_utf8(buf[header_len..total].to_vec()).map_err(|_| RequestError::Malformed)?;
+    let request = builder.body(body).map_err(|_| RequestError::Malformed)?;
 
     Ok(Some((request, total)))
 }

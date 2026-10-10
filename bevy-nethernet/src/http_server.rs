@@ -4,6 +4,7 @@ use crate::server::NetherSessionId;
 use crate::socket::bind_shared_socket;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
+use http::{Response, StatusCode};
 use nethernet::connection::{Connection, IceMode};
 use nethernet::prelude::{
     HttpSignaler, HttpSignalerConfig, HttpSignalerInput, HttpSignalerOutput, Offer, RejectReason,
@@ -20,6 +21,7 @@ use std::time::{Duration, Instant};
 const MAX_ACCEPTS_PER_TICK: usize = 64;
 const READ_CHUNK: usize = 4096;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct NetherHttpServerPlugin;
 
@@ -65,7 +67,20 @@ struct TcpConn {
     write_buf: Vec<u8>,
     written: usize,
     close_after_write: bool,
-    created: Instant,
+    last_active: Instant,
+}
+
+impl TcpConn {
+    fn refuse(&mut self, status: StatusCode) {
+        let response = Response::builder()
+            .status(status)
+            .body(String::new())
+            .expect("a status and an empty body are always a valid response");
+        self.write_buf
+            .extend_from_slice(&http_wire::encode_response(&response, false));
+        self.close_after_write = true;
+        self.read_buf.clear();
+    }
 }
 
 struct SessionEntry {
@@ -80,6 +95,7 @@ pub struct NetherHttpServer {
     pool: SessionPool<NetherSessionId>,
     session_local_addr: SocketAddr,
     identity: Option<ServerIdentity>,
+    idle_timeout: Duration,
     next_conn_id: u64,
     connections: HashMap<u64, TcpConn>,
     sessions: HashMap<NetherSessionId, SessionEntry>,
@@ -107,6 +123,7 @@ impl NetherHttpServer {
             pool: SessionPool::new(session_socket),
             session_local_addr,
             identity: None,
+            idle_timeout: DEFAULT_IDLE_TIMEOUT,
             next_conn_id: 0,
             connections: HashMap::new(),
             sessions: HashMap::new(),
@@ -118,6 +135,10 @@ impl NetherHttpServer {
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.listener.local_addr()
+    }
+
+    pub fn set_idle_timeout(&mut self, idle_timeout: Duration) {
+        self.idle_timeout = idle_timeout;
     }
 
     pub fn set_identity(&mut self, identity: ServerIdentity) {
@@ -202,8 +223,17 @@ impl NetherHttpServer {
 
         self.drive_sessions();
 
-        self.connections
-            .retain(|_, conn| now.saturating_duration_since(conn.created) < CONNECT_TIMEOUT);
+        let idle_timeout = self.idle_timeout;
+        let idle: Vec<u64> = self
+            .connections
+            .iter()
+            .filter(|(_, conn)| now.saturating_duration_since(conn.last_active) >= idle_timeout)
+            .map(|(&id, _)| id)
+            .collect();
+        for id in idle {
+            self.connections.remove(&id);
+            let _ = self.signaler.handle(HttpSignalerInput::Closed(id));
+        }
         self.sessions.retain(|_, entry| {
             entry.ready || now.saturating_duration_since(entry.created) < CONNECT_TIMEOUT
         });
@@ -232,7 +262,7 @@ impl NetherHttpServer {
                     write_buf: Vec::new(),
                     written: 0,
                     close_after_write: false,
-                    created: now,
+                    last_active: now,
                 },
             );
             let _ = self
@@ -246,11 +276,20 @@ impl NetherHttpServer {
         let mut requests = Vec::new();
 
         for (&id, conn) in self.connections.iter_mut() {
+            if conn.write_buf.is_empty() && conn.close_after_write {
+                closed.push(id);
+                continue;
+            }
+
             if !conn.write_buf.is_empty() {
                 match conn.stream.write(&conn.write_buf[conn.written..]) {
-                    Ok(0) => closed.push(id),
+                    Ok(0) => {
+                        closed.push(id);
+                        continue;
+                    }
                     Ok(n) => {
                         conn.written += n;
+                        conn.last_active = now;
                         if conn.written == conn.write_buf.len() {
                             conn.write_buf.clear();
                             conn.written = 0;
@@ -261,27 +300,58 @@ impl NetherHttpServer {
                         }
                     }
                     Err(e) if e.kind() == ErrorKind::WouldBlock => {}
-                    Err(_) => closed.push(id),
+                    Err(_) => {
+                        closed.push(id);
+                        continue;
+                    }
                 }
             }
 
             let mut chunk = [0u8; READ_CHUNK];
             match conn.stream.read(&mut chunk) {
-                Ok(0) => closed.push(id),
+                Ok(0) => {
+                    closed.push(id);
+                    continue;
+                }
                 Ok(n) => {
                     conn.read_buf.extend_from_slice(&chunk[..n]);
-                    match http_wire::parse_request(&conn.read_buf) {
-                        Ok(Some((request, consumed))) => {
-                            conn.read_buf.drain(..consumed);
-                            requests.push((id, request));
-                        }
-                        Ok(None) if conn.read_buf.len() > http_wire::MAX_BODY => closed.push(id),
-                        Ok(None) => {}
-                        Err(_) => closed.push(id),
-                    }
+                    conn.last_active = now;
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {}
-                Err(_) => closed.push(id),
+                Err(_) => {
+                    closed.push(id);
+                    continue;
+                }
+            }
+
+            loop {
+                match http_wire::parse_request(&conn.read_buf) {
+                    Ok(Some((request, consumed))) => {
+                        conn.read_buf.drain(..consumed);
+                        tracing::debug!(
+                            "http request {} {} with {} headers",
+                            request.method(),
+                            request.uri(),
+                            request.headers().len()
+                        );
+                        requests.push((id, request));
+                    }
+                    Ok(None) if conn.read_buf.len() > http_wire::MAX_BODY => {
+                        closed.push(id);
+                        break;
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::debug!("refusing an unreadable http request: {error:?}");
+                        conn.refuse(match error {
+                            http_wire::RequestError::TooManyHeaders => {
+                                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+                            }
+                            http_wire::RequestError::Malformed => StatusCode::BAD_REQUEST,
+                        });
+                        break;
+                    }
+                }
             }
         }
 
