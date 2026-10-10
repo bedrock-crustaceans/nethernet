@@ -1,16 +1,20 @@
+//! IP address parsing and classification by routability.
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     Public,
 
+    /// RFC 1918, carrier-grade NAT and unique local addresses.
     Private,
 
     Loopback,
 
+    /// Reserved, documentation, link-local, multicast and similar ranges that cannot be reached.
     Unusable,
 }
 
+/// Accepts only IP literals up to 45 characters, normalized; hostnames give `None`.
 pub fn parse(value: &str) -> Option<IpAddr> {
     if value.is_empty()
         || value.len() > 45
@@ -25,6 +29,7 @@ pub fn parse(value: &str) -> Option<IpAddr> {
     Some(normalize(address))
 }
 
+/// Maps IPv4-mapped IPv6 addresses to IPv4.
 pub fn normalize(address: IpAddr) -> IpAddr {
     match address {
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
@@ -87,6 +92,7 @@ fn scope_v6(address: Ipv6Addr) -> Scope {
     Scope::Public
 }
 
+/// Whether a candidate address may be announced; loopback only when `local_development` is set.
 pub fn advertisable(address: IpAddr, local_development: bool) -> bool {
     match scope(address) {
         Scope::Public | Scope::Private => true,
@@ -95,6 +101,7 @@ pub fn advertisable(address: IpAddr, local_development: bool) -> bool {
     }
 }
 
+/// True for public and private scopes, false for loopback and unusable ones.
 pub fn routable(address: IpAddr) -> bool {
     matches!(scope(address), Scope::Public | Scope::Private)
 }

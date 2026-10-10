@@ -1,3 +1,4 @@
+//! Identity assertions carried in the SDP `a=identity` attribute (guide section 5).
 pub mod error;
 pub mod jwk;
 pub mod jwt;
@@ -16,11 +17,14 @@ use std::time::SystemTime;
 
 pub use server::ServerIdentity;
 
+/// Endpoint publishing the JWKS that signs Minecraft multiplayer tokens.
 pub const MINECRAFT_KEYS_URL: &str =
     "https://authorization.franchise.minecraft-services.net/.well-known/keys";
 
+/// Required `iss` of a token under `TokenTrust::Minecraft`.
 pub const MINECRAFT_ISSUER: &str = "https://authorization.franchise.minecraft-services.net/";
 
+/// Required `aud` entry of a token under `TokenTrust::Minecraft`.
 pub const MINECRAFT_AUDIENCE: &str = "api://auth-minecraft-services/multiplayer";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -32,15 +36,18 @@ pub struct Idp {
     pub protocol: String,
 }
 
+/// A token plus a detached ES384 signature over the SDP fingerprints.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Assertion {
     #[serde(default)]
     pub token: String,
 
+    /// Compact JWS with an empty payload, written `header..signature`.
     #[serde(default)]
     pub fingerprints: String,
 }
 
+/// A decoded `a=identity` value: base64 JSON whose `assertion` field is itself JSON text.
 #[derive(Debug, Clone, Default)]
 pub struct Identity {
     pub idp: Idp,
@@ -79,6 +86,7 @@ impl Identity {
         Self::from_json(&json)
     }
 
+    /// Reads the first `a=identity` line, failing with `Missing` when there is none.
     pub fn from_sdp(sdp: &str) -> Result<Self> {
         let value = sdp
             .split(['\r', '\n'])
@@ -103,14 +111,18 @@ impl Identity {
     }
 }
 
+/// How the token in a received assertion is authenticated.
 #[derive(Debug, Clone)]
 pub enum TokenTrust {
+    /// RS256 token signed by a key in the set, with the Minecraft issuer and audience.
     Minecraft(JwkSet),
 
+    /// Any well-formed unexpired token; signature, issuer and audience are not checked.
     Any,
 }
 
 impl TokenTrust {
+    /// Parses the token and checks its expiry, plus signature, issuer and audience under `Minecraft`.
     pub fn claims(&self, identity: &Identity, now: SystemTime) -> Result<Claims> {
         let jws = Jws::parse(&identity.assertion.token)?;
         let claims = jws.claims()?;
@@ -162,6 +174,7 @@ impl TokenTrust {
     }
 }
 
+/// Checks the token, then that the key in its `cpk` claim signed the SDP fingerprints.
 pub fn validate_sdp(sdp: &str, trust: &TokenTrust, now: SystemTime) -> Result<Claims> {
     let identity = Identity::from_sdp(sdp)?;
     let claims = trust.claims(&identity, now)?;
@@ -177,6 +190,7 @@ pub fn validate_sdp(sdp: &str, trust: &TokenTrust, now: SystemTime) -> Result<Cl
     Ok(claims)
 }
 
+/// The exact JSON the fingerprint signature covers; no fingerprint lines give an empty array.
 pub fn canonical_fingerprint_json(sdp: &str) -> Result<String> {
     let mut out = String::from("{\"fingerprint\":[");
 
@@ -207,14 +221,17 @@ pub fn canonical_fingerprint_json(sdp: &str) -> Result<String> {
 
 const EMPTY_FINGERPRINTS: &str = "{\"fingerprint\":[]}";
 
+/// A player whose token passed validation.
 #[derive(Debug, Clone)]
 pub struct PlayerInfo {
     pub xuid: Option<String>,
 
     pub display_name: Option<String>,
 
+    /// Network id the offer was signaled from.
     pub network_id: String,
 
+    /// Signaling source address, which can differ from the media address.
     pub remote_address: Option<SocketAddr>,
 
     pub claims: Claims,
@@ -235,6 +252,7 @@ impl PlayerInfo {
         self.claims.client_public_key()
     }
 
+    /// Fails with `KeyMismatch` unless the key equals the token's `cpk`.
     pub fn verify_login_key(&self, identity_public_key: &VerifyingKey) -> Result<()> {
         let expected = self.client_public_key()?;
         let (expected, presented) = (

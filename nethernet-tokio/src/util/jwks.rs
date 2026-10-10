@@ -1,3 +1,4 @@
+//! Cached Minecraft token signing keys.
 use crate::error::{NetherError, Result};
 use nethernet::identity::{MINECRAFT_KEYS_URL, TokenTrust};
 use nethernet::prelude::JwkSet;
@@ -14,6 +15,7 @@ enum Command {
     Store(Box<JwkSet>, Instant),
 }
 
+/// Key set shared between clones and refreshed over HTTP, at most once a minute.
 #[derive(Clone)]
 pub struct Jwks {
     url: String,
@@ -22,6 +24,7 @@ pub struct Jwks {
 }
 
 impl Jwks {
+    /// Fetches the keys from the Minecraft multiplayer endpoint.
     pub async fn minecraft() -> Result<Self> {
         Self::fetch(MINECRAFT_KEYS_URL, Client::new()).await
     }
@@ -71,6 +74,7 @@ impl Jwks {
         reply_rx.await.unwrap_or_default()
     }
 
+    /// Token trust over the current keys, for validating Minecraft tokens.
     pub async fn trust(&self) -> TokenTrust {
         TokenTrust::Minecraft(self.keys().await)
     }
@@ -87,6 +91,7 @@ impl Jwks {
         reply_rx.await.unwrap_or(false)
     }
 
+    /// Refetches the keys unless they were fetched less than 60 seconds ago.
     pub async fn refresh(&self) -> Result<()> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self.commands.send(Command::FetchedAt(reply_tx)).is_ok()

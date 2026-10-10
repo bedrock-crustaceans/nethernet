@@ -40,6 +40,7 @@ impl ServerDataVersion {
     }
 }
 
+/// Server details advertised over discovery or in the HTTP status JSON.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerData {
     pub server_name: String,
@@ -59,6 +60,7 @@ pub struct ServerData {
 }
 
 impl ServerData {
+    /// The HTTP status body, carrying only name, protocol, version, level, players and game type.
     pub fn to_json(&self) -> String {
         format!(
             "{{\"name\":{},\"protocol\":{},\"version\":{},\"level\":{},\"players\":{},\
@@ -116,6 +118,7 @@ impl ServerData {
         }
     }
 
+    /// Parses a semicolon-separated pong string of at least nine fields; unparsable numbers become 0.
     pub fn from_pong_data(data: &[u8]) -> Result<Self> {
         let pong = std::str::from_utf8(data)
             .map_err(|e| ProtocolError::Other(format!("invalid pong data UTF-8: {}", e)))?;
@@ -145,6 +148,8 @@ impl ServerData {
         })
     }
 
+    /// Reads binary records of versions 4 to 7 and rejects trailing bytes.
+    /// Encoding always writes version 7.
     pub fn decode(data: &[u8]) -> Result<Self> {
         let mut cursor = Cursor::new(data);
         let value = Self::deserialize(&mut cursor)?;

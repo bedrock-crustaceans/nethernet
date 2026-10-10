@@ -3,6 +3,7 @@ use crate::protocol::codec::{NetherCodec, read_bytes_u32};
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::io::{Read, Write};
 
+/// A server data record sent as a hex string.
 #[derive(Debug, Clone, Default)]
 pub struct ResponsePacket {
     pub application_data: Vec<u8>,

@@ -30,6 +30,7 @@ impl Packets {
     }
 }
 
+/// Packet id and sender network id, followed by eight zero bytes on the wire.
 #[derive(Debug, Clone)]
 pub struct Header {
     pub packet_id: u16,
@@ -62,6 +63,7 @@ impl NetherCodec for Header {
     }
 }
 
+/// Datagram layout: a 32-byte HMAC, then the AES-encrypted length, header and packet.
 pub fn encode(packet: &Packets, sender_id: u64) -> Result<Vec<u8>> {
     let mut payload = Vec::with_capacity(2 + 18 + 64 + 16);
 
@@ -90,6 +92,7 @@ pub fn encode(packet: &Packets, sender_id: u64) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Verifies and decrypts a datagram into its packet and sender id, rejecting trailing bytes.
 pub fn decode(data: &[u8]) -> Result<(Packets, u64)> {
     if data.len() < 32 {
         return Err(ProtocolError::Other("packet too short".to_string()));

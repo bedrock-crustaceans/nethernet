@@ -1,3 +1,4 @@
+//! AES-256 and HMAC-SHA256 for discovery datagrams, keyed by SHA-256 of 0xdeadbeef as a little-endian u64.
 use crate::error::{ProtocolError, Result};
 use aes::Aes256;
 use aes::cipher::{Block, BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};

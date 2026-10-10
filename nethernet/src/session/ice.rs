@@ -1,3 +1,4 @@
+//! ICE agent limited to one UDP host candidate, with no STUN or TURN.
 use crate::error::ProtocolError;
 use crate::protocol::webrtc::certificate;
 use bytes::BytesMut;

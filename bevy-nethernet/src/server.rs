@@ -1,3 +1,4 @@
+//! LAN server: UDP discovery and signaling with sessions polled once per frame.
 use crate::connection::{ConnectionEvent, SessionPool};
 use crate::socket::{bind_discovery_socket, bind_shared_socket, send_discovery};
 use bevy_app::prelude::*;
@@ -41,15 +42,18 @@ impl NetherServerPlugin {
     }
 }
 
+/// Set holding the system that polls sockets and emits events.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NetherServerSet;
 
+/// Identifies one session by the peer's network id and the connection id it chose.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NetherSessionId {
     pub network_id: String,
     pub connection_id: u64,
 }
 
+/// SessionConnected fires once both data channels are open; SessionDisconnected when the session ends.
 #[derive(Message, Clone, Debug)]
 pub enum NetherServerEvent {
     SessionConnected(NetherSessionId),
@@ -82,6 +86,7 @@ pub struct NetherServer {
 }
 
 impl NetherServer {
+    /// Binds the discovery socket at bind_addr; conf adjusts the LAN signaler config.
     pub fn new<T>(network_id: u64, bind_addr: SocketAddr, conf: T) -> std::io::Result<Self>
     where
         T: FnOnce(&mut LanSignalerConfig),
@@ -118,6 +123,7 @@ impl NetherServer {
         self.identity = Some(identity);
     }
 
+    /// How offers are authenticated; None skips validation.
     pub fn set_token_trust(&mut self, token_trust: Option<TokenTrust>) {
         self.token_trust = token_trust;
     }
@@ -126,10 +132,12 @@ impl NetherServer {
         self.timeouts = timeouts;
     }
 
+    /// Adds candidates from the signaling source address when an offer has no routable host candidate.
     pub fn set_infer_peer_candidates(&mut self, infer: bool) {
         self.infer_peer_candidates = infer;
     }
 
+    /// Replaces the data advertised to discovery requests.
     pub fn set_server_data(&mut self, data: ServerData) {
         let _ = self
             .signaler
@@ -143,6 +151,7 @@ impl NetherServer {
             .map(|(id, _)| id)
     }
 
+    /// Validated identity of the peer, if its offer carried one.
     pub fn player(&self, id: &NetherSessionId) -> Option<Arc<PlayerInfo>> {
         self.sessions.get(id)?.player.clone()
     }

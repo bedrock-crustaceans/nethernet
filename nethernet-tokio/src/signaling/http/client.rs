@@ -1,3 +1,4 @@
+//! Client side of HTTP signaling.
 use crate::error::{NetherError, Result};
 use crate::protocol::packet::discovery::ServerData;
 use crate::protocol::{Signal, SignalType};
@@ -13,6 +14,7 @@ use url::Url;
 
 static PROVIDER: Once = Once::new();
 
+/// Posts offers to /v1/join/{network_id} on the target URL and delivers the reply as an answer signal.
 pub struct HttpSignaling {
     network_id: String,
     client: Client,
@@ -20,6 +22,7 @@ pub struct HttpSignaling {
 }
 
 impl HttpSignaling {
+    /// Builds a client with a 15 second request timeout.
     pub fn new(network_id: String) -> Result<Self> {
         PROVIDER.call_once(|| {
             let _ = rustls::crypto::ring::default_provider().install_default();
@@ -63,6 +66,7 @@ impl HttpSignaling {
         Ok(url)
     }
 
+    /// Reads GET /v1/join; the network id here is an http(s) URL with a port.
     pub async fn server_data(&self, network_id: &str) -> Result<ServerData> {
         let response = self
             .client
@@ -107,6 +111,7 @@ impl HttpSignaling {
 }
 
 impl HttpSignaling {
+    /// Only offers are sent; the answer arrives on signals().
     pub async fn signal(&self, signal: Signal) -> Result<()> {
         match signal.signal_type {
             SignalType::Offer => {

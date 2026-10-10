@@ -1,3 +1,4 @@
+//! rustls server configuration from PEM files.
 use crate::error::{NetherError, Result};
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -14,6 +15,7 @@ pub async fn from_pem(
     from_pem_bytes(&chain, &key)
 }
 
+/// Fails when the chain has no certificate or the PEM holds no private key.
 pub fn from_pem_bytes(certificate_chain: &[u8], private_key: &[u8]) -> Result<Arc<ServerConfig>> {
     let chain: Vec<CertificateDer<'static>> =
         rustls_pemfile::certs(&mut std::io::Cursor::new(certificate_chain))

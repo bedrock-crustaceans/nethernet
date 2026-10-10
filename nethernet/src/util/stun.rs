@@ -1,7 +1,9 @@
+//! STUN inspection for routing datagrams to the connection that owns them.
 use rtc::stun::attributes::ATTR_USERNAME;
 use rtc::stun::message::{Message, is_stun_message};
 use rtc::stun::textattrs::Username;
 
+/// The local half of a binding request's `USERNAME` (`local:remote`), `None` for any other datagram.
 pub fn local_ufrag(datagram: &[u8]) -> Option<String> {
     if !is_stun_message(datagram) {
         return None;

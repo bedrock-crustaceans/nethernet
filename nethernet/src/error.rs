@@ -1,3 +1,4 @@
+//! Protocol error type and the NetherNet signaling error codes.
 use std::io;
 use thiserror::Error;
 
@@ -21,6 +22,7 @@ pub enum ProtocolError {
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;
 
+/// Codes carried by CONNECTERROR signals; unrecognized numbers read as `SignalingUnknownError`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum SignalErrorCode {

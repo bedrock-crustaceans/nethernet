@@ -1,3 +1,4 @@
+//! DTLS handshake pinned to the SDP fingerprint instead of a certificate chain.
 use crate::error::ProtocolError;
 use crate::protocol::webrtc::certificate::crypto_provider;
 use bytes::BytesMut;
@@ -12,6 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// The DTLS role this side takes after the remote's announced setup (RFC 5763 section 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedRole {
     Client,

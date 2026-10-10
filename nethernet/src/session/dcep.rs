@@ -1,3 +1,4 @@
+//! DCEP messages that open the two NetherNet data channels (guide section 6).
 use crate::error::ProtocolError;
 use rtc::datachannel::message::Message;
 use rtc::datachannel::message::message_channel_ack::DataChannelAck;
@@ -22,6 +23,7 @@ pub fn reliable_open() -> DataChannelOpen {
     }
 }
 
+/// Unordered with zero retransmissions.
 pub fn unreliable_open() -> DataChannelOpen {
     DataChannelOpen {
         channel_type: ChannelType::PartialReliableRexmitUnordered,

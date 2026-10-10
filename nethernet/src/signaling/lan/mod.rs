@@ -1,3 +1,4 @@
+//! LAN signaling: discovery broadcasts and signals sent as encrypted UDP datagrams.
 pub mod config;
 pub mod error;
 pub mod input;
@@ -19,6 +20,7 @@ use std::time::{Duration, Instant};
 
 const PING: &str = "Ping";
 
+/// Sans-io LAN signaler that answers discovery requests, tracks peer addresses and retransmits signals.
 pub struct LanSignaler {
     network_id: u64,
     config: LanSignalerConfig,

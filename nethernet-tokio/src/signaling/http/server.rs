@@ -1,3 +1,4 @@
+//! Server side of HTTP signaling: an HTTP/1 listener that turns join requests into offer signals.
 use crate::addr::Addr;
 use crate::error::{NetherError, Result};
 use crate::protocol::{Signal, SignalType};
@@ -29,14 +30,17 @@ const MAX_BODY: u64 = 1 << 20;
 
 const MAX_IDLE: Duration = Duration::from_secs(1);
 
+/// Listener settings; the signaler holds limits, token trust and status serving.
 #[derive(Clone)]
 pub struct HttpServerConfig {
     pub network_id: String,
 
     pub signaler: HttpSignalerConfig,
 
+    /// Serves HTTPS when set, plain HTTP otherwise.
     pub tls: Option<Arc<rustls::ServerConfig>>,
 
+    /// Time a connection may take to send its request headers.
     pub idle_timeout: Duration,
 }
 
@@ -78,6 +82,7 @@ struct Response {
     keep_alive: bool,
 }
 
+/// Join requests surface as offer signals and are completed by answer or error signals.
 pub struct HttpSignalingServer {
     network_id: String,
     local_addr: SocketAddr,
@@ -88,6 +93,7 @@ pub struct HttpSignalingServer {
 }
 
 impl HttpSignalingServer {
+    /// Port 0 picks a free port; read it back from local_addr.
     pub async fn bind(addr: SocketAddr, config: HttpServerConfig) -> Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
@@ -124,6 +130,7 @@ impl HttpSignalingServer {
         self.local_addr
     }
 
+    /// Stops accepting and waits for the serving task to finish.
     pub async fn shutdown(mut self) {
         self.cancel_token.cancel();
         if let Some(task) = self.task.take() {
@@ -131,6 +138,7 @@ impl HttpSignalingServer {
         }
     }
 
+    /// Replaces the data served by the status endpoint.
     pub fn set_server_data(&self, server_data: ServerData) {
         let _ = self
             .commands

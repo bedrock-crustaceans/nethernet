@@ -1,3 +1,4 @@
+//! A DTLS-secured SCTP session over ICE with the two NetherNet data channels.
 mod dcep;
 mod dtls;
 mod ice;
@@ -23,6 +24,7 @@ use std::time::{Duration, Instant};
 const RELIABLE_STREAM_ID: StreamId = 1;
 const UNRELIABLE_STREAM_ID: StreamId = 3;
 
+/// Reliable messages are segmented; unreliable ones must fit one segment (guide section 6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
     Reliable,
@@ -31,7 +33,9 @@ pub enum Channel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionEvent {
+    /// Both data channels are open.
     Ready,
+    /// ICE or SCTP failed; emitted once.
     Failed,
 }
 
@@ -39,16 +43,19 @@ pub enum SessionOutput {
     Send(Vec<u8>, SocketAddr),
     Event(SessionEvent),
     Message(Channel, Vec<u8>),
+    /// Feed `Timeout` no later than this long from now.
     Wait(Duration),
 }
 
 pub enum SessionInput {
     Packet(Box<[u8]>, SocketAddr, Instant),
 
+    /// Transports start once the description or a later candidate supplies a remote address.
     RemoteDescription(Description, Vec<Candidate>, Instant),
 
     RemoteCandidate(Candidate, Instant),
 
+    /// Fails until the channel has opened.
     Send(Channel, bytes::Bytes, Instant),
 
     Timeout(Instant),
@@ -83,6 +90,7 @@ impl Channels {
     }
 }
 
+/// ICE, DTLS and SCTP stacks bound to one local address, with one reliable and one unreliable channel.
 pub struct Session {
     is_controlling: bool,
     local_addr: SocketAddr,
@@ -103,6 +111,7 @@ pub struct Session {
 pub use dtls::DtlsLayer;
 
 impl Session {
+    /// The controlling side is the offerer: it announces the DTLS server role and opens the data channels.
     pub fn new(
         local_addr: SocketAddr,
         is_controlling: bool,
@@ -145,12 +154,14 @@ impl Session {
         self.ice.local_candidate()
     }
 
+    /// The selected ICE remote address, else the first candidate's.
     pub fn remote_addr(&self) -> Option<SocketAddr> {
         self.ice
             .selected_remote_addr()
             .or_else(|| self.remote.as_ref().map(|r| r.addr))
     }
 
+    /// Available once the SCTP association exists.
     pub fn rtt(&self) -> Option<Duration> {
         self.sctp.as_ref().and_then(|s| s.rtt())
     }

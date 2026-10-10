@@ -1,3 +1,4 @@
+//! The single data-channel SDP media section that NetherNet peers exchange.
 use crate::error::ProtocolError;
 use crate::protocol::constants::SCTP_MAX_MESSAGE_SIZE;
 use crate::protocol::webrtc::candidate;
@@ -16,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const SCTP_PORT: u16 = 5000;
 
+/// Server is announced as `actpass`; Client and Auto are announced as `active`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DtlsRole {
     Client,
@@ -23,16 +25,21 @@ pub enum DtlsRole {
     Auto,
 }
 
+/// A peer's ICE credentials, DTLS setup and certificate fingerprint as carried in SDP.
 #[derive(Clone)]
 pub struct Description {
     pub ice: Credentials,
     pub dtls_role: DtlsRole,
+    /// Algorithm and digest from the `fingerprint` attribute.
     pub fingerprint: (String, String),
+    /// Defaults to 65536 when the remote omits the attribute.
     pub sctp_max_message_size: u32,
+    /// Raw session-level `a=identity` value, opaque at this layer (guide section 5).
     pub identity: Option<String>,
 }
 
 impl Description {
+    /// Leaves out candidates and sets `ice-options:trickle`.
     pub fn encode_trickle(&self) -> String {
         let media = self
             .base_media()
@@ -40,6 +47,7 @@ impl Description {
         Self::session(media, self.identity.as_deref()).marshal()
     }
 
+    /// Embeds the candidates and ends the list with `end-of-candidates`.
     pub fn encode_full(&self, candidates: &[Candidate]) -> String {
         let mut media = self.base_media();
         for (index, c) in candidates.iter().enumerate() {
@@ -49,6 +57,7 @@ impl Description {
         Self::session(media, self.identity.as_deref()).marshal()
     }
 
+    /// Needs exactly one media section and a setup of `active` or `actpass`; unparsable candidates are skipped.
     pub fn parse(sdp: &str) -> Result<(Description, Vec<Candidate>), ProtocolError> {
         let session = SessionDescription::unmarshal(&mut Cursor::new(sdp))
             .map_err(|e| ProtocolError::Other(format!("decode session description: {e}")))?;

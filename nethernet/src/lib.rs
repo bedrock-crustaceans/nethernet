@@ -1,3 +1,4 @@
+//! Sans-io NetherNet: signaling, identity, session and framing state machines with no I/O of their own.
 pub mod admission;
 pub mod connection;
 pub mod error;

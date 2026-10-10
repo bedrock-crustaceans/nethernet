@@ -1,3 +1,4 @@
+//! Errors from parsing and validating identity assertions.
 use thiserror::Error;
 
 #[derive(Debug, Error)]

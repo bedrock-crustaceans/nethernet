@@ -1,3 +1,4 @@
+//! Errors from the HTTP signaler.
 use crate::error::ProtocolError;
 use thiserror::Error;
 

@@ -1,3 +1,4 @@
+//! Conversion between ICE candidates and `candidate:` attribute values.
 use crate::error::ProtocolError;
 use rtc::ice::candidate::{Candidate, unmarshal_candidate};
 
@@ -10,6 +11,7 @@ pub(crate) fn attribute_value(index: usize, candidate: &Candidate, ufrag: &str) 
     )
 }
 
+/// Appends a fixed generation and network cost, using `index` as the network id.
 pub fn format_ice_candidate(index: usize, candidate: &Candidate, ufrag: &str) -> String {
     format!("candidate:{}", attribute_value(index, candidate, ufrag))
 }

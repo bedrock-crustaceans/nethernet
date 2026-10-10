@@ -1,7 +1,9 @@
+//! CIDR range sets, used for trusted proxy lists.
 use crate::util::endpoint;
 use ipnet::{IpNet, Ipv4Net};
 use std::net::IpAddr;
 
+/// CIDR ranges and single addresses; IPv4-mapped IPv6 addresses match as IPv4.
 #[derive(Debug, Clone, Default)]
 pub struct IpRangeSet {
     ranges: Vec<IpNet>,
@@ -12,6 +14,7 @@ impl IpRangeSet {
         Self::default()
     }
 
+    /// Skips malformed entries with a warning.
     pub fn parse<I, S>(entries: I) -> Self
     where
         I: IntoIterator<Item = S>,

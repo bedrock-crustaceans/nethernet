@@ -3,6 +3,7 @@ use crate::protocol::codec::{NetherCodec, read_bytes_u32, write_bytes_u32};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Read, Write};
 
+/// A serialized signal addressed to one network id.
 #[derive(Debug, Clone, Default)]
 pub struct MessagePacket {
     pub recipient_id: u64,

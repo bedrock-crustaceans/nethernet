@@ -1,3 +1,4 @@
+//! LAN discovery and signaling over encrypted UDP datagrams.
 use crate::addr::Addr;
 use crate::error::{NetherError, Result};
 use crate::protocol::Signal;
@@ -30,6 +31,7 @@ enum Command {
     Address(u64, oneshot::Sender<Option<SocketAddr>>),
 }
 
+/// Answers discovery requests and carries offers, answers and candidates as signals.
 pub struct LanSignaling {
     network_id: u64,
     commands: mpsc::UnboundedSender<Command>,
@@ -39,10 +41,12 @@ pub struct LanSignaling {
 }
 
 impl LanSignaling {
+    /// The network id is this peer's id and bind_addr is the discovery socket.
     pub async fn new(network_id: u64, bind_addr: SocketAddr) -> Result<Self> {
         Self::with_config(network_id, bind_addr, LanConfig::default()).await
     }
 
+    /// Broadcasts to 255.255.255.255 on the discovery port unless the bind port equals it or a broadcast address is set.
     pub async fn with_config(
         network_id: u64,
         bind_addr: SocketAddr,
@@ -91,6 +95,7 @@ impl LanSignaling {
             .send(Command::SetServerData(Box::new(server_data)));
     }
 
+    /// Servers that have answered discovery so far, by network id.
     pub async fn discover(&self) -> HashMap<u64, ServerData> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self.commands.send(Command::Discovered(reply_tx)).is_err() {
@@ -99,6 +104,7 @@ impl LanSignaling {
         reply_rx.await.unwrap_or_default()
     }
 
+    /// Source address of a discovered server.
     pub async fn get_address(&self, network_id: u64) -> Option<SocketAddr> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
@@ -270,6 +276,7 @@ impl Drop for LanSignaling {
     }
 }
 
+/// Broadcasts one discovery request to the port and collects responses until the timeout elapses.
 pub async fn scan(
     network_id: u64,
     port: u16,

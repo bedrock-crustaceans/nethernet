@@ -1,7 +1,9 @@
+//! Signaling messages in their `TYPE connection_id data` text form.
 use crate::error::{ProtocolError, SignalErrorCode};
 use std::fmt;
 use std::str::FromStr;
 
+/// Wire names are CONNECTREQUEST, CONNECTRESPONSE, CANDIDATEADD and CONNECTERROR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalType {
     Offer,
@@ -41,10 +43,12 @@ impl fmt::Display for SignalType {
     }
 }
 
+/// A signaling message; `network_id` is the remote peer's id and is not part of the text form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signal {
     pub signal_type: SignalType,
     pub connection_id: u64,
+    /// SDP for offers and answers, a candidate line, or a decimal error code.
     pub data: String,
     pub network_id: String,
 }
@@ -85,6 +89,7 @@ impl Signal {
         )
     }
 
+    /// Parses `TYPE id data`, with `network_id` supplied by the caller.
     pub fn from_string(s: &str, network_id: String) -> Result<Self, ProtocolError> {
         let parts: Vec<&str> = s.splitn(3, ' ').collect();
         if parts.len() != 3 {

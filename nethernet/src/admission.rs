@@ -1,3 +1,4 @@
+//! Server-side admission of an incoming offer: identity check, answer creation and candidate inference.
 use crate::connection::{Connection, ConnectionInput, IceMode};
 use crate::error::{ProtocolError, SignalErrorCode};
 use crate::identity::error::IdentityError;
@@ -12,6 +13,7 @@ use std::net::SocketAddr;
 use std::time::{Instant, SystemTime};
 use thiserror::Error;
 
+/// Why an offer was refused; `code` gives the signaling error code to send back.
 #[derive(Debug, Error)]
 pub enum AdmissionError {
     #[error("offer description rejected: {0}")]
@@ -41,6 +43,7 @@ impl AdmissionError {
     }
 }
 
+/// Server settings applied to every offer: an identity signs answers, token trust authenticates offers.
 #[derive(Debug, Clone, Copy)]
 pub struct OfferPolicy<'a> {
     identity: Option<&'a ServerIdentity>,
@@ -69,11 +72,13 @@ impl<'a> OfferPolicy<'a> {
         self
     }
 
+    /// Adds reflexive candidates from the signaling source address when the offer has no routable host candidate.
     pub fn with_inferred_peer_candidates(mut self, infer: bool) -> Self {
         self.infer_peer_candidates = infer;
         self
     }
 
+    /// Parses the offer and, when token trust is set, validates its identity against it.
     pub fn admit(
         &self,
         offer: &Signal,
@@ -105,6 +110,7 @@ impl<'a> OfferPolicy<'a> {
     }
 }
 
+/// An offer that passed admission and is ready to be answered.
 pub struct Admitted<'a> {
     policy: OfferPolicy<'a>,
     offer: Signal,
@@ -169,15 +175,19 @@ impl Admitted<'_> {
     }
 }
 
+/// The accepted connection and the signals to send back.
 pub struct Answered {
     pub connection: Connection,
 
+    /// The answer, followed by the local candidate in trickle mode.
     pub signals: Vec<Signal>,
 
     pub player: Option<PlayerInfo>,
 
+    /// Local ICE username fragment, which STUN packets from the peer carry.
     pub local_ufrag: String,
 
+    /// Candidate lines added from the signaling source address.
     pub inferred: Vec<String>,
 }
 

@@ -1,3 +1,4 @@
+//! Wire formats: signaling messages, data-channel framing, LAN discovery packets and SDP.
 pub mod codec;
 pub mod constants;
 pub mod message;

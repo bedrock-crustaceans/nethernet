@@ -1,3 +1,4 @@
+//! HTTP signaling server: status on `/v1/join` and offers on `/v1/join/{network_id}` (guide section 4).
 pub mod config;
 pub mod error;
 pub mod input;
@@ -34,6 +35,7 @@ struct Pending {
     deadline: Instant,
 }
 
+/// Sans-io HTTP signaling server that limits connections per address and holds joins until answered.
 pub struct HttpSignaler {
     config: HttpSignalerConfig,
 

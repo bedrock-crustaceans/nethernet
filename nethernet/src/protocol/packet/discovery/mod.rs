@@ -1,3 +1,4 @@
+//! LAN discovery packets: encrypted, HMAC-checked UDP datagrams.
 mod crypto;
 mod message;
 mod packet;

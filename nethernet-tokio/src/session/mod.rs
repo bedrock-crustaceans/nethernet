@@ -1,3 +1,4 @@
+//! A connected session driven by one task, with reliable and unreliable channels and peer metadata.
 pub(crate) mod command;
 
 pub(crate) use command::Command;
@@ -34,6 +35,7 @@ impl Drop for TaskGuard {
     }
 }
 
+/// Cloneable handle; the connection closes once every handle and receiver is dropped.
 #[derive(Clone)]
 pub struct Session {
     local_addr: Addr,
@@ -43,6 +45,7 @@ pub struct Session {
     _guard: Arc<TaskGuard>,
 }
 
+/// Incoming messages of one channel; yields None once the connection closes.
 pub struct SessionReceiver {
     rx: mpsc::Receiver<Bytes>,
     _guard: Arc<TaskGuard>,
@@ -58,6 +61,7 @@ impl SessionReceiver {
     }
 }
 
+/// A connected session with its reliable and unreliable receivers.
 pub struct AcceptedSession {
     pub session: Session,
     pub reliable: SessionReceiver,
@@ -238,6 +242,7 @@ impl Session {
         self.send_on(Channel::Reliable, data).await
     }
 
+    /// The message must fit one segment (guide section 6.1).
     pub async fn send_unreliable(&self, data: Bytes) -> Result<()> {
         self.send_on(Channel::Unreliable, data).await
     }
@@ -250,6 +255,7 @@ impl Session {
         reply_rx.await.map_err(|_| NetherError::ConnectionClosed)?
     }
 
+    /// Starts closing and returns without waiting for teardown.
     pub async fn close(&self) -> Result<()> {
         self.close_token.cancel();
         Ok(())
@@ -271,6 +277,7 @@ impl Session {
         }
     }
 
+    /// None until a round trip time has been measured.
     pub async fn rtt(&self) -> Option<Duration> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self.command_tx.send(Command::Rtt(reply_tx)).is_err() {
@@ -279,6 +286,7 @@ impl Session {
         reply_rx.await.ok().flatten()
     }
 
+    /// Records the validated identity of the peer; the HTTP server sets it after admission.
     pub async fn set_player(&self, player: Arc<PlayerInfo>) {
         let _ = self.command_tx.send(Command::SetPlayer(player));
     }
@@ -291,6 +299,7 @@ impl Session {
         reply_rx.await.ok().flatten()
     }
 
+    /// Records the Host header of the offer request, HTTP signaling only.
     pub async fn set_host(&self, host: String) {
         let _ = self.command_tx.send(Command::SetHost(host));
     }

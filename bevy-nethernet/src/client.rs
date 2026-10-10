@@ -1,3 +1,4 @@
+//! LAN client: discovers servers by UDP broadcast and connects to one by network id.
 use crate::connection::{ConnectionEvent, SessionPool};
 use crate::socket::bind_shared_socket;
 use bevy_app::prelude::*;
@@ -42,9 +43,11 @@ impl NetherClientPlugin {
     }
 }
 
+/// Set holding the system that polls sockets and emits events.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NetherClientSet;
 
+/// ServerDiscovered carries the server's network id and data; Connected and Disconnected track the one connection.
 #[derive(Message, Clone, Debug)]
 pub enum NetherClientEvent {
     ServerDiscovered(u64, Box<ServerData>),
@@ -76,6 +79,7 @@ pub struct NetherClient {
 }
 
 impl NetherClient {
+    /// Broadcasts discovery to the default port; conf adjusts the LAN signaler config.
     pub fn new<T>(network_id: u64, conf: T) -> std::io::Result<Self>
     where
         T: FnOnce(&mut LanSignalerConfig),
@@ -122,6 +126,7 @@ impl NetherClient {
         self.signaler.discovered()
     }
 
+    /// Signs outgoing offers with this identity.
     pub fn set_identity(&mut self, identity: ServerIdentity) {
         self.identity = Some(identity);
     }
@@ -130,6 +135,7 @@ impl NetherClient {
         self.timeouts = timeouts;
     }
 
+    /// Offers made when negotiation times out; 0 counts as 1.
     pub fn set_attempts(&mut self, attempts: u32) {
         self.attempts = attempts;
     }
@@ -146,6 +152,7 @@ impl NetherClient {
         self.remote_addr
     }
 
+    /// Starts negotiating; Connected follows once the data channels open.
     pub fn connect(&mut self, target_network_id: u64) -> std::io::Result<()> {
         self.target = target_network_id;
         self.attempts_left = self.attempts.max(1);

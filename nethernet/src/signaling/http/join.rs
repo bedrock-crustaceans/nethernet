@@ -1,3 +1,4 @@
+//! Client-side helpers for the HTTP join request and its response (guide section 4).
 use crate::error::{ProtocolError, SignalErrorCode};
 use crate::protocol::packet::discovery::ServerData;
 use crate::signaling::http::JOIN_PATH;
@@ -49,6 +50,7 @@ pub fn validate_status_response(
     ServerData::from_json(&String::from_utf8_lossy(body)).map_err(StatusResponseError::Malformed)
 }
 
+/// A 2xx body that parses as a number is an error code, not an SDP, and is reported as `Rejected`.
 pub fn validate_join_response(status: u16, body: &str) -> Result<(), JoinResponseError> {
     if !(200..300).contains(&status) {
         return Err(JoinResponseError::Status(status));

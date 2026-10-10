@@ -1,3 +1,4 @@
+//! Error types for the transport and signaling layers.
 use nethernet::admission::AdmissionError;
 use nethernet::error::ProtocolError;
 use nethernet::identity::error::IdentityError;
@@ -24,6 +25,7 @@ pub enum NetherError {
     #[error("Identity error: {0}")]
     Identity(#[from] IdentityError),
 
+    /// The HTTP server has neither an identity nor allow_unsigned_answers (guide section 5.2).
     #[error("HTTP signaling requires a server identity")]
     IdentityRequired,
 
@@ -57,6 +59,7 @@ pub enum NetherError {
     #[error("Invalid state: {0}")]
     InvalidState(String),
 
+    /// The remote refused the connection with a signaling error code.
     #[error("connection failed with code {0:?}")]
     Signaled(SignalErrorCode),
 

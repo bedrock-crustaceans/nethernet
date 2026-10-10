@@ -1,3 +1,4 @@
+//! The server's own identity: a P-384 key and a self-signed token that sign answers.
 use crate::identity::error::{IdentityError, Result};
 use crate::identity::{Assertion, Identity, Idp, canonical_fingerprint_json};
 use base64::Engine;
@@ -10,8 +11,10 @@ use p384::pkcs8::{EncodePublicKey, LineEnding};
 use serde_json::json;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Token validity used when no lifetime is given.
 pub const DEFAULT_TOKEN_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Server key and token; keep the key stable across restarts so clients can trust it (guide section 5.2).
 #[derive(Debug, Clone)]
 pub struct ServerIdentity {
     signing: SigningKey,
@@ -25,6 +28,7 @@ impl ServerIdentity {
         Self::generate_with_expiry(domain, now, Some(DEFAULT_TOKEN_LIFETIME))
     }
 
+    /// A `None` lifetime omits `exp`, and validators in this crate refuse tokens without one.
     pub fn generate_with_expiry(
         domain: impl Into<String>,
         now: SystemTime,
@@ -103,6 +107,7 @@ impl ServerIdentity {
         &self.domain
     }
 
+    /// The base64 identity value signing the fingerprints of `answer`.
     pub fn identity_value(&self, answer: &str) -> Result<String> {
         let fingerprints = canonical_fingerprint_json(answer)?;
         let signed = sign(&self.signing, &fingerprints)?;
@@ -128,6 +133,7 @@ impl ServerIdentity {
         .to_base64()
     }
 
+    /// Inserts a signed `a=identity` line above the first media section of an answer.
     pub fn augment(&self, answer: &str) -> Result<String> {
         let attribute = format!("a=identity:{}", self.identity_value(answer)?);
         let eol = match answer.contains("\r\n") {

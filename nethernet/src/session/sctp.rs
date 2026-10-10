@@ -1,3 +1,4 @@
+//! SCTP association over DTLS on the fixed NetherNet port.
 use crate::error::ProtocolError;
 use crate::session::dtls::ResolvedRole;
 use bytes::Bytes;

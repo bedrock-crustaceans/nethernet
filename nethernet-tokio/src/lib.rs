@@ -1,3 +1,4 @@
+//! Tokio transport for NetherNet: LAN and HTTP signaling, with client and server connections.
 pub mod addr;
 pub mod builders;
 pub mod credentials;

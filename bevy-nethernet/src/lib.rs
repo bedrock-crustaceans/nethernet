@@ -1,3 +1,4 @@
+//! Bevy plugins for NetherNet: LAN and HTTP servers and clients driven from the PreUpdate schedule.
 mod connection;
 mod http_stream;
 mod http_wire;

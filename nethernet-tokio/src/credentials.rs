@@ -1,7 +1,9 @@
+//! TURN credentials in the JSON form returned by the signaling service.
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Credentials {
+    /// Lifetime of the credentials in seconds.
     #[serde(rename = "ExpirationInSeconds")]
     pub expiration_in_seconds: i32,
 

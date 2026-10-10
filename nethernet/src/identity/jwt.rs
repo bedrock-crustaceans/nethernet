@@ -1,3 +1,4 @@
+//! Compact JWS parsing and token claims.
 use crate::identity::error::{IdentityError, Result};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -47,6 +48,7 @@ impl Jws {
         })
     }
 
+    /// Parses a `header..signature` JWS, taking the payload from the second argument.
     pub fn parse_detached(compact: &str, payload: &str) -> Result<Self> {
         let mut parts = compact.split('.');
         let (Some(header), Some(""), Some(signature), None) =
@@ -136,6 +138,7 @@ impl Claims {
         Some(UNIX_EPOCH + Duration::from_secs(seconds))
     }
 
+    /// The `cpk` claim, a base64 DER P-384 public key.
     pub fn client_public_key(&self) -> Result<VerifyingKey> {
         let cpk = self.string("cpk").ok_or_else(|| {
             IdentityError::ClientPublicKey("the token carries no cpk".to_string())
@@ -149,6 +152,7 @@ impl Claims {
             .map_err(|e| IdentityError::ClientPublicKey(format!("not a key on P-384: {}", e)))
     }
 
+    /// Refuses a token with no `exp`, or expired by more than 60 seconds.
     pub fn check_expiry(&self, now: SystemTime) -> Result<()> {
         let expiry = self
             .expiry()

@@ -1,3 +1,4 @@
+//! Client and server connections over a signaling backend.
 pub mod client;
 pub mod server;
 
@@ -21,20 +22,28 @@ pub(crate) fn local_bind_addr() -> SocketAddr {
 }
 use tokio_util::sync::CancellationToken;
 
+/// Settings shared by NetherClient::connect_with and NetherServer::bind_with.
 #[derive(Clone)]
 pub struct ConnectionConfig {
+    /// Deadlines for the stages of negotiation.
     pub timeouts: Timeouts,
 
+    /// Aborts client negotiation when cancelled.
     pub cancel_token: CancellationToken,
 
+    /// Client offers made when negotiation times out; 0 counts as 1.
     pub attempts: u32,
 
+    /// Server identity that signs answers; HTTP signaling needs it unless allow_unsigned_answers is set.
     pub identity: Option<Arc<ServerIdentity>>,
 
+    /// Answers without a signature, which the vanilla client refuses (guide section 5.2).
     pub allow_unsigned_answers: bool,
 
+    /// How the server authenticates offers; None skips validation.
     pub token_trust: Option<TokenTrust>,
 
+    /// Adds candidates from the signaling source address when an offer has no routable host candidate.
     pub infer_peer_candidates: bool,
 }
 

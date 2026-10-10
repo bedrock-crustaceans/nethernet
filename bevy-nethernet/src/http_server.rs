@@ -1,3 +1,4 @@
+//! HTTP signaling server polled once per frame, with sessions over a shared UDP socket.
 use crate::connection::{ConnectionEvent, SessionPool};
 use crate::http_stream::{Drain, HttpStream, ServerTls, Shutdown};
 use crate::http_wire;
@@ -50,9 +51,11 @@ impl NetherHttpServerPlugin {
     }
 }
 
+/// Set holding the system that polls sockets and emits events.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NetherHttpServerSet;
 
+/// SessionConnected fires once both data channels are open; SessionDisconnected when the session ends.
 #[derive(Message, Clone, Debug)]
 pub enum NetherHttpServerEvent {
     SessionConnected(NetherSessionId),
@@ -111,6 +114,7 @@ pub struct NetherHttpServer {
 }
 
 impl NetherHttpServer {
+    /// Each TCP connection serves one request and is closed after the response; conf adjusts the HTTP signaler config.
     pub fn bind<T>(bind_addr: SocketAddr, conf: T) -> std::io::Result<Self>
     where
         T: FnOnce(&mut HttpSignalerConfig),
@@ -149,18 +153,22 @@ impl NetherHttpServer {
         self.listener.local_addr()
     }
 
+    /// Time without traffic before a TCP connection is dropped; defaults to 30 seconds.
     pub fn set_idle_timeout(&mut self, idle_timeout: Duration) {
         self.idle_timeout = idle_timeout;
     }
 
+    /// Signs answers, which the vanilla client requires (guide section 5.2).
     pub fn set_identity(&mut self, identity: ServerIdentity) {
         self.identity = Some(identity);
     }
 
+    /// Without an identity, answers joins unsigned instead of refusing with 503; vanilla clients refuse them.
     pub fn allow_unsigned_answers(&mut self, allow: bool) {
         self.allow_unsigned_answers = allow;
     }
 
+    /// Serves HTTPS; needs the tls feature.
     #[cfg(feature = "tls")]
     pub fn set_tls(&mut self, tls: Arc<rustls::ServerConfig>) {
         self.tls = ServerTls::with_config(tls);
@@ -170,6 +178,7 @@ impl NetherHttpServer {
         self.timeouts = timeouts;
     }
 
+    /// Adds candidates from the request's source address when an offer has no routable host candidate.
     pub fn set_infer_peer_candidates(&mut self, infer: bool) {
         self.infer_peer_candidates = infer;
     }
@@ -191,6 +200,7 @@ impl NetherHttpServer {
         self.sessions.get(id)?.player.clone()
     }
 
+    /// The Host header of the request that opened the session.
     pub fn host(&self, id: &NetherSessionId) -> Option<&str> {
         self.sessions.get(id)?.host.as_deref()
     }

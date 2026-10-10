@@ -1,3 +1,4 @@
+//! Little-endian codec trait and length-prefixed primitives for discovery packets.
 use crate::error::{ProtocolError, Result};
 use crate::protocol::constants::MAX_BYTES;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -18,6 +19,7 @@ pub fn read_bytes_u8<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Fails when the data is longer than 255 bytes.
 pub fn write_bytes_u8<W: Write>(writer: &mut W, data: &[u8]) -> Result<()> {
     let len = u8::try_from(data.len()).map_err(|_| {
         ProtocolError::Other(format!(
@@ -30,6 +32,7 @@ pub fn write_bytes_u8<W: Write>(writer: &mut W, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Refuses a length prefix above `MAX_BYTES`.
 pub fn read_bytes_u32<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
     let len = reader.read_u32::<LittleEndian>()? as usize;
     if len > MAX_BYTES {
@@ -56,6 +59,7 @@ pub fn write_bytes_u32<W: Write>(writer: &mut W, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Reads a LEB128 varint of at most five bytes.
 pub fn read_varuint32<R: Read>(reader: &mut R) -> Result<u32> {
     let mut value: u32 = 0;
     for shift in (0..35).step_by(7) {
@@ -79,6 +83,7 @@ pub fn write_varuint32<W: Write>(writer: &mut W, mut value: u32) -> Result<()> {
     Ok(())
 }
 
+/// Reads a zigzag-encoded varint.
 pub fn read_varint32<R: Read>(reader: &mut R) -> Result<i32> {
     let raw = read_varuint32(reader)?;
     Ok(((raw >> 1) as i32) ^ -((raw & 1) as i32))
@@ -88,6 +93,7 @@ pub fn write_varint32<W: Write>(writer: &mut W, value: i32) -> Result<()> {
     write_varuint32(writer, ((value << 1) ^ (value >> 31)) as u32)
 }
 
+/// The varuint length prefix is not capped, unlike the u32 reader.
 pub fn read_bytes_varuint<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
     let len = read_varuint32(reader)? as usize;
     let mut buf = vec![0u8; len];

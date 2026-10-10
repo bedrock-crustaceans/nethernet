@@ -1,9 +1,11 @@
+//! Inputs accepted by the HTTP signaler.
 use crate::error::SignalErrorCode;
 use crate::protocol::packet::discovery::ServerData;
 use http::Request;
 use std::net::SocketAddr;
 use std::time::Instant;
 
+/// Why a pending join is refused, sent as 403, 504 or 503.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectReason {
     Rejected,
@@ -38,6 +40,7 @@ pub enum HttpSignalerInput {
         now: Instant,
     },
 
+    /// Completes a pending join with the answer SDP.
     Answer {
         connection_id: u64,
         sdp: String,
@@ -52,5 +55,6 @@ pub enum HttpSignalerInput {
 
     Closed(u64),
 
+    /// Expires overdue joins and queues a `Wait` for the next deadline.
     Update(Instant),
 }

@@ -1,3 +1,4 @@
+//! One NetherNet connection: a session plus offer, answer and candidate signal handling.
 use crate::error::ProtocolError;
 use crate::protocol::webrtc::Description;
 use crate::protocol::webrtc::candidate::{format_ice_candidate, parse_ice_candidate};
@@ -9,9 +10,12 @@ use rtc::ice::candidate::Candidate;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+/// Whether candidates travel inside the SDP or as separate signals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IceMode {
+    /// Candidates are embedded in the SDP.
     Full,
+    /// The SDP carries no candidates and each follows as its own signal.
     Trickle,
 }
 
@@ -20,6 +24,7 @@ enum SignalKind {
     Answer,
 }
 
+/// A session bound to one connection id and remote network id; signals for any other pair are ignored.
 pub struct Connection {
     session: Session,
     connection_id: u64,
@@ -62,6 +67,7 @@ impl Connection {
         Description::parse(&offer.data)
     }
 
+    /// Applies a parsed offer and builds the answer signals, adopting the offer's connection and network ids.
     pub fn accept(
         mut session: Session,
         description: Description,
@@ -164,6 +170,7 @@ impl Connection {
         Ok(())
     }
 
+    /// The remote's raw `a=identity` value, not validated here (guide section 5.2).
     pub fn remote_identity(&self) -> Option<&str> {
         self.remote_identity.as_deref()
     }
@@ -214,16 +221,21 @@ impl Sans for Connection {
     }
 }
 
+/// Deadlines for the transport drivers to enforce; this crate only carries them.
 #[derive(Debug, Clone, Copy)]
 pub struct Timeouts {
+    /// Time for the offer and answer exchange to complete.
     pub negotiation: Duration,
 
+    /// Time for ICE and DTLS to start once signaling is done.
     pub start: Duration,
 
+    /// Time for both data channels to open after the transports start.
     pub channel: Duration,
 }
 
 impl Timeouts {
+    /// Budget between the end of negotiation and a usable connection.
     pub fn establish(&self) -> Duration {
         self.start + self.channel
     }

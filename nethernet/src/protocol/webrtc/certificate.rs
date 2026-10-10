@@ -1,3 +1,4 @@
+//! Self-signed DTLS certificates and their SDP fingerprints.
 use crate::error::ProtocolError;
 use rtc::crypto::RTCCryptoProvider;
 use rtc::dtls::crypto::Certificate;
@@ -14,6 +15,7 @@ pub fn generate() -> Result<Certificate, ProtocolError> {
         .map_err(|e| ProtocolError::Other(format!("generate certificate: {e}")))
 }
 
+/// The algorithm name and the SHA-256 digest as uppercase colon-separated hex.
 pub fn fingerprint(certificate: &Certificate) -> Result<(String, String), ProtocolError> {
     let der = certificate
         .certificate

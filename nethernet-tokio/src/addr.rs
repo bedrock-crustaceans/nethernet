@@ -1,3 +1,4 @@
+//! Address of a peer: network id, connection id and, once known, the media socket address.
 use std::fmt;
 use std::net::SocketAddr;
 
@@ -5,8 +6,10 @@ use std::net::SocketAddr;
 pub struct Addr {
     pub network_id: String,
 
+    /// Zero when the address names a whole network rather than one connection.
     pub connection_id: u64,
 
+    /// Selected media address, filled in once the session knows it.
     pub socket_addr: Option<SocketAddr>,
 }
 

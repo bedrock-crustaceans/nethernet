@@ -62,6 +62,7 @@ impl Stream for SessionStream {
     }
 }
 
+/// Client connection; AsyncRead and AsyncWrite use the reliable channel.
 pub struct NetherClient {
     session: Session,
     unreliable: SessionReceiver,
@@ -78,6 +79,7 @@ impl NetherClient {
         Self::connect_with(signaling, remote_network_id, ConnectionConfig::default()).await
     }
 
+    /// Offers again with a fresh connection id after a timeout, up to attempts times.
     pub async fn connect_with(
         signaling: impl Into<ClientSignaling>,
         remote_network_id: String,
@@ -309,6 +311,7 @@ impl NetherClient {
         self.unreliable.recv().await
     }
 
+    /// Next reliable message; None once the connection closes.
     pub async fn recv(&mut self) -> Result<Option<Bytes>> {
         self.reader.get_mut().receiver.recv().await
     }
@@ -329,6 +332,7 @@ impl NetherClient {
         self.session.rtt().await
     }
 
+    /// Splits into the session and its two receivers.
     pub fn into_accepted(self) -> AcceptedSession {
         AcceptedSession {
             session: self.session,

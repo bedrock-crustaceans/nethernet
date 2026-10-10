@@ -2,6 +2,7 @@ use crate::error::Result;
 use crate::protocol::codec::NetherCodec;
 use std::io::{Read, Write};
 
+/// Discovery ping with an empty body.
 #[derive(Debug, Clone, Default)]
 pub struct RequestPacket;
 

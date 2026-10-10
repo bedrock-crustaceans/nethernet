@@ -1,3 +1,4 @@
+//! Parsing and rewriting of `a=candidate` lines in SDP.
 use crate::util::endpoint;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
@@ -41,6 +42,7 @@ impl CandidateKind {
     }
 }
 
+/// A parsed `a=candidate:` line (RFC 5245 section 15.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CandidateLine<'a> {
     transport: &'a str,
@@ -129,6 +131,7 @@ impl<'a> TryFrom<&'a str> for CandidateLine<'a> {
     }
 }
 
+/// True when a host candidate has a public or private address rather than loopback or unusable.
 pub fn has_routable_host_candidate(sdp: &str) -> bool {
     candidates(sdp).any(|candidate| {
         candidate.kind() == CandidateKind::Host
@@ -136,6 +139,8 @@ pub fn has_routable_host_candidate(sdp: &str) -> bool {
     })
 }
 
+/// Reflexive candidates pairing the signaling source address with the offer's host UDP ports, at most eight.
+/// Empty when the source is not routable or the offer already has reflexive or relayed candidates.
 pub fn inferred_peer_candidates(sdp: &str, signaled_from: Option<SocketAddr>) -> Vec<String> {
     let Some(from) = signaled_from.map(|addr| endpoint::normalize(addr.ip())) else {
         return Vec::new();
@@ -164,6 +169,8 @@ pub fn inferred_peer_candidates(sdp: &str, signaled_from: Option<SocketAddr>) ->
         .collect()
 }
 
+/// Keeps only host candidates on `allowed` addresses and adds translated candidates for allowed addresses not gathered.
+/// Returns the SDP unchanged when `allowed` is empty or nothing matches.
 pub fn with_advertised_candidates(sdp: &str, allowed: &[String]) -> String {
     if allowed.is_empty() {
         return sdp.to_string();

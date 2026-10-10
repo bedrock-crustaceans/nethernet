@@ -1,3 +1,4 @@
+//! Signaling backends and the enums that dispatch over them.
 use crate::addr::Addr;
 use crate::error::Result;
 use crate::protocol::Signal;
@@ -12,6 +13,7 @@ use std::sync::Arc;
 pub mod http;
 pub mod lan;
 
+/// Signaling a server listens on: LAN discovery or an HTTP endpoint.
 #[derive(Clone)]
 pub enum ServerSignaling {
     Lan(Arc<LanSignaling>),
@@ -64,6 +66,7 @@ impl ServerSignaling {
         }
     }
 
+    /// True when candidates must be embedded in the SDP instead of trickled.
     pub fn disable_trickle_ice(&self) -> bool {
         match self {
             Self::Lan(s) => s.disable_trickle_ice(),
@@ -78,6 +81,7 @@ impl ServerSignaling {
         }
     }
 
+    /// HTTP only; LAN has no identity and returns None.
     pub async fn player(&self, addr: &Addr) -> Option<Arc<PlayerInfo>> {
         match self {
             Self::Lan(_) => None,
@@ -92,6 +96,7 @@ impl ServerSignaling {
         }
     }
 
+    /// True for HTTP, whose signaler authenticates offers before the server sees them.
     pub fn validates_offers(&self) -> bool {
         match self {
             Self::Lan(_) => false,
@@ -99,6 +104,7 @@ impl ServerSignaling {
         }
     }
 
+    /// True for HTTP, where answers must be signed (guide section 5.2).
     pub fn requires_identity(&self) -> bool {
         match self {
             Self::Lan(_) => false,
@@ -106,6 +112,7 @@ impl ServerSignaling {
         }
     }
 
+    /// Replaces the advertised server data from a pong string; an unparsable string is logged and ignored.
     pub fn set_pong_data(&self, data: &[u8]) {
         match self {
             Self::Lan(s) => s.set_pong_data(data),
@@ -114,6 +121,7 @@ impl ServerSignaling {
     }
 }
 
+/// Signaling a client connects through: LAN discovery or HTTP.
 #[derive(Clone)]
 pub enum ClientSignaling {
     Lan(Arc<LanSignaling>),

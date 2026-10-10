@@ -35,6 +35,7 @@ type ConnectionKey = (String, u64);
 
 type SignalDispatchers = HashMap<ConnectionKey, mpsc::UnboundedSender<Signal>>;
 
+/// Answers offers arriving on its signaling and yields the connected sessions.
 pub struct NetherServer {
     incoming: mpsc::UnboundedReceiver<AcceptedSession>,
     local_addr: Addr,
@@ -47,6 +48,7 @@ impl NetherServer {
         Self::bind_with(signaling, ConnectionConfig::default()).await
     }
 
+    /// Fails with IdentityRequired when the signaling needs signed answers and the config has no identity.
     pub async fn bind_with(
         signaling: impl Into<ServerSignaling>,
         config: ConnectionConfig,
@@ -265,6 +267,7 @@ impl NetherServer {
         Ok(())
     }
 
+    /// Next connected session; fails with ConnectionClosed once the server is closed.
     pub async fn accept(&mut self) -> Result<AcceptedSession> {
         self.incoming
             .recv()
@@ -272,6 +275,7 @@ impl NetherServer {
             .ok_or(NetherError::ConnectionClosed)
     }
 
+    /// Stops signaling and closes sessions that were not yet accepted.
     pub async fn close(&mut self) -> Result<()> {
         self.cancel_token.cancel();
         self.incoming.close();

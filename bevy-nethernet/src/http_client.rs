@@ -1,3 +1,4 @@
+//! HTTP signaling client polled once per frame, with status queries and joins.
 use crate::connection::{ConnectionEvent, SessionPool};
 use crate::http_stream::{ClientTls, Drain, HttpStream};
 use crate::http_wire;
@@ -48,9 +49,11 @@ impl NetherHttpClientPlugin {
     }
 }
 
+/// Set holding the system that polls sockets and emits events.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NetherHttpClientSet;
 
+/// ConnectFailed covers a rejected join and a session that closes before opening; Disconnected only an open one.
 #[derive(Message, Debug)]
 pub enum NetherHttpClientEvent {
     Connected,
@@ -60,6 +63,7 @@ pub enum NetherHttpClientEvent {
     QueryFailed(QueryError),
 }
 
+/// Why a status query produced no server data.
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
     #[error("the connection to the server failed")]
@@ -70,6 +74,7 @@ pub enum QueryError {
     Response(#[from] StatusResponseError),
 }
 
+/// A server URL that cannot be joined; converts to an InvalidInput io error.
 #[derive(Debug, thiserror::Error)]
 pub enum JoinError {
     #[error("the server url has no scheme")]
@@ -261,6 +266,7 @@ impl NetherHttpClient {
         self.timeouts = timeouts;
     }
 
+    /// Sends GET /v1/join; the result arrives as ServerData or QueryFailed.
     pub fn query_server_data(&mut self, url: &str) -> std::io::Result<()> {
         let (target, addr) = Self::resolve(url)?;
         let stream = self.open_stream(&target, addr)?;
@@ -304,10 +310,12 @@ impl NetherHttpClient {
         }
     }
 
+    /// Offers made when negotiation times out.
     pub fn set_attempts(&mut self, attempts: u32) {
         self.attempts = attempts;
     }
 
+    /// TLS settings for https URLs; needs the tls feature.
     #[cfg(feature = "tls")]
     pub fn set_tls_config(&mut self, config: Arc<rustls::ClientConfig>) {
         self.tls = ClientTls::with_config(config);
@@ -325,6 +333,7 @@ impl NetherHttpClient {
         self.remote_addr
     }
 
+    /// The id names this client in the join path; the URL is http(s) and its port defaults to 80 or 443.
     pub fn connect(&mut self, local_network_id: String, server_url: String) -> std::io::Result<()> {
         self.join = None;
         self.pool = None;

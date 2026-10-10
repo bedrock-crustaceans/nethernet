@@ -1,3 +1,4 @@
+//! JSON Web Keys used to verify RS256 tokens.
 use crate::identity::error::{IdentityError, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -27,6 +28,7 @@ pub struct Jwk {
 }
 
 impl JwkSet {
+    /// Keys matching `kid`, or every key when the token names none.
     pub fn candidates(&self, kid: Option<&str>) -> Vec<&Jwk> {
         match kid {
             Some(kid) => self

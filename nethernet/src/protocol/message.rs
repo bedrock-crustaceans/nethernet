@@ -1,9 +1,12 @@
+//! Data-channel message framing: segmentation and reassembly (guide section 6.1).
 use crate::error::{ProtocolError, Result};
 use crate::protocol::constants::MAX_MESSAGE_SIZE;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+/// One data-channel payload: a count of segments still to come, then the bytes.
 #[derive(Debug, Clone)]
 pub struct MessageSegment {
+    /// Zero on the final segment of a message.
     pub remaining_segments: u8,
     pub data: Bytes,
 }
@@ -23,6 +26,7 @@ impl MessageSegment {
         buf.freeze()
     }
 
+    /// Fails below two bytes, so a segment with an empty body is invalid.
     pub fn decode(mut data: Bytes) -> Result<Self> {
         if data.len() < 2 {
             return Err(ProtocolError::MessageParse(format!(
@@ -40,6 +44,7 @@ impl MessageSegment {
     }
 }
 
+/// Reassembly buffer for one reliable message at a time.
 #[derive(Debug, Clone)]
 pub struct Message {
     expected_segments: u8,
@@ -54,6 +59,7 @@ impl Message {
         }
     }
 
+    /// Returns the message on its final segment; an out-of-sequence count clears the buffer and errors.
     pub fn add_segment(&mut self, segment: MessageSegment) -> Result<Option<Bytes>> {
         if self.expected_segments == 0 && segment.remaining_segments > 0 {
             self.expected_segments =
@@ -88,6 +94,7 @@ impl Message {
         }
     }
 
+    /// Fails with `MessageTooLarge` beyond 255 segments.
     #[inline(always)]
     pub fn split_into_segments(data: Bytes) -> Result<Vec<MessageSegment>> {
         let len = data.len();
@@ -125,6 +132,7 @@ impl Message {
         Ok(segments)
     }
 
+    /// Fails with `MessageTooLarge` unless the data fits one segment.
     pub fn encode_unreliable(data: Bytes) -> Result<Bytes> {
         if data.len() > MAX_MESSAGE_SIZE.saturating_sub(1) {
             return Err(ProtocolError::MessageTooLarge(data.len()));

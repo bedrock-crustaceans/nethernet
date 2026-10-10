@@ -2,6 +2,7 @@ use crate::error::Result;
 use crate::protocol::packet::discovery::ServerData;
 use nethernet::protocol::NetherCodec;
 
+/// Builder for server data served over LAN discovery and the HTTP status endpoint.
 #[derive(Debug, Clone)]
 pub struct NetherMotd {
     server_data: ServerData,
@@ -73,6 +74,7 @@ impl NetherMotd {
         self.server_data
     }
 
+    /// Encodes the server data as the binary record carried in discovery responses.
     pub fn encode(self) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
         self.server_data.serialize(&mut buf)?;

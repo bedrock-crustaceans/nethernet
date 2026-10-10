@@ -1,3 +1,4 @@
+//! ring-based builders and verifiers for identity assertions and their ES384 tokens.
 use crate::error::ProtocolError;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;

@@ -1,8 +1,10 @@
+//! Loading and generating the server identity key.
 use crate::error::{NetherError, Result};
 use nethernet::identity::ServerIdentity;
 use std::path::Path;
 use std::time::SystemTime;
 
+/// Loads the PEM at the path or, when absent, generates one and saves it with mode 0600 on Unix.
 pub async fn from_pem_or_create(
     pem: impl AsRef<Path>,
     domain: impl Into<String>,
@@ -25,6 +27,7 @@ pub async fn from_pem_or_create(
     }
 }
 
+/// Loads an existing identity PEM; a missing file is an error.
 pub async fn from_pem(pem: impl AsRef<Path>, domain: impl Into<String>) -> Result<ServerIdentity> {
     let contents = tokio::fs::read_to_string(pem.as_ref()).await?;
 
