@@ -181,6 +181,10 @@ impl NetherServer {
             .player(&Addr::new(network_id.clone(), connection_id))
             .await;
 
+        let signaled_host = signaling
+            .host(&Addr::new(network_id.clone(), connection_id))
+            .await;
+
         let ice_mode = if signaling.disable_trickle_ice() {
             IceMode::Full
         } else {
@@ -235,6 +239,9 @@ impl NetherServer {
 
         if let Some(player) = player {
             session.set_player(player).await;
+        }
+        if let Some(host) = signaled_host {
+            session.set_host(host).await;
         }
 
         let (signal_tx, signal_rx) = mpsc::unbounded_channel();

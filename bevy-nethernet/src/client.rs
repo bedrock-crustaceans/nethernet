@@ -13,7 +13,7 @@ use nethernet::session::{Channel, Session};
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const MAX_DATAGRAMS_PER_TICK: usize = 1024;
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -63,6 +63,8 @@ pub struct NetherClient {
     connected: bool,
     connecting_since: Option<Instant>,
     ready: bool,
+    remote_addr: Option<SocketAddr>,
+    rtt: Option<Duration>,
     identity: Option<ServerIdentity>,
     received: VecDeque<Box<[u8]>>,
     received_unreliable: VecDeque<Box<[u8]>>,
@@ -98,6 +100,8 @@ impl NetherClient {
             connected: false,
             connecting_since: None,
             ready: false,
+            remote_addr: None,
+            rtt: None,
             identity: None,
             received: VecDeque::new(),
             received_unreliable: VecDeque::new(),
@@ -116,6 +120,14 @@ impl NetherClient {
 
     pub fn is_connected(&self) -> bool {
         self.ready
+    }
+
+    pub fn rtt(&self) -> Option<Duration> {
+        self.rtt
+    }
+
+    pub fn remote_addr(&self) -> Option<SocketAddr> {
+        self.remote_addr
     }
 
     pub fn connect(&mut self, target_network_id: u64) -> std::io::Result<()> {
@@ -149,6 +161,8 @@ impl NetherClient {
         self.connected = true;
         self.connecting_since = Some(now);
         self.ready = false;
+        self.remote_addr = None;
+        self.rtt = None;
         Ok(())
     }
 
@@ -160,6 +174,8 @@ impl NetherClient {
         }
         if self.ready {
             self.ready = false;
+            self.remote_addr = None;
+            self.rtt = None;
             self.events.push_back(NetherClientEvent::Disconnected);
         }
     }
@@ -239,12 +255,14 @@ impl NetherClient {
 
         for ((), event) in events {
             match event {
-                ConnectionEvent::Ready if !self.ready => {
+                ConnectionEvent::Ready(addr) if !self.ready => {
                     self.ready = true;
+                    self.remote_addr = addr;
                     self.connecting_since = None;
                     self.events.push_back(NetherClientEvent::Connected);
                 }
-                ConnectionEvent::Ready => {}
+                ConnectionEvent::Ready(_) => {}
+                ConnectionEvent::Rtt(rtt) => self.rtt = Some(rtt),
                 ConnectionEvent::Message(Channel::Reliable, data) => self.received.push_back(data),
                 ConnectionEvent::Message(Channel::Unreliable, data) => {
                     self.received_unreliable.push_back(data)

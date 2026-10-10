@@ -53,6 +53,7 @@ async fn serve(config: HttpServerConfig) -> (String, NetherServer) {
 async fn offer_is_negotiated_over_the_endpoint() {
     let (url, mut listener) = serve(server_config()).await;
 
+    let asked_host = url.trim_start_matches("http://").to_string();
     tokio::spawn(async move {
         let AcceptedSession {
             session,
@@ -60,6 +61,7 @@ async fn offer_is_negotiated_over_the_endpoint() {
             ..
         } = listener.accept().await.unwrap();
         assert!(session.player().await.is_some());
+        assert_eq!(session.host().await, Some(asked_host));
 
         while let Ok(Some(data)) = reliable.recv().await {
             session.send(data).await.unwrap();

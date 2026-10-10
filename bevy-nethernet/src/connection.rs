@@ -35,8 +35,11 @@ const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// [`SessionOutput::Wait`] yet.
 const MAX_IDLE: Duration = Duration::from_secs(1);
 
+const RTT_REPORT_INTERVAL: Duration = Duration::from_secs(1);
+
 pub(crate) enum ConnectionEvent {
-    Ready,
+    Ready(Option<SocketAddr>),
+    Rtt(Duration),
     Message(Channel, Box<[u8]>),
     Failed,
 }
@@ -130,6 +133,8 @@ struct Entry {
     local_ufrag: String,
     remote_addr: Option<SocketAddr>,
     wait: Instant,
+    reported_rtt: Option<Duration>,
+    rtt_reported_at: Option<Instant>,
 }
 
 /// Owns the shared socket and every session, blocking on `recv_from` until a datagram
@@ -188,6 +193,8 @@ fn drive<K: Eq + Hash + Clone>(
                             local_ufrag,
                             remote_addr: None,
                             wait: Instant::now(),
+                            reported_rtt: None,
+                            rtt_reported_at: None,
                         },
                     );
                     let _ = ack.try_send(());
@@ -248,10 +255,8 @@ fn drive<K: Eq + Hash + Clone>(
                         let _ = socket.send_to(&data, to);
                     }
                     SessionOutput::Event(SessionEvent::Ready) => {
-                        if events
-                            .try_send((id.clone(), ConnectionEvent::Ready))
-                            .is_err()
-                        {
+                        let ready = ConnectionEvent::Ready(entry.connection.remote_addr());
+                        if events.try_send((id.clone(), ready)).is_err() {
                             return;
                         }
                     }
@@ -263,6 +268,22 @@ fn drive<K: Eq + Hash + Clone>(
                         }
                     }
                     SessionOutput::Wait(wait) => entry.wait = now + wait,
+                }
+            }
+
+            if let Some(rtt) = entry.connection.rtt()
+                && entry.reported_rtt != Some(rtt)
+                && entry
+                    .rtt_reported_at
+                    .is_none_or(|at| now.saturating_duration_since(at) >= RTT_REPORT_INTERVAL)
+            {
+                entry.reported_rtt = Some(rtt);
+                entry.rtt_reported_at = Some(now);
+                if events
+                    .try_send((id.clone(), ConnectionEvent::Rtt(rtt)))
+                    .is_err()
+                {
+                    return;
                 }
             }
         }

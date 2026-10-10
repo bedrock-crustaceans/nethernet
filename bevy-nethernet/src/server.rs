@@ -5,14 +5,15 @@ use bevy_ecs::prelude::*;
 use nethernet::connection::IceMode;
 use nethernet::prelude::{
     Answered, LanSignaler, LanSignalerConfig, LanSignalerInput, LanSignalerOutput, OfferPolicy,
-    Sans, ServerData, ServerIdentity, TokenTrust,
+    PlayerInfo, Sans, ServerData, ServerIdentity, TokenTrust,
 };
 use nethernet::protocol::{Signal, SignalType};
 use nethernet::session::Channel;
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
-use std::time::{Instant, SystemTime};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 const MAX_DATAGRAMS_PER_TICK: usize = 1024;
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -63,6 +64,9 @@ pub enum NetherServerEvent {
 struct SessionEntry {
     ready: bool,
     created: Instant,
+    remote_addr: Option<SocketAddr>,
+    rtt: Option<Duration>,
+    player: Option<Arc<PlayerInfo>>,
 }
 
 #[derive(Resource)]
@@ -136,6 +140,18 @@ impl NetherServer {
             .iter()
             .filter(|(_, entry)| entry.ready)
             .map(|(id, _)| id)
+    }
+
+    pub fn player(&self, id: &NetherSessionId) -> Option<Arc<PlayerInfo>> {
+        self.sessions.get(id)?.player.clone()
+    }
+
+    pub fn rtt(&self, id: &NetherSessionId) -> Option<Duration> {
+        self.sessions.get(id)?.rtt
+    }
+
+    pub fn remote_addr(&self, id: &NetherSessionId) -> Option<SocketAddr> {
+        self.sessions.get(id)?.remote_addr
     }
 
     pub fn send(
@@ -227,12 +243,14 @@ impl NetherServer {
                 continue;
             };
             match event {
-                ConnectionEvent::Ready if !entry.ready => {
+                ConnectionEvent::Ready(addr) if !entry.ready => {
                     entry.ready = true;
+                    entry.remote_addr = addr;
                     self.events
                         .push_back(NetherServerEvent::SessionConnected(id));
                 }
-                ConnectionEvent::Ready => {}
+                ConnectionEvent::Ready(_) => {}
+                ConnectionEvent::Rtt(rtt) => entry.rtt = Some(rtt),
                 ConnectionEvent::Message(Channel::Reliable, data) => {
                     self.received.push_back((id, data))
                 }
@@ -297,6 +315,7 @@ impl NetherServer {
             connection,
             signals,
             local_ufrag,
+            player,
             ..
         } = match answered {
             Ok(answered) => answered,
@@ -318,6 +337,9 @@ impl NetherServer {
             SessionEntry {
                 ready: false,
                 created: now,
+                remote_addr: None,
+                rtt: None,
+                player: player.map(Arc::new),
             },
         );
     }

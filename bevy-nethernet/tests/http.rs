@@ -68,6 +68,56 @@ fn client_connects_with_candidate_inference_disabled() {
     }));
 }
 
+#[test]
+fn a_connected_session_reports_its_address_and_round_trip_time() {
+    let mut server = NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |config| {
+        config.token_trust = None;
+    })
+    .unwrap();
+    let server_url = format!("http://{}", server.local_addr().unwrap());
+    let mut client = NetherHttpClient::new();
+    client.connect("5678".to_string(), server_url).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    assert!(spin(deadline, || {
+        server.update();
+        client.update();
+        client.is_connected() && server.sessions().next().is_some()
+    }));
+    let id = server.sessions().next().unwrap().clone();
+
+    assert!(
+        client.remote_addr().is_some(),
+        "client has no remote address"
+    );
+    assert!(
+        server.remote_addr(&id).is_some(),
+        "server has no remote address"
+    );
+
+    client.send(b"ping").unwrap();
+    assert!(spin(deadline, || {
+        server.update();
+        client.update();
+        server.recv().is_some()
+    }));
+    server.send(&id, b"pong").unwrap();
+    assert!(spin(deadline, || {
+        server.update();
+        client.update();
+        client.recv().is_some()
+    }));
+
+    assert!(
+        spin(deadline, || {
+            server.update();
+            client.update();
+            client.rtt().is_some() && server.rtt(&id).is_some()
+        }),
+        "no round-trip time was reported"
+    );
+}
+
 fn join_outcome(identity: Option<ServerIdentity>) -> (bool, Vec<NetherHttpClientEvent>) {
     let mut server =
         NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |_| {}).unwrap();
@@ -102,6 +152,29 @@ fn a_signed_client_joins_a_validating_server() {
     let (connected, events) = join_outcome(Some(identity));
 
     assert!(connected, "signed client did not connect: {events:?}");
+}
+
+#[test]
+fn a_signed_client_is_visible_to_the_server_as_a_player_on_a_host() {
+    let identity = ServerIdentity::generate("client", std::time::SystemTime::now()).unwrap();
+    let mut server =
+        NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |_| {}).unwrap();
+    let address = server.local_addr().unwrap();
+    let mut client = NetherHttpClient::new();
+    client.set_identity(identity);
+    client
+        .connect("5678".to_string(), format!("http://{address}"))
+        .unwrap();
+
+    assert!(spin(Instant::now() + Duration::from_secs(5), || {
+        server.update();
+        client.update();
+        client.is_connected() && server.sessions().next().is_some()
+    }));
+
+    let id = server.sessions().next().unwrap().clone();
+    assert!(server.player(&id).is_some(), "no player on the session");
+    assert_eq!(server.host(&id), Some(address.to_string().as_str()));
 }
 
 #[test]

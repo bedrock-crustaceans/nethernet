@@ -148,6 +148,8 @@ pub struct NetherHttpClient {
     connected: bool,
     connecting_since: Option<Instant>,
     ready: bool,
+    remote_addr: Option<SocketAddr>,
+    rtt: Option<Duration>,
     identity: Option<ServerIdentity>,
     events: VecDeque<NetherHttpClientEvent>,
     received: VecDeque<Box<[u8]>>,
@@ -167,6 +169,14 @@ impl NetherHttpClient {
         self.ready
     }
 
+    pub fn rtt(&self) -> Option<Duration> {
+        self.rtt
+    }
+
+    pub fn remote_addr(&self) -> Option<SocketAddr> {
+        self.remote_addr
+    }
+
     /// Starts joining the server at `server_url` (e.g. `http://example.com:19132`).
     /// Only plain HTTP is supported. Replaces any join or connection in progress.
     pub fn connect(&mut self, local_network_id: String, server_url: String) -> std::io::Result<()> {
@@ -174,6 +184,8 @@ impl NetherHttpClient {
         self.pool = None;
         self.connected = false;
         self.ready = false;
+        self.remote_addr = None;
+        self.rtt = None;
 
         let host = server_url.strip_prefix("http://").ok_or_else(|| {
             std::io::Error::new(ErrorKind::InvalidInput, "only http:// URLs are supported")
@@ -239,6 +251,8 @@ impl NetherHttpClient {
         self.connecting_since = None;
         if self.ready {
             self.ready = false;
+            self.remote_addr = None;
+            self.rtt = None;
             self.events.push_back(NetherHttpClientEvent::Disconnected);
         }
     }
@@ -331,12 +345,14 @@ impl NetherHttpClient {
 
             for ((), event) in events {
                 match event {
-                    ConnectionEvent::Ready if !self.ready => {
+                    ConnectionEvent::Ready(addr) if !self.ready => {
                         self.ready = true;
+                        self.remote_addr = addr;
                         self.connecting_since = None;
                         self.events.push_back(NetherHttpClientEvent::Connected);
                     }
-                    ConnectionEvent::Ready => {}
+                    ConnectionEvent::Ready(_) => {}
+                    ConnectionEvent::Rtt(rtt) => self.rtt = Some(rtt),
                     ConnectionEvent::Message(Channel::Reliable, data) => {
                         self.received.push_back(data)
                     }
@@ -350,6 +366,8 @@ impl NetherHttpClient {
                         self.connected = false;
                         self.connecting_since = None;
                         self.ready = false;
+                        self.remote_addr = None;
+                        self.rtt = None;
                         self.events.push_back(if was_ready {
                             NetherHttpClientEvent::Disconnected
                         } else {
@@ -369,6 +387,8 @@ impl NetherHttpClient {
             self.connected = false;
             self.connecting_since = None;
             self.ready = false;
+            self.remote_addr = None;
+            self.rtt = None;
             self.events.push_back(if was_ready {
                 NetherHttpClientEvent::Disconnected
             } else {

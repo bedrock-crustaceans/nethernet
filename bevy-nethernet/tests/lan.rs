@@ -97,6 +97,71 @@ fn a_signed_client_connects_to_a_validating_server() {
         client.update();
         client.is_connected() && server.sessions().next().is_some()
     }));
+
+    let id = server.sessions().next().unwrap().clone();
+    assert!(server.player(&id).is_some(), "no player on the session");
+}
+
+#[test]
+fn a_connected_session_reports_its_address_and_round_trip_time() {
+    const REPORT_PORT: u16 = 7583;
+    let mut server = NetherServer::new(
+        1234,
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, REPORT_PORT)),
+        |config| config.broadcast_interval = Duration::from_millis(50),
+    )
+    .unwrap();
+    server.set_server_data(ServerData::new("Test Server".into(), "World".into()));
+    let mut client = NetherClient::new(5678, |config| {
+        config.broadcast_address = Some(SocketAddr::from((Ipv4Addr::BROADCAST, REPORT_PORT)));
+        config.broadcast_interval = Duration::from_millis(50);
+    })
+    .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    assert!(spin(deadline, || {
+        server.update();
+        client.update();
+        client.discovered().contains_key(&1234)
+    }));
+    client.connect(1234).unwrap();
+    assert!(spin(deadline, || {
+        server.update();
+        client.update();
+        client.is_connected() && server.sessions().next().is_some()
+    }));
+    let id = server.sessions().next().unwrap().clone();
+
+    assert!(
+        client.remote_addr().is_some(),
+        "client has no remote address"
+    );
+    assert!(
+        server.remote_addr(&id).is_some(),
+        "server has no remote address"
+    );
+
+    client.send(b"ping").unwrap();
+    assert!(spin(deadline, || {
+        server.update();
+        client.update();
+        server.recv().is_some()
+    }));
+    server.send(&id, b"pong").unwrap();
+    assert!(spin(deadline, || {
+        server.update();
+        client.update();
+        client.recv().is_some()
+    }));
+
+    assert!(
+        spin(deadline, || {
+            server.update();
+            client.update();
+            client.rtt().is_some() && server.rtt(&id).is_some()
+        }),
+        "no round-trip time was reported"
+    );
 }
 
 mod admission {

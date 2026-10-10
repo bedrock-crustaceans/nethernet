@@ -8,13 +8,14 @@ use http::{Response, StatusCode};
 use nethernet::admission::{Answered, OfferPolicy};
 use nethernet::connection::IceMode;
 use nethernet::prelude::{
-    HttpSignaler, HttpSignalerConfig, HttpSignalerInput, HttpSignalerOutput, Offer, RejectReason,
-    Sans, ServerData, ServerIdentity,
+    HttpSignaler, HttpSignalerConfig, HttpSignalerInput, HttpSignalerOutput, Offer, PlayerInfo,
+    RejectReason, Sans, ServerData, ServerIdentity,
 };
 use nethernet::session::Channel;
 use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 const MAX_ACCEPTS_PER_TICK: usize = 64;
@@ -86,6 +87,10 @@ impl TcpConn {
 struct SessionEntry {
     ready: bool,
     created: Instant,
+    remote_addr: Option<SocketAddr>,
+    rtt: Option<Duration>,
+    player: Option<Arc<PlayerInfo>>,
+    host: Option<String>,
 }
 
 #[derive(Resource)]
@@ -162,6 +167,22 @@ impl NetherHttpServer {
             .iter()
             .filter(|(_, entry)| entry.ready)
             .map(|(id, _)| id)
+    }
+
+    pub fn player(&self, id: &NetherSessionId) -> Option<Arc<PlayerInfo>> {
+        self.sessions.get(id)?.player.clone()
+    }
+
+    pub fn host(&self, id: &NetherSessionId) -> Option<&str> {
+        self.sessions.get(id)?.host.as_deref()
+    }
+
+    pub fn rtt(&self, id: &NetherSessionId) -> Option<Duration> {
+        self.sessions.get(id)?.rtt
+    }
+
+    pub fn remote_addr(&self, id: &NetherSessionId) -> Option<SocketAddr> {
+        self.sessions.get(id)?.remote_addr
     }
 
     pub fn send(
@@ -418,6 +439,7 @@ impl NetherHttpServer {
             policy = policy.with_identity(identity);
         }
 
+        let signaled_player = offer.player.clone().map(|player| Arc::new(*player));
         let answered = policy
             .admit(&offer.signal(), offer.client_address, SystemTime::now())
             .and_then(|admitted| admitted.answer(self.session_local_addr, now));
@@ -426,6 +448,7 @@ impl NetherHttpServer {
                 connection,
                 signals,
                 local_ufrag,
+                player,
                 ..
             }) => {
                 let Some(answer) = signals.into_iter().next() else {
@@ -449,6 +472,10 @@ impl NetherHttpServer {
                     SessionEntry {
                         ready: false,
                         created: now,
+                        remote_addr: None,
+                        rtt: None,
+                        player: player.map(Arc::new).or(signaled_player),
+                        host: offer.host,
                     },
                 );
             }
@@ -472,12 +499,14 @@ impl NetherHttpServer {
                 continue;
             };
             match event {
-                ConnectionEvent::Ready if !entry.ready => {
+                ConnectionEvent::Ready(addr) if !entry.ready => {
                     entry.ready = true;
+                    entry.remote_addr = addr;
                     self.events
                         .push_back(NetherHttpServerEvent::SessionConnected(id));
                 }
-                ConnectionEvent::Ready => {}
+                ConnectionEvent::Ready(_) => {}
+                ConnectionEvent::Rtt(rtt) => entry.rtt = Some(rtt),
                 ConnectionEvent::Message(Channel::Reliable, data) => {
                     self.received.push_back((id, data))
                 }

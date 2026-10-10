@@ -89,6 +89,7 @@ enum Command {
     SetServerData(Box<ServerData>),
     Address(u64, oneshot::Sender<Option<SocketAddr>>),
     Player(u64, oneshot::Sender<Option<Arc<PlayerInfo>>>),
+    Host(u64, oneshot::Sender<Option<String>>),
 }
 
 struct Response {
@@ -227,6 +228,7 @@ impl HttpSignalingServer {
             let mut waiting: HashMap<u64, oneshot::Sender<Response>> = HashMap::new();
             let mut addresses: HashMap<u64, SocketAddr> = HashMap::new();
             let mut players: HashMap<u64, Arc<PlayerInfo>> = HashMap::new();
+            let mut hosts: HashMap<u64, String> = HashMap::new();
             let mut wake = Instant::now() + MAX_IDLE;
 
             loop {
@@ -273,6 +275,7 @@ impl HttpSignalingServer {
                             }
                             addresses.remove(&connection_id);
                             players.remove(&connection_id);
+                            hosts.remove(&connection_id);
                         }
                         Some(Command::Reject { connection_id, reason }) => {
                             if let Err(e) = signaler
@@ -282,12 +285,16 @@ impl HttpSignalingServer {
                             }
                             addresses.remove(&connection_id);
                             players.remove(&connection_id);
+                            hosts.remove(&connection_id);
                         }
                         Some(Command::SetServerData(data)) => {
                             let _ = signaler.handle(HttpSignalerInput::SetServerData(data));
                         }
                         Some(Command::Address(connection_id, reply)) => {
                             let _ = reply.send(addresses.get(&connection_id).copied());
+                        }
+                        Some(Command::Host(connection_id, reply)) => {
+                            let _ = reply.send(hosts.get(&connection_id).cloned());
                         }
                         Some(Command::Player(connection_id, reply)) => {
                             let _ = reply.send(players.get(&connection_id).cloned());
@@ -320,6 +327,9 @@ impl HttpSignalingServer {
                             let offered = offer.signal();
                             if let Some(address) = offer.client_address {
                                 addresses.insert(offer.connection_id, address);
+                            }
+                            if let Some(host) = offer.host {
+                                hosts.insert(offer.connection_id, host);
                             }
                             if let Some(player) = offer.player {
                                 players.insert(offer.connection_id, Arc::from(*player));
@@ -414,6 +424,14 @@ impl HttpSignalingServer {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
             .send(Command::Player(addr.connection_id, reply_tx))
+            .ok()?;
+        reply_rx.await.ok().flatten()
+    }
+
+    pub async fn host(&self, addr: &Addr) -> Option<String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.commands
+            .send(Command::Host(addr.connection_id, reply_tx))
             .ok()?;
         reply_rx.await.ok().flatten()
     }

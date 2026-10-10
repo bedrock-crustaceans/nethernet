@@ -99,6 +99,16 @@ impl ServerSignaling {
         }
     }
 
+    /// The host an HTTP join asked for.
+    ///
+    /// LAN discovery has no request to take one from, so it has none to report.
+    pub async fn host(&self, addr: &Addr) -> Option<String> {
+        match self {
+            Self::Lan(_) => None,
+            Self::Http(s) => s.host(addr).await,
+        }
+    }
+
     /// Whether the signaling validates the identity of an offer before it reaches the
     /// transport, so the transport must not validate it again.
     ///

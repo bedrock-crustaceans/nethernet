@@ -15,4 +15,6 @@ pub(crate) enum Command {
     Rtt(oneshot::Sender<Option<Duration>>),
     SetPlayer(Arc<PlayerInfo>),
     Player(oneshot::Sender<Option<Arc<PlayerInfo>>>),
+    SetHost(String),
+    Host(oneshot::Sender<Option<String>>),
 }

@@ -180,6 +180,7 @@ impl Session {
             let mut remote_addr = None;
             let mut rtt = None;
             let mut player: Option<Arc<PlayerInfo>> = None;
+            let mut host: Option<String> = None;
 
             'drive: loop {
                 tokio::select! {
@@ -219,6 +220,12 @@ impl Session {
                         }
                         Some(Command::Player(reply)) => {
                             let _ = reply.send(player.clone());
+                        }
+                        Some(Command::SetHost(new_host)) => {
+                            host = Some(new_host);
+                        }
+                        Some(Command::Host(reply)) => {
+                            let _ = reply.send(host.clone());
                         }
                         None => break,
                     },
@@ -339,6 +346,21 @@ impl Session {
     pub async fn player(&self) -> Option<Arc<PlayerInfo>> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self.command_tx.send(Command::Player(reply_tx)).is_err() {
+            return None;
+        }
+        reply_rx.await.ok().flatten()
+    }
+
+    /// Records the host the connection was offered to.
+    pub async fn set_host(&self, host: String) {
+        let _ = self.command_tx.send(Command::SetHost(host));
+    }
+
+    /// The host an HTTP join asked for, or [`None`] when the connection did not arrive
+    /// over HTTP signaling or the request named none.
+    pub async fn host(&self) -> Option<String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self.command_tx.send(Command::Host(reply_tx)).is_err() {
             return None;
         }
         reply_rx.await.ok().flatten()
