@@ -7,7 +7,6 @@ use std::net::{SocketAddr, TcpStream};
 #[cfg(feature = "tls")]
 use std::sync::Arc;
 
-/// Outcome of one attempt to write the queued outbound bytes.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Drain {
     Empty,
@@ -16,14 +15,12 @@ pub(crate) enum Drain {
     Complete,
 }
 
-/// Outcome of one attempt to finish the connection.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Shutdown {
     Pending,
     Done,
 }
 
-/// A non-blocking HTTP connection: a wire plus its inbound and outbound buffers.
 pub(crate) struct HttpStream {
     wire: Wire,
     pub(crate) inbound: Vec<u8>,
@@ -86,8 +83,6 @@ impl HttpStream {
         }
     }
 
-    /// Starts the TLS session of an accepted connection once the plaintext preamble is
-    /// consumed, handing it whatever was already read.
     #[cfg(feature = "tls")]
     pub(crate) fn establish(&mut self) -> Result<Inbound, WireError> {
         if !self.wire.awaiting_session() {
@@ -118,9 +113,6 @@ impl HttpStream {
         Ok(socket.into())
     }
 
-    /// A non-blocking `connect()` reports that it hasn't completed yet as `EWOULDBLOCK` on
-    /// Windows (mapped to [`ErrorKind::WouldBlock`]), but as `EINPROGRESS` on Unix, which
-    /// `ErrorKind` has no variant for.
     fn connect_in_progress(e: &std::io::Error) -> bool {
         if e.kind() == ErrorKind::WouldBlock {
             return true;
@@ -136,7 +128,6 @@ impl HttpStream {
     }
 }
 
-/// The TLS configuration a server wraps accepted connections in, if any.
 #[derive(Clone, Default)]
 pub(crate) struct ServerTls {
     #[cfg(feature = "tls")]
@@ -160,7 +151,6 @@ impl ServerTls {
     }
 }
 
-/// The TLS configuration a client dials secure targets with, if any.
 #[derive(Clone, Default)]
 pub(crate) struct ClientTls {
     #[cfg(feature = "tls")]

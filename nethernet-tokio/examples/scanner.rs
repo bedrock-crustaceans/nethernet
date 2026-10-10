@@ -1,5 +1,3 @@
-//! Lists the NetherNet servers advertising themselves on the local network.
-
 use nethernet_tokio::signaling::lan::scan;
 use std::time::Duration;
 

@@ -1,5 +1,3 @@
-//! End-to-end negotiation over the HTTP endpoint of a server.
-
 use bytes::Bytes;
 use nethernet_tokio::signaling::http::{HttpServerConfig, HttpSignaling, HttpSignalingServer};
 use nethernet_tokio::{
@@ -32,8 +30,6 @@ fn client_config() -> ConnectionConfig {
     }
 }
 
-// reqwest is built without a default TLS provider, and these tests may run before
-// anything else in the process has installed one.
 fn http_client() -> reqwest::ClientBuilder {
     let _ = rustls::crypto::ring::default_provider().install_default();
     reqwest::Client::builder()
@@ -251,7 +247,6 @@ async fn a_peer_holding_too_many_connections_is_refused() {
 
     let held = tokio::net::TcpStream::connect(&addr).await.unwrap();
 
-    // The second connection is accepted by the kernel and closed without an answer
     let client = http_client().pool_max_idle_per_host(0).build().unwrap();
     let refused = client
         .get(format!("{url}/v1/join"))

@@ -1,9 +1,3 @@
-//! Sans-IO implementation of the NetherNet protocol.
-//!
-//! Every type in this crate is driven by feeding it inputs and polling it for outputs,
-//! so it performs no IO of its own and can be embedded in any runtime. The
-//! `nethernet-tokio` crate drives these state machines on top of Tokio.
-
 pub mod admission;
 pub mod connection;
 pub mod error;

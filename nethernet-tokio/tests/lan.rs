@@ -1,5 +1,3 @@
-//! End-to-end negotiation over LAN discovery.
-
 use nethernet::prelude::TokenTrust;
 use nethernet_tokio::signaling::lan::{LanConfig, LanSignaling};
 use nethernet_tokio::{AcceptedSession, ConnectionConfig, NetherClient, NetherServer, ServerData};

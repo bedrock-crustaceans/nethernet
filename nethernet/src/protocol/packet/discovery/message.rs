@@ -1,20 +1,11 @@
-//! Discovery message packet.
-//!
-//! Sent by both server and client to negotiate a NetherNet connection
-//! and exchange ICE candidates.
-
 use crate::error::{ProtocolError, Result};
 use crate::protocol::codec::{NetherCodec, read_bytes_u32, write_bytes_u32};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Read, Write};
 
-/// MessagePacket is used for negotiating WebRTC connections.
-/// It contains the recipient network ID and signaling data.
 #[derive(Debug, Clone, Default)]
 pub struct MessagePacket {
-    /// Network ID of the recipient (not the connection ID)
     pub recipient_id: u64,
-    /// Signaling data (string form of Signal)
     pub data: String,
 }
 
@@ -25,8 +16,6 @@ impl MessagePacket {
 }
 
 impl NetherCodec for MessagePacket {
-    /// Writes the recipient ID as a little-endian u64, followed by the data as a
-    /// 32-bit length-prefixed byte sequence.
     fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_u64::<LittleEndian>(self.recipient_id)?;
         write_bytes_u32(writer, self.data.as_bytes())?;

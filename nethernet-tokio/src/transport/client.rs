@@ -20,7 +20,6 @@ use tokio::net::UdpSocket;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::ReusableBoxFuture;
 
-/// Parses the error code of a `CONNECTERROR` signal.
 pub(crate) fn parse_error_code(data: &str) -> SignalErrorCode {
     data.trim().parse::<u32>().map_or(
         SignalErrorCode::SignalingUnknownError,
@@ -28,9 +27,6 @@ pub(crate) fn parse_error_code(data: &str) -> SignalErrorCode {
     )
 }
 
-/// Keeps forwarding further signals for `(remote_network_id, connection_id)` into the
-/// now-running connection, until either the signal stream ends or the connection stops
-/// (which drops the driver's command receiver, so `command_tx.send` starts failing).
 fn spawn_late_signal_forwarder<St>(
     mut signals: St,
     connection_id: u64,
@@ -54,7 +50,6 @@ fn spawn_late_signal_forwarder<St>(
     });
 }
 
-/// NetherNet stream - data transmission over a NetherNet session.
 struct SessionStream {
     receiver: SessionReceiver,
 }
@@ -67,7 +62,6 @@ impl Stream for SessionStream {
     }
 }
 
-/// NetherNet stream - data transmission over a NetherNet session.
 pub struct NetherClient {
     session: Session,
     unreliable: SessionReceiver,
@@ -77,10 +71,6 @@ pub struct NetherClient {
 }
 
 impl NetherClient {
-    /// Establishes a NetherClient with the remote network referenced by the ID.
-    ///
-    /// An offer is signaled with the parameters of a freshly created session, and the
-    /// answer signaled back by the remote connection is used to complete the connection.
     pub async fn connect(
         signaling: impl Into<ClientSignaling>,
         remote_network_id: String,
@@ -88,12 +78,6 @@ impl NetherClient {
         Self::connect_with(signaling, remote_network_id, ConnectionConfig::default()).await
     }
 
-    /// Establishes a NetherClient using the timeouts of the given configuration.
-    ///
-    /// A negotiation that runs out of time is retried until the configured number of
-    /// attempts is used up. Every attempt negotiates under a connection ID of its own,
-    /// since a remote connection that answers the previous offer too late would answer an
-    /// ID this side no longer waits for.
     pub async fn connect_with(
         signaling: impl Into<ClientSignaling>,
         remote_network_id: String,
@@ -133,7 +117,6 @@ impl NetherClient {
                     .await;
             }
 
-            // Anything else is an answer this side understood, so another offer changes nothing
             if !matches!(error, NetherError::Timeout) || attempt == attempts {
                 return Err(error);
             }
@@ -148,8 +131,6 @@ impl NetherClient {
         Err(NetherError::Timeout)
     }
 
-    /// Negotiates the connection, reporting the error code to be signaled back to the
-    /// remote connection when a step fails.
     async fn negotiate(
         signaling: &ClientSignaling,
         remote_network_id: &str,
@@ -192,7 +173,6 @@ impl NetherClient {
             .next()
             .expect("Connection::connect always returns an offer signal first");
 
-        // A server that validates identities has nothing to accept without one
         let offer_data = match &config.identity {
             Some(identity) => identity.augment(&offer.data).map_err(|e| {
                 (
@@ -217,11 +197,6 @@ impl NetherClient {
             signaling.signal(trickled).await.map_err(|e| (None, e))?;
         }
 
-        // Under trickle ICE, the answer and its trailing candidate are two separate
-        // signals that can arrive in either order, and the session only starts DTLS/SCTP
-        // once *both* the remote description and a remote candidate have been applied -
-        // so both are awaited here (under full ICE, the candidate is embedded in the
-        // answer's SDP itself, so there is nothing further to wait for).
         let mut need_candidate = ice_mode == IceMode::Trickle;
         let deadline = tokio::time::Instant::now() + config.timeouts.negotiation;
 
@@ -308,8 +283,6 @@ impl NetherClient {
         Ok(Self::from_session(session, reliable, unreliable))
     }
 
-    /// Constructs a NetherClient from an existing Session and its two channel
-    /// receivers.
     pub(crate) fn from_session(
         session: Session,
         reliable: SessionReceiver,
@@ -324,47 +297,38 @@ impl NetherClient {
         }
     }
 
-    /// Transmits a payload to the remote endpoint associated with this stream.
     pub async fn send(&self, data: Bytes) -> Result<()> {
         self.session.send(data).await
     }
 
-    /// Transmits a payload over the unreliable data channel of this stream.
     pub async fn send_unreliable(&self, data: Bytes) -> Result<()> {
         self.session.send_unreliable(data).await
     }
 
-    /// Receive the next available data frame from the unreliable data channel.
     pub async fn recv_unreliable(&mut self) -> Result<Option<Bytes>> {
         self.unreliable.recv().await
     }
 
-    /// Receive the next available data frame from this stream.
     pub async fn recv(&mut self) -> Result<Option<Bytes>> {
         self.reader.get_mut().receiver.recv().await
     }
 
-    /// Close the stream and its underlying session.
     pub async fn close(&self) -> Result<()> {
         self.session.close().await
     }
 
-    /// Get the address of the remote endpoint for this stream.
     pub async fn remote_addr(&self) -> Addr {
         self.session.remote_addr().await
     }
 
-    /// Get the local address of this stream.
     pub async fn local_addr(&self) -> Addr {
         self.session.local_addr().await
     }
 
-    /// The current round-trip-time estimate, once the data channels are open.
     pub async fn rtt(&self) -> Option<std::time::Duration> {
         self.session.rtt().await
     }
 
-    /// Splits the stream into its session and the receivers of its two data channels.
     pub fn into_accepted(self) -> AcceptedSession {
         AcceptedSession {
             session: self.session,
@@ -373,7 +337,6 @@ impl NetherClient {
         }
     }
 
-    /// Access the underlying session.
     pub fn session(&self) -> Session {
         self.session.clone()
     }

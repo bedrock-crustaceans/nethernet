@@ -1,5 +1,3 @@
-//! Signaling against the HTTP endpoint of a server.
-
 use futures::StreamExt;
 use nethernet_tokio::signaling::http::HttpSignaling;
 use nethernet_tokio::{NetherError, Signal, SignalType};

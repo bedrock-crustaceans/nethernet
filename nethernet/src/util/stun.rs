@@ -1,20 +1,7 @@
-//! Reading just enough of a STUN message to route it, without a full ICE agent.
-//!
-//! A driver sharing one socket across many connections can't tell which one a datagram
-//! is for by address alone until ICE settles on a remote address - before that, only
-//! the STUN binding request's `USERNAME` attribute says so: RFC 5389 §15.3 (as ICE
-//! uses it, RFC 8445 §7.1.3) sets it to `"{local ufrag}:{remote ufrag}"`, and the local
-//! half is exactly the `ufrag` a [`crate::session::Session`] generated for itself and
-//! handed back in its offer/answer [`crate::protocol::webrtc::Description`].
-
 use rtc::stun::attributes::ATTR_USERNAME;
 use rtc::stun::message::{Message, is_stun_message};
 use rtc::stun::textattrs::Username;
 
-/// The local ICE ufrag a STUN binding message names, if it is one.
-///
-/// Matches this against the `ufrag` handed back from [`crate::session::Session::new`]
-/// for each not-yet-settled connection to find which one a datagram belongs to.
 pub fn local_ufrag(datagram: &[u8]) -> Option<String> {
     if !is_stun_message(datagram) {
         return None;

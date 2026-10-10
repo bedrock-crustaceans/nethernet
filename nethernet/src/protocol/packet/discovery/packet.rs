@@ -1,5 +1,3 @@
-//! The [`Packets`] enum and the envelope `encode`/`decode` helpers for discovery packets.
-
 use super::crypto::{compute_checksum, decrypt, encrypt, verify_checksum};
 use super::{MessagePacket, RequestPacket, ResponsePacket};
 use crate::error::{ProtocolError, Result};
@@ -8,7 +6,6 @@ use crate::protocol::constants::{ID_MESSAGE_PACKET, ID_REQUEST_PACKET, ID_RESPON
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Read, Write};
 
-/// The concrete discovery packets carried inside the envelope.
 pub enum Packets {
     Request(RequestPacket),
     Response(ResponsePacket),
@@ -16,7 +13,6 @@ pub enum Packets {
 }
 
 impl Packets {
-    /// Returns the unique ID of the packet.
     pub fn id(&self) -> u16 {
         match self {
             Packets::Request(_) => ID_REQUEST_PACKET,
@@ -34,18 +30,13 @@ impl Packets {
     }
 }
 
-/// Header of a discovery packet.
 #[derive(Debug, Clone)]
 pub struct Header {
-    /// Packet ID
     pub packet_id: u16,
-    /// Sender network ID
     pub sender_id: u64,
 }
 
 impl NetherCodec for Header {
-    /// Serializes the packet ID and sender ID (both little-endian), followed by 8 bytes
-    /// of padding.
     fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_u16::<LittleEndian>(self.packet_id)?;
         writer.write_u64::<LittleEndian>(self.sender_id)?;
@@ -71,11 +62,7 @@ impl NetherCodec for Header {
     }
 }
 
-/// Encodes a discovery packet together with a sender ID into the wire format: a 32-byte
-/// HMAC-SHA256 checksum followed by the AES-ECB encrypted payload (a length prefix, the
-/// header, and the packet-specific data).
 pub fn encode(packet: &Packets, sender_id: u64) -> Result<Vec<u8>> {
-    // Typical size: 2 (length) + 18 (header) + packet data, rounded up to the AES block size
     let mut payload = Vec::with_capacity(2 + 18 + 64 + 16);
 
     payload.extend_from_slice(&[0u8; 2]);
@@ -87,7 +74,6 @@ pub fn encode(packet: &Packets, sender_id: u64) -> Result<Vec<u8>> {
     header.serialize(&mut payload)?;
     packet.serialize(&mut payload)?;
 
-    // The length excludes itself but includes the header and packet data
     let data_len = payload.len() - 2;
     if data_len > u16::MAX as usize {
         return Err(ProtocolError::MessageTooLarge(data_len));
@@ -104,10 +90,6 @@ pub fn encode(packet: &Packets, sender_id: u64) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Decodes and verifies a discovery packet, returning the parsed packet and its sender ID.
-///
-/// Reverses [`encode`]: decrypts the payload, verifies the checksum, then deserializes the
-/// concrete type named by the header's packet ID.
 pub fn decode(data: &[u8]) -> Result<(Packets, u64)> {
     if data.len() < 32 {
         return Err(ProtocolError::Other("packet too short".to_string()));

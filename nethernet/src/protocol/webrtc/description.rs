@@ -1,16 +1,3 @@
-//! Session descriptions exchanged in NetherNet's signaling.
-//!
-//! NetherNet expects a single `application` media description carrying the ICE, DTLS
-//! and SCTP parameters of the remote transports. The description is built by hand
-//! instead of through a peer connection, as vanilla clients reject the descriptions
-//! produced by a generic WebRTC stack.
-//!
-//! Two shapes are produced depending on the signaling transport (see the NetherNet HTTP
-//! signaling guide, sections 2 and 4): LAN/UDP signaling uses trickle ICE (no candidates
-//! embedded, `a=ice-options:trickle`, candidates follow as separate `CANDIDATEADD`
-//! signals), while HTTP signaling always uses full ICE (every candidate embedded
-//! directly, terminated by `a=end-of-candidates`).
-
 use crate::error::ProtocolError;
 use crate::protocol::constants::SCTP_MAX_MESSAGE_SIZE;
 use crate::protocol::webrtc::candidate;
@@ -27,12 +14,8 @@ use rtc::sdp::util::ConnectionRole;
 use std::io::Cursor;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The SCTP port announced in session descriptions.
 pub const SCTP_PORT: u16 = 5000;
 
-/// The DTLS role the local connection announces in its own description. This is the
-/// role announced, not necessarily the role the transport ends up acting as once the
-/// remote description is applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DtlsRole {
     Client,
@@ -40,25 +23,16 @@ pub enum DtlsRole {
     Auto,
 }
 
-/// Parameters required to start the ICE, DTLS and SCTP transports of a connection.
 #[derive(Clone)]
 pub struct Description {
     pub ice: Credentials,
     pub dtls_role: DtlsRole,
-    /// `(algorithm, value)`, e.g. `("sha-256", "AA:BB:...")`.
     pub fingerprint: (String, String),
     pub sctp_max_message_size: u32,
-    /// The raw `a=identity` attribute value, if present (see
-    /// [`crate::protocol::webrtc::identity`], and the NetherNet HTTP signaling guide,
-    /// section 5). `Description` treats this as an opaque string - building and
-    /// verifying its contents is the `identity` module's job.
     pub identity: Option<String>,
 }
 
 impl Description {
-    /// Encodes the description for trickle ICE (NetherNet's LAN/UDP signaling): no
-    /// candidates are embedded; `a=ice-options:trickle` tells the remote to expect them
-    /// via separate `CANDIDATEADD` signals instead.
     pub fn encode_trickle(&self) -> String {
         let media = self
             .base_media()
@@ -66,9 +40,6 @@ impl Description {
         Self::session(media, self.identity.as_deref()).marshal()
     }
 
-    /// Encodes the description for full ICE (NetherNet's HTTP signaling): every
-    /// candidate already gathered is embedded directly, terminated by
-    /// `a=end-of-candidates`.
     pub fn encode_full(&self, candidates: &[Candidate]) -> String {
         let mut media = self.base_media();
         for (index, c) in candidates.iter().enumerate() {
@@ -78,8 +49,6 @@ impl Description {
         Self::session(media, self.identity.as_deref()).marshal()
     }
 
-    /// Parses the SDP signaled by a remote connection, returning the description and
-    /// any ICE candidates embedded directly in it (empty under trickle ICE).
     pub fn parse(sdp: &str) -> Result<(Description, Vec<Candidate>), ProtocolError> {
         let session = SessionDescription::unmarshal(&mut Cursor::new(sdp))
             .map_err(|e| ProtocolError::Other(format!("decode session description: {e}")))?;
@@ -142,11 +111,6 @@ impl Description {
         ))
     }
 
-    /// Builds the session-level SDP wrapper around `media`. `identity`, if given, is
-    /// the `a=identity` attribute value (see [`crate::protocol::webrtc::identity`]);
-    /// per the guide's section 5, it is a session-level attribute that must come before
-    /// the first `m=` line, which placing it among the other session attributes here
-    /// satisfies regardless of the marshaled attribute order.
     fn session(media: MediaDescription, identity: Option<&str>) -> SessionDescription {
         let mut attributes = vec![
             Attribute {
@@ -228,7 +192,6 @@ impl Description {
     }
 }
 
-/// Returns the value of a required media level attribute.
 fn attribute<'a>(media: &'a MediaDescription, key: &str) -> Result<&'a str, ProtocolError> {
     match media.attribute(key) {
         Some(Some(value)) => Ok(value),
@@ -237,7 +200,6 @@ fn attribute<'a>(media: &'a MediaDescription, key: &str) -> Result<&'a str, Prot
     }
 }
 
-/// Returns the connection role to be signaled for the local DTLS role.
 fn connection_role(role: DtlsRole) -> ConnectionRole {
     match role {
         DtlsRole::Server => ConnectionRole::Actpass,
@@ -245,8 +207,6 @@ fn connection_role(role: DtlsRole) -> ConnectionRole {
     }
 }
 
-/// A locally-unique-enough session id for the `o=` line; NetherNet does not rely on
-/// this for anything beyond distinguishing SDP versions, so wall-clock time is enough.
 fn session_id() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -354,7 +314,6 @@ mod tests {
         with_identity.identity = Some("opaque-identity-blob".to_string());
 
         let encoded = with_identity.encode_trickle();
-        // Session-level: appears before the first `m=` line.
         let identity_pos = encoded.find("a=identity:opaque-identity-blob").unwrap();
         let media_pos = encoded.find("m=application").unwrap();
         assert!(identity_pos < media_pos);

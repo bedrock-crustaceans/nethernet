@@ -1,23 +1,17 @@
-//! Sets of addresses written as single hosts or CIDR ranges.
-
 use crate::util::endpoint;
 use ipnet::{IpNet, Ipv4Net};
 use std::net::IpAddr;
 
-/// A set of addresses written as single hosts or CIDR ranges, such as `10.0.0.0/8` or
-/// `2001:db8::/32`. An address with no prefix matches only itself.
 #[derive(Debug, Clone, Default)]
 pub struct IpRangeSet {
     ranges: Vec<IpNet>,
 }
 
 impl IpRangeSet {
-    /// Returns a set that matches nothing.
     pub fn empty() -> Self {
         Self::default()
     }
 
-    /// Parses the entries, skipping any that are not an address or a range.
     pub fn parse<I, S>(entries: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -38,12 +32,10 @@ impl IpRangeSet {
         Self { ranges }
     }
 
-    /// Reports whether the set matches nothing.
     pub fn is_empty(&self) -> bool {
         self.ranges.is_empty()
     }
 
-    /// Reports whether the address falls into one of the ranges.
     pub fn contains(&self, address: IpAddr) -> bool {
         let address = endpoint::normalize(address);
         self.ranges.iter().any(|range| range.contains(&address))

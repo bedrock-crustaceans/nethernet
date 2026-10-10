@@ -2,18 +2,13 @@ use crate::error::{ProtocolError, Result};
 use crate::protocol::constants::MAX_MESSAGE_SIZE;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-/// Message segment
-/// First byte contains segment count, remainder contains data
 #[derive(Debug, Clone)]
 pub struct MessageSegment {
-    /// Remaining segment count (0 = last segment)
     pub remaining_segments: u8,
-    /// Segment data
     pub data: Bytes,
 }
 
 impl MessageSegment {
-    /// Creates a [`MessageSegment`] with the given remaining segment count and payload.
     pub fn new(remaining_segments: u8, data: Bytes) -> Self {
         Self {
             remaining_segments,
@@ -21,7 +16,6 @@ impl MessageSegment {
         }
     }
 
-    /// Serializes the segment: the remaining-segment count followed by the payload.
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(1 + self.data.len());
         buf.put_u8(self.remaining_segments);
@@ -29,10 +23,6 @@ impl MessageSegment {
         buf.freeze()
     }
 
-    /// Decode a MessageSegment from bytes.
-    ///
-    /// This is zero-copy as the input `Bytes` is used for the payload.
-    /// Minimum length is 2 bytes (1 for segment count + at least 1 for data) to match go-nethernet.
     pub fn decode(mut data: Bytes) -> Result<Self> {
         if data.len() < 2 {
             return Err(ProtocolError::MessageParse(format!(
@@ -50,17 +40,13 @@ impl MessageSegment {
     }
 }
 
-/// Complete message - data assembled from segments
 #[derive(Debug, Clone)]
 pub struct Message {
-    /// Expected segment count
     expected_segments: u8,
-    /// Assembled data
     data: BytesMut,
 }
 
 impl Message {
-    /// Creates a new, empty Message ready to receive segments.
     pub fn new() -> Self {
         Self {
             expected_segments: 0,
@@ -68,9 +54,6 @@ impl Message {
         }
     }
 
-    /// Adds a segment, returning the complete message once assembly finishes.
-    ///
-    /// An out-of-order segment clears the accumulator and returns a `MessageParse` error.
     pub fn add_segment(&mut self, segment: MessageSegment) -> Result<Option<Bytes>> {
         if self.expected_segments == 0 && segment.remaining_segments > 0 {
             self.expected_segments =
@@ -84,7 +67,6 @@ impl Message {
         if self.expected_segments > 0 {
             let expected_remaining = self.expected_segments - 1;
             if expected_remaining != segment.remaining_segments {
-                // Reset so the instance is safe to reuse after this error
                 self.data.clear();
                 self.expected_segments = 0;
                 return Err(ProtocolError::MessageParse(format!(
@@ -106,13 +88,6 @@ impl Message {
         }
     }
 
-    /// Splits a byte buffer into protocol-sized message segments.
-    ///
-    /// For inputs shorter than or equal to MAX_MESSAGE_SIZE this returns a single
-    /// segment with `remaining_segments` equal to 0. For longer inputs the data
-    /// is chunked into segments of at most MAX_MESSAGE_SIZE bytes; the first
-    /// returned segment has `remaining_segments = segment_count - 1` and the last
-    /// has `remaining_segments = 0`.
     #[inline(always)]
     pub fn split_into_segments(data: Bytes) -> Result<Vec<MessageSegment>> {
         let len = data.len();
@@ -150,9 +125,6 @@ impl Message {
         Ok(segments)
     }
 
-    /// Encodes a single-fragment message for the unreliable channel, which never
-    /// fragments (per the NetherNet HTTP signaling guide, section 6.1) and rejects
-    /// anything too large instead.
     pub fn encode_unreliable(data: Bytes) -> Result<Bytes> {
         if data.len() > MAX_MESSAGE_SIZE.saturating_sub(1) {
             return Err(ProtocolError::MessageTooLarge(data.len()));
@@ -217,12 +189,10 @@ mod tests {
 
         let mut message = Message::new();
 
-        // Adding the middle segment first is what sets expected_segments, so it succeeds
         let result = message.add_segment(segments[1].clone());
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
 
-        // Segment 0 is out of sequence now that segment 1 already set the expectation
         let result = message.add_segment(segments[0].clone());
         assert!(result.is_err());
 

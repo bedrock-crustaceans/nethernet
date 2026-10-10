@@ -50,8 +50,6 @@ impl NetherHttpServerPlugin {
     }
 }
 
-/// PreUpdate set containing NetherHttpServerPlugin's update system. Order your own
-/// systems `.after(NetherHttpServerSet)` to see this tick's events/received data.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NetherHttpServerSet;
 
@@ -155,21 +153,10 @@ impl NetherHttpServer {
         self.idle_timeout = idle_timeout;
     }
 
-    /// Sets the identity every answer is signed with.
-    ///
-    /// The HTTP signaling guide requires an `a=identity` assertion in every answer
-    /// (section 5.2) and a vanilla client refuses the connection without one, so until
-    /// this is called every join is answered with 503, unless
-    /// [`allow_unsigned_answers`](Self::allow_unsigned_answers) opts out. With an
-    /// identity set, answers are signed regardless of that flag.
     pub fn set_identity(&mut self, identity: ServerIdentity) {
         self.identity = Some(identity);
     }
 
-    /// Lets joins be answered without an identity when none is set.
-    ///
-    /// Vanilla Minecraft clients refuse unsigned answers (guide section 5.2), so enable
-    /// this only for a server that serves non-vanilla clients. It is off by default.
     pub fn allow_unsigned_answers(&mut self, allow: bool) {
         self.allow_unsigned_answers = allow;
     }

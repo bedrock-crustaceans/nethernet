@@ -1,9 +1,3 @@
-//! SCTP association over a single remote peer's DTLS application data.
-//!
-//! Whichever side resolves to the DTLS client also initiates the SCTP association (this
-//! mirrors how webrtc-rs/pion resolve it internally - there is no independent SCTP-level
-//! role negotiation in WebRTC).
-
 use crate::error::ProtocolError;
 use crate::session::dtls::ResolvedRole;
 use bytes::Bytes;
@@ -17,7 +11,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// The SCTP port NetherNet always announces, per the HTTP signaling guide's SDP example.
 pub const SCTP_PORT: u16 = 5000;
 
 pub struct SctpLayer {
@@ -28,9 +21,6 @@ pub struct SctpLayer {
 }
 
 impl SctpLayer {
-    /// Creates the SCTP layer for a single remote peer. `role` must match the DTLS
-    /// role this side resolved to (see [`ResolvedRole::from_remote_announced`]):
-    /// whoever is the DTLS client also initiates the SCTP association.
     pub fn new(
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
@@ -66,7 +56,6 @@ impl SctpLayer {
         })
     }
 
-    /// Feeds one SCTP packet's worth of DTLS-decrypted application data.
     pub fn handle_read(&mut self, data: &[u8], now: Instant) {
         let Some((handle, event)) =
             self.endpoint
@@ -88,18 +77,14 @@ impl SctpLayer {
         }
     }
 
-    /// The association, once established (by `connect` for the client role, or by the
-    /// first inbound packet for the server role).
     pub fn association_mut(&mut self) -> Option<&mut Association> {
         self.association.as_mut().map(|(_, assoc)| assoc)
     }
 
-    /// The current round-trip-time estimate, once an association exists.
     pub fn rtt(&self) -> Option<Duration> {
         self.association.as_ref().map(|(_, assoc)| assoc.rtt())
     }
 
-    /// Returns the next outbound SCTP packet to hand to the DTLS layer, if any.
     pub fn poll_transmit(&mut self, now: Instant) -> Option<Vec<u8>> {
         if let Some(data) = self.pending_transmits.pop_front() {
             return Some(data);
@@ -115,7 +100,6 @@ impl SctpLayer {
         self.pending_transmits.pop_front()
     }
 
-    /// Returns the next application-level event (e.g. `Event::Connected`), if any.
     pub fn poll_event(&mut self) -> Option<Event> {
         self.association
             .as_mut()
@@ -149,8 +133,6 @@ mod tests {
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
     }
 
-    /// Drives a client and server SCTP layer to a connected association and a data
-    /// round trip over a loopback relay, mirroring the ICE/DTLS layer tests.
     #[test]
     fn client_and_server_associate_and_exchange_a_message() {
         let mut now = Instant::now();
@@ -208,7 +190,6 @@ mod tests {
         assert!(client_connected, "client association never connected");
         assert!(server_connected, "server association never connected");
 
-        // Client opens a stream and writes to it; server accepts and reads it back.
         {
             let assoc = client.association_mut().unwrap();
             let mut stream = assoc

@@ -1,10 +1,3 @@
-//! DTLS handshake and application-data transport for a single remote peer.
-//!
-//! NetherNet (like all of WebRTC) authenticates a peer by comparing its presented
-//! certificate's fingerprint against the one signaled in SDP, not by validating a CA
-//! chain, so normal certificate-chain verification is disabled in favor of a fingerprint
-//! check.
-
 use crate::error::ProtocolError;
 use crate::protocol::webrtc::certificate::crypto_provider;
 use bytes::BytesMut;
@@ -19,12 +12,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// The role this side actually resolves to for the DTLS handshake, per RFC 5763 §5:
-/// whichever side announced `active` in its own SDP acts as the client (it dials);
-/// whichever side announced `actpass` resolves to acting as the client too, when it is
-/// the side that must pick, so in NetherNet's fixed offerer/answerer convention the
-/// offerer (which always announces `actpass`) ends up as the DTLS server, and the
-/// answerer (which always announces `active`) ends up as the DTLS client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedRole {
     Client,
@@ -32,7 +19,6 @@ pub enum ResolvedRole {
 }
 
 impl ResolvedRole {
-    /// Resolves the local role from the *remote*'s announced (parsed) DTLS role.
     pub fn from_remote_announced(remote: crate::protocol::webrtc::DtlsRole) -> Self {
         use crate::protocol::webrtc::DtlsRole;
         match remote {
@@ -48,10 +34,6 @@ pub struct DtlsLayer {
 }
 
 impl DtlsLayer {
-    /// Creates the DTLS layer for a single remote peer. `certificate` is this side's own
-    /// (freshly generated) certificate; `remote_fingerprint` is the `(algorithm, value)`
-    /// pair signaled in the remote's description, checked against whatever certificate
-    /// the peer actually presents during the handshake.
     pub fn new(
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
@@ -68,9 +50,6 @@ impl DtlsLayer {
             .with_insecure_skip_verify(true)
             .with_client_auth(ClientAuthType::RequireAnyClientCert)
             .with_verify_peer_certificate(Some(verify_fingerprint(remote_fingerprint)))
-            // No SRTP is ever carried, but a peer's WebRTC stack (e.g. Pion) still
-            // requires the shared DTLS transport to negotiate a protection profile
-            // through `use_srtp`, or it refuses the otherwise-complete handshake.
             .with_srtp_protection_profiles(vec![
                 SrtpProtectionProfile::Srtp_Aead_Aes_256_Gcm,
                 SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
@@ -98,8 +77,6 @@ impl DtlsLayer {
         })
     }
 
-    /// Feeds an inbound datagram addressed to this remote peer (already demultiplexed
-    /// from STUN by the caller).
     pub fn handle_read(
         &mut self,
         data: &[u8],
@@ -110,39 +87,28 @@ impl DtlsLayer {
             .map_err(|e| ProtocolError::Other(format!("{e}")))
     }
 
-    /// Queues application data (an SCTP packet) to be DTLS-encrypted and sent.
     pub fn write(&mut self, data: &[u8], now: Instant) -> Result<(), ProtocolError> {
         self.endpoint
             .write(now, self.remote_addr, data)
             .map_err(|e| ProtocolError::Other(format!("{e}")))
     }
 
-    /// Returns the next outbound DTLS record to send, if any.
     pub fn poll_transmit(&mut self) -> Option<(Vec<u8>, SocketAddr)> {
         self.endpoint
             .poll_transmit()
             .map(|msg| (msg.message.to_vec(), msg.transport.peer_addr))
     }
 
-    /// Advances the handshake/retransmission timers. A no-op until a connection with
-    /// the remote peer exists (nothing to time out yet): for the server role, that's
-    /// only once the first inbound packet has created one.
     pub fn handle_timeout(&mut self, now: Instant) -> Result<(), ProtocolError> {
-        // The only failure mode here is "no connection yet for this remote", which
-        // just means there is nothing to time out yet.
         let _ = self.endpoint.handle_timeout(self.remote_addr, now);
         Ok(())
     }
 
-    /// The next time `handle_timeout` should be called, if a handshake retransmission
-    /// is pending.
     pub fn poll_timeout(&self) -> Option<Instant> {
         self.endpoint.poll_timeout(&self.remote_addr)
     }
 }
 
-/// Builds the SDP-fingerprint verification callback: WebRTC's actual trust mechanism,
-/// replacing the CA-chain verification `with_insecure_skip_verify` disables.
 fn verify_fingerprint(expected: (String, String)) -> rtc::dtls::config::VerifyPeerCertificateFn {
     Arc::new(move |presented_certs, _verified_chains| {
         let Some(cert) = presented_certs.first() else {
@@ -156,9 +122,6 @@ fn verify_fingerprint(expected: (String, String)) -> rtc::dtls::config::VerifyPe
             .collect::<Vec<_>>()
             .join(":");
 
-        // RFC 4572 specifies uppercase hex, but real peers (e.g. Pion, which formats
-        // with Go's lowercase `%x`) don't all follow that, so the comparison has to be
-        // case-insensitive to interoperate.
         if expected.0.eq_ignore_ascii_case("sha-256") && hex.eq_ignore_ascii_case(&expected.1) {
             Ok(())
         } else {
@@ -178,8 +141,6 @@ mod tests {
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
     }
 
-    /// Drives a client and a server DTLS layer to a completed handshake and an
-    /// application-data exchange over a loopback relay, mirroring the ICE layer's test.
     #[test]
     fn client_and_server_handshake_and_exchange_data() {
         let mut now = Instant::now();
@@ -254,9 +215,6 @@ mod tests {
         assert!(server_done, "server handshake never completed");
     }
 
-    /// Pion (and so `go-nethernet`/gophertunnel) formats fingerprints with Go's
-    /// lowercase `%x`, while this crate always signals uppercase; the check has to
-    /// tolerate that mismatch or every non-Rust peer fails the handshake.
     #[test]
     fn a_lowercase_remote_fingerprint_still_verifies() {
         let mut now = Instant::now();

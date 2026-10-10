@@ -48,8 +48,6 @@ impl NetherHttpClientPlugin {
     }
 }
 
-/// PreUpdate set containing NetherHttpClientPlugin's update system. Order your own
-/// systems `.after(NetherHttpClientSet)` to see this tick's events/received data.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NetherHttpClientSet;
 
@@ -190,7 +188,6 @@ fn drive_join(state: JoinState) -> JoinStep {
 
 struct Join {
     state: JoinState,
-    // rtc's DTLS state isn't Sync, which a resource has to be
     connection: SyncCell<Connection>,
     local_ufrag: String,
     session_socket: UdpSocket,
@@ -328,9 +325,6 @@ impl NetherHttpClient {
         self.remote_addr
     }
 
-    /// Starts joining the server at `server_url` (e.g. `http://example.com:19132`).
-    /// `https://` needs the `tls` feature and verifies the server against the platform
-    /// trust store unless `set_tls_config` supplies another configuration. Replaces any join or connection in progress.
     pub fn connect(&mut self, local_network_id: String, server_url: String) -> std::io::Result<()> {
         self.join = None;
         self.pool = None;
@@ -463,13 +457,6 @@ impl NetherHttpClient {
                         let mut connection = SyncCell::to_inner(connection);
                         let answer = Signal::answer(connection.connection_id(), body, server_url);
 
-                        // Applied here, before the connection is handed to the pool and
-                        // its socket starts being read - otherwise the server's first
-                        // datagram (sent as soon as it accepted the offer, well before
-                        // this join even completes) can arrive before the remote
-                        // candidate this answer carries is known, and gets registered as
-                        // a peer-reflexive candidate instead, which ICE won't nominate
-                        // for a full extra second (RFC 8445's acceptance grace period).
                         if connection
                             .handle(ConnectionInput::Signal(answer, now))
                             .is_ok()

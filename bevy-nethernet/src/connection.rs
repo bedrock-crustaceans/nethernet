@@ -1,18 +1,3 @@
-//! Drives every [`Connection`] of a client or server on one dedicated background
-//! thread, sharing a single socket between them - the same way RakNet's own server
-//! does it - instead of giving each its own socket and thread.
-//!
-//! This thread runs for as long as the pool exists, not the short blocking-then-done
-//! shape `bevy_tasks::IoTaskPool` is meant for, so it's a plain [`std::thread`] rather
-//! than a pool task: there's exactly one (or two, client and server) per app, not one
-//! per connection, so there's nothing to size a pool for.
-//!
-//! Routing an inbound datagram to the right [`Connection`] needs the remote address
-//! ICE eventually settles on, which isn't known yet for a connection still handshaking;
-//! until then, a datagram is routed by the local ICE ufrag its STUN `USERNAME`
-//! attribute names (see [`nethernet::util::stun`]), which is known from the moment the
-//! connection is created.
-
 use async_channel::{Receiver, Sender, TryRecvError};
 use nethernet::connection::{Connection, ConnectionInput};
 use nethernet::protocol::Signal;
@@ -25,14 +10,8 @@ use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-/// Caps how long `recv_from` blocks before checking for a queued command, regardless
-/// of any session's [`SessionOutput::Wait`] - otherwise a long wait could delay a
-/// queued [`SessionPool::send`]/[`SessionPool::signal`]/[`SessionPool::add`] just as
-/// long.
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Longest the task ever blocks when no session has reported a real
-/// [`SessionOutput::Wait`] yet.
 const MAX_IDLE: Duration = Duration::from_secs(1);
 
 const RTT_REPORT_INTERVAL: Duration = Duration::from_secs(1);
@@ -51,9 +30,6 @@ enum Command<K> {
     Remove(K),
 }
 
-/// A handle to every [`Connection`] of one client or server, all driven on a shared
-/// socket by one background task. Dropping it closes the command channel, which the
-/// task takes as its cue to stop.
 pub(crate) struct SessionPool<K> {
     commands: Sender<Command<K>>,
     events: Receiver<(K, ConnectionEvent)>,
@@ -78,17 +54,6 @@ where
         }
     }
 
-    /// Adds a connection to drive, identified by `id` from now on. `local_ufrag` is
-    /// the `ufrag` of the [`nethernet::protocol::webrtc::Description`] this connection
-    /// was created from, which is how an inbound datagram is routed to it before its
-    /// remote address is known.
-    ///
-    /// Blocks until the background task confirms the connection is actually routable
-    /// (bounded by [`COMMAND_POLL_INTERVAL`]): the caller signals the offer/answer
-    /// right after this returns, and the remote peer's first datagram can arrive before
-    /// the task would otherwise have gotten around to registering it, which - since
-    /// nothing resends a dropped STUN check for a good while - is exactly the kind of
-    /// thing this pool exists to not add latency to.
     pub(crate) fn add(&mut self, id: K, connection: Connection, local_ufrag: String) {
         let (ack_tx, ack_rx) = async_channel::bounded(1);
         let _ = self
@@ -97,31 +62,23 @@ where
         let _ = ack_rx.recv_blocking();
     }
 
-    /// Stops driving a connection, dropping whatever of it the background task still
-    /// holds.
     pub(crate) fn remove(&mut self, id: K) {
         let _ = self.commands.try_send(Command::Remove(id));
     }
 
-    /// Queues a signal for the background task to apply to the named connection.
     pub(crate) fn signal(&mut self, id: K, signal: &Signal) {
         let _ = self.commands.try_send(Command::Signal(id, signal.clone()));
     }
 
-    /// Queues a complete application message for the background task to send on the
-    /// named connection.
     pub(crate) fn send(&mut self, id: K, channel: Channel, data: Box<[u8]>) {
         let _ = self.commands.try_send(Command::Send(id, channel, data));
     }
 
-    /// Drains events the background task has produced since the last call.
     pub(crate) fn drive(&mut self, events: &mut Vec<(K, ConnectionEvent)>) {
         loop {
             match self.events.try_recv() {
                 Ok(event) => events.push(event),
                 Err(TryRecvError::Empty) => return,
-                // The pool's task stopped; every connection it held is gone with it,
-                // but there's no `id` left to report that against individually.
                 Err(TryRecvError::Closed) => return,
             }
         }
@@ -137,8 +94,6 @@ struct Entry {
     rtt_reported_at: Option<Instant>,
 }
 
-/// Owns the shared socket and every session, blocking on `recv_from` until a datagram
-/// arrives, a command does, or the soonest session's wait deadline passes.
 fn drive<K: Eq + Hash + Clone>(
     socket: UdpSocket,
     commands: Receiver<Command<K>>,
@@ -225,7 +180,6 @@ fn drive<K: Eq + Hash + Clone>(
                     }
                 }
                 Err(TryRecvError::Empty) => break,
-                // The pool was dropped: nothing left to drive.
                 Err(TryRecvError::Closed) => return,
             }
         }
@@ -233,11 +187,6 @@ fn drive<K: Eq + Hash + Clone>(
         let now = Instant::now();
         let mut failed = Vec::new();
         for (id, entry) in entries.iter_mut() {
-            // `entry.wait` only caps how long `recv_from` may block, the same as
-            // `COMMAND_POLL_INTERVAL` - it isn't a deadline gating this call. A
-            // connection's own internal pacing (e.g. ICE checklist scheduling) expects
-            // `Timeout` every time the driver comes back around, not just once its
-            // last reported `Wait` has elapsed.
             if let Err(e) = entry.connection.handle(ConnectionInput::Timeout(now)) {
                 tracing::debug!("timeout handling error: {e}");
             }

@@ -1,14 +1,7 @@
-//! Discovery request packet.
-//!
-//! Sent by clients to discover servers on the same network using the
-//! broadcast address on port 7551.
-
 use crate::error::Result;
 use crate::protocol::codec::NetherCodec;
 use std::io::{Read, Write};
 
-/// RequestPacket is sent by clients to discover servers on LAN.
-/// It does not contain any additional data beyond the header.
 #[derive(Debug, Clone, Default)]
 pub struct RequestPacket;
 

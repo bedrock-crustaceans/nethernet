@@ -68,7 +68,6 @@ impl From<FramingError> for ResponseError {
 #[error("body is not valid UTF-8")]
 pub(crate) struct NotUtf8(#[from] std::string::FromUtf8Error);
 
-/// Converts the byte bodies the readers return into text, at the edge.
 pub(crate) struct TextBody;
 
 impl TextBody {
@@ -189,9 +188,6 @@ pub(crate) enum Parsed<T> {
     Partial,
 }
 
-/// Parses a complete HTTP/1.x request out of the front of a buffer, once one is fully
-/// buffered. `Partial` means more bytes are needed. The body must be sized by
-/// `Content-Length`: any `Transfer-Encoding` is refused with `LengthRequired`.
 pub(crate) struct RequestReader;
 
 impl RequestReader {
@@ -237,8 +233,6 @@ impl RequestReader {
     }
 }
 
-/// Parses a complete HTTP/1.x response out of the front of a buffer, once one is fully
-/// buffered. `Partial` means more bytes are needed.
 pub(crate) struct ResponseReader;
 
 impl ResponseReader {
@@ -325,12 +319,9 @@ impl WireFormat {
     }
 }
 
-/// Serializes responses to HTTP/1.1 wire bytes.
 pub(crate) struct ResponseWriter;
 
 impl ResponseWriter {
-    /// Serializes an `http::Response<String>`, overriding any Content-Length header with
-    /// the body's actual length and the Connection header with `close`.
     pub(crate) fn encode(response: &Response<String>) -> Vec<u8> {
         WireFormat::serialize(
             &WireFormat::status_line(response.status()),
@@ -340,7 +331,6 @@ impl ResponseWriter {
     }
 }
 
-/// Serializes the requests the HTTP signaling client sends.
 pub(crate) struct RequestWriter;
 
 impl RequestWriter {

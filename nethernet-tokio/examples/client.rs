@@ -1,10 +1,3 @@
-//! NetherNet client example using LAN discovery.
-//!
-//! This example demonstrates how to create a NetherNet client that:
-//! - Discovers servers on LAN via broadcast
-//! - Connects via WebRTC
-//! - Sends and receives packets
-
 use nethernet_tokio::NetherClient;
 use nethernet_tokio::signaling::lan::LanSignaling;
 use rand::Rng;
@@ -25,7 +18,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(filter_layer)
         .init();
 
-    // Port 0 so the OS picks a free one, distinct from the server's 7551
     let mut network_id_bytes = [0u8; 8];
     rand::rng().fill_bytes(&mut network_id_bytes);
     let network_id = u64::from_le_bytes(network_id_bytes);

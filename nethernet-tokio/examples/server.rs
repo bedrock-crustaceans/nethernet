@@ -1,10 +1,3 @@
-//! NetherNet server example using LAN discovery.
-//!
-//! This example demonstrates how to create a NetherNet server that:
-//! - Broadcasts server information on LAN
-//! - Accepts incoming WebRTC connections
-//! - Handles packets from clients
-
 use nethernet_tokio::signaling::lan::LanSignaling;
 use nethernet_tokio::{AcceptedSession, NetherServer, ServerData};
 use std::net::SocketAddr;
@@ -26,7 +19,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Example World".to_string(),
     );
 
-    // Discovery requests are broadcast to this port
     let network_id = rand::random::<u64>();
     let bind_addr: SocketAddr = "0.0.0.0:7551".parse()?;
 

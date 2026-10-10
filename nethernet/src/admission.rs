@@ -1,6 +1,3 @@
-//! The decision to admit an offer, answer it, sign the answer and infer candidates for the
-//! peer, shared by every driver so that each one treats an offer the same way.
-
 use crate::connection::{Connection, ConnectionInput, IceMode};
 use crate::error::{ProtocolError, SignalErrorCode};
 use crate::identity::error::IdentityError;
@@ -15,32 +12,25 @@ use std::net::SocketAddr;
 use std::time::{Instant, SystemTime};
 use thiserror::Error;
 
-/// Why an offer was not admitted or could not be answered.
 #[derive(Debug, Error)]
 pub enum AdmissionError {
-    /// The offer is not a description that can be negotiated against.
     #[error("offer description rejected: {0}")]
     Description(ProtocolError),
 
-    /// The peer did not prove an identity the policy trusts.
     #[error("offer identity rejected: {0}")]
     Untrusted(IdentityError),
 
-    /// The local session could not be created.
     #[error("session creation failed: {0}")]
     Session(ProtocolError),
 
-    /// The answer could not be produced.
     #[error("answer creation failed: {0}")]
     Answer(ProtocolError),
 
-    /// The answer could not be signed with the server identity.
     #[error("answer signing failed: {0}")]
     Signing(IdentityError),
 }
 
 impl AdmissionError {
-    /// The code to signal back to the peer that sent the offer.
     pub fn code(&self) -> SignalErrorCode {
         match self {
             Self::Description(_) => SignalErrorCode::FailedToSetRemoteDescription,
@@ -51,7 +41,6 @@ impl AdmissionError {
     }
 }
 
-/// How a server treats the offers it receives.
 #[derive(Debug, Clone, Copy)]
 pub struct OfferPolicy<'a> {
     identity: Option<&'a ServerIdentity>,
@@ -61,7 +50,6 @@ pub struct OfferPolicy<'a> {
 }
 
 impl<'a> OfferPolicy<'a> {
-    /// A policy that accepts any offer, signs nothing and infers nothing.
     pub fn new(ice_mode: IceMode) -> Self {
         Self {
             identity: None,
@@ -71,27 +59,21 @@ impl<'a> OfferPolicy<'a> {
         }
     }
 
-    /// Signs every answer with the identity, so that clients can pin its key.
     pub fn with_identity(mut self, identity: &'a ServerIdentity) -> Self {
         self.identity = Some(identity);
         self
     }
 
-    /// Requires every offer to carry an identity the trust accepts.
     pub fn with_token_trust(mut self, trust: &'a TokenTrust) -> Self {
         self.token_trust = Some(trust);
         self
     }
 
-    /// Whether to add candidates for the address a peer signaled from when it offers no
-    /// routable one.
     pub fn with_inferred_peer_candidates(mut self, infer: bool) -> Self {
         self.infer_peer_candidates = infer;
         self
     }
 
-    /// Parses the offer and validates the identity it carries when the policy asks for
-    /// one, without creating any session.
     pub fn admit(
         &self,
         offer: &Signal,
@@ -123,7 +105,6 @@ impl<'a> OfferPolicy<'a> {
     }
 }
 
-/// An offer that passed the policy and is waiting for a local address to answer from.
 pub struct Admitted<'a> {
     policy: OfferPolicy<'a>,
     offer: Signal,
@@ -134,12 +115,10 @@ pub struct Admitted<'a> {
 }
 
 impl Admitted<'_> {
-    /// The validated identity of the peer, or [`None`] when the policy asks for none.
     pub fn player(&self) -> Option<&PlayerInfo> {
         self.player.as_ref()
     }
 
-    /// Creates the session on `local_addr` and answers the offer.
     pub fn answer(self, local_addr: SocketAddr, now: Instant) -> Result<Answered, AdmissionError> {
         let (session, description) =
             Session::new(local_addr, false, now).map_err(AdmissionError::Session)?;
@@ -190,22 +169,15 @@ impl Admitted<'_> {
     }
 }
 
-/// An answered offer: the connection and what to signal back to the peer.
 pub struct Answered {
-    /// The connection, with any inferred candidates already applied.
     pub connection: Connection,
 
-    /// The answer, signed when the policy has an identity, followed by any trickled
-    /// candidates.
     pub signals: Vec<Signal>,
 
-    /// The validated identity of the peer, or [`None`] when the policy asks for none.
     pub player: Option<PlayerInfo>,
 
-    /// The ICE username fragment of the local side, which demultiplexes shared sockets.
     pub local_ufrag: String,
 
-    /// The candidates inferred for the peer, in the form signaled over the wire.
     pub inferred: Vec<String>,
 }
 

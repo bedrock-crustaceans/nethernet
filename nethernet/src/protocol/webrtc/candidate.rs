@@ -1,16 +1,6 @@
-//! ICE candidate wire format used by NetherNet.
-//!
-//! Candidates are signaled as plain strings in the format produced by the C++
-//! implementation of WebRTC. Candidates in any other representation are ignored
-//! by vanilla clients.
-
 use crate::error::ProtocolError;
 use rtc::ice::candidate::{Candidate, unmarshal_candidate};
 
-/// Builds the candidate attribute *value* (no `candidate:` key prefix): the payload of
-/// an SDP `a=candidate` line. `index` is the position of the candidate within the
-/// locally gathered candidates and `ufrag` is the username fragment of the local ICE
-/// parameters.
 pub(crate) fn attribute_value(index: usize, candidate: &Candidate, ufrag: &str) -> String {
     format!(
         "{} generation 0 ufrag {} network-id {} network-cost 0",
@@ -20,13 +10,10 @@ pub(crate) fn attribute_value(index: usize, candidate: &Candidate, ufrag: &str) 
     )
 }
 
-/// Formats a locally gathered candidate for a `CANDIDATEADD` signal (LAN/trickle ICE).
 pub fn format_ice_candidate(index: usize, candidate: &Candidate, ufrag: &str) -> String {
     format!("candidate:{}", attribute_value(index, candidate, ufrag))
 }
 
-/// Parses a candidate signaled by a remote connection, or embedded in an `a=candidate`
-/// SDP line.
 pub fn parse_ice_candidate(data: &str) -> Result<Candidate, ProtocolError> {
     let raw = data.strip_prefix("candidate:").unwrap_or(data);
     unmarshal_candidate(raw).map_err(|e| ProtocolError::Other(format!("decode candidate: {e}")))

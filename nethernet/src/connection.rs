@@ -1,11 +1,3 @@
-//! Connection setup: the offer/answer/candidate [`Signal`] choreography around a
-//! [`Session`], decoupled from any specific signaling transport.
-//!
-//! Both [`crate::signaling::lan::LanSignaler`] and
-//! [`crate::signaling::http::HttpSignaler`] speak [`Signal`] as their common currency,
-//! so this type only ever produces/consumes `Signal`s - the caller wires them to
-//! whichever signaler is actually in use.
-
 use crate::error::ProtocolError;
 use crate::protocol::webrtc::Description;
 use crate::protocol::webrtc::candidate::{format_ice_candidate, parse_ice_candidate};
@@ -17,16 +9,9 @@ use rtc::ice::candidate::Candidate;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-/// Which ICE shape to use when encoding this side's offer/answer SDP, matching the
-/// signaling transport that will carry it (see the NetherNet HTTP signaling guide,
-/// sections 2 and 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IceMode {
-    /// Every candidate is embedded directly in the SDP, in one round trip
-    /// (HTTP signaling).
     Full,
-    /// No candidates are embedded in the SDP; a separate `CANDIDATEADD` signal follows
-    /// immediately (LAN/UDP signaling).
     Trickle,
 }
 
@@ -35,36 +20,14 @@ enum SignalKind {
     Answer,
 }
 
-/// A NetherNet connection attempt or established connection: the [`Signal`]
-/// choreography (offer/answer/candidate) around a [`Session`].
-///
-/// This type performs no I/O and knows nothing about any specific signaling
-/// transport: [`Self::connect`]/[`Self::accept`] return the [`Signal`]s to send, and
-/// [`ConnectionInput::Signal`] applies ones received - the caller is responsible for
-/// actually moving them across whichever signaler is in use. Everything else
-/// (datagrams, timeouts, application data - see [`Sans`]) is a thin pass-through to
-/// the wrapped [`Session`].
-///
-/// `connect`/`accept` take an already-created [`Session`] and its returned
-/// [`Description`] (from [`Session::new`]) rather than constructing them internally:
-/// attaching an `a=identity` assertion (guide section 5) means signing over the
-/// session's actual certificate fingerprint, which only exists once `Session::new` has
-/// run, so the caller needs a chance to set [`Description::identity`] in between.
 pub struct Connection {
     session: Session,
     connection_id: u64,
     remote_network_id: String,
-    /// The remote's raw (unverified) `a=identity` value, if any - see
-    /// [`Self::remote_identity`].
     remote_identity: Option<String>,
 }
 
 impl Connection {
-    /// Starts an outgoing connection attempt (the offerer) from a session and
-    /// description already created via `Session::new(local_addr, true, now)` - set
-    /// `description.identity` first if this side needs to assert one (guide section
-    /// 5.1). Returns the connection and the signal(s) to send: always an offer, plus -
-    /// under [`IceMode::Trickle`] - a separate candidate signal.
     pub fn connect(
         session: Session,
         description: Description,
@@ -92,10 +55,6 @@ impl Connection {
         )
     }
 
-    /// Parses an incoming offer's SDP without any side effects, so the caller can
-    /// inspect it - in particular, validate any `a=identity` assertion it carries
-    /// (guide section 5.1) using its [`Description::fingerprint`] and `.identity` -
-    /// before deciding whether to admit it at all via [`Self::accept`].
     pub fn parse_offer(offer: &Signal) -> Result<(Description, Vec<Candidate>), ProtocolError> {
         if offer.signal_type != SignalType::Offer {
             return Err(ProtocolError::Other("expected an offer signal".to_string()));
@@ -103,14 +62,6 @@ impl Connection {
         Description::parse(&offer.data)
     }
 
-    /// Answers an incoming offer (the answerer), given a session and description
-    /// already created via `Session::new(local_addr, false, now)` (set
-    /// `description.identity` first - the guide's section 5.2 requires one on every
-    /// answer, regardless of signaling transport) and the offer's already-parsed
-    /// remote description (see [`Self::parse_offer`] - typically called first to
-    /// validate any identity assertion it carries). Returns the connection and the
-    /// signal(s) to send back: always an answer, plus - under [`IceMode::Trickle`] - a
-    /// separate candidate signal.
     pub fn accept(
         mut session: Session,
         description: Description,
@@ -180,10 +131,6 @@ impl Connection {
         signals
     }
 
-    /// Applies a signal received for this connection: for the offerer, the answer
-    /// (and, under trickle ICE, the answerer's candidate); for the answerer, the
-    /// offerer's trickled candidate (its description was already applied in
-    /// [`Self::accept`]). Signals for a different connection or network are ignored.
     fn handle_signal(&mut self, signal: &Signal, now: Instant) -> Result<(), ProtocolError> {
         if signal.connection_id != self.connection_id || signal.network_id != self.remote_network_id
         {
@@ -217,50 +164,30 @@ impl Connection {
         Ok(())
     }
 
-    /// The remote's raw, unverified `a=identity` attribute value, once known (from the
-    /// offer, for the answerer; from the answer, for the offerer, once
-    /// [`ConnectionInput::Signal`] has applied it). `None` if the remote didn't send
-    /// one.
-    ///
-    /// This is not verified by `Connection` itself - use
-    /// [`crate::protocol::webrtc::identity::parse_identity`] and the verification
-    /// functions in that module, checking the signed fingerprints against the remote
-    /// description's `fingerprint` (from whichever of [`Self::parse_offer`] or the
-    /// parsed answer you already have on hand).
     pub fn remote_identity(&self) -> Option<&str> {
         self.remote_identity.as_deref()
     }
 
-    /// The remote peer's address, once known.
     pub fn remote_addr(&self) -> Option<SocketAddr> {
         self.session.remote_addr()
     }
 
-    /// The current round-trip-time estimate, once the data channels are open.
     pub fn rtt(&self) -> Option<Duration> {
         self.session.rtt()
     }
 
-    /// The connection ID this attempt was signaled under.
     pub fn connection_id(&self) -> u64 {
         self.connection_id
     }
 }
 
-/// Input fed to a [`Connection`] (see [`Sans`]): a thin pass-through to the wrapped
-/// [`Session`] (see [`SessionInput`]), plus the `Signal` choreography
 pub enum ConnectionInput {
-    /// An inbound datagram received on the local socket.
     Packet(Box<[u8]>, SocketAddr, Instant),
 
-    /// Drives ICE/DTLS/SCTP retransmission and keepalive timers; the only input that
-    /// produces a [`SessionOutput::Wait`].
     Timeout(Instant),
 
-    /// A signal received for this connection - see `Connection::handle_signal`.
     Signal(Signal, Instant),
 
-    /// A complete application message to send on a channel.
     Send(Channel, Bytes, Instant),
 }
 
@@ -287,23 +214,16 @@ impl Sans for Connection {
     }
 }
 
-/// Timeouts applied while negotiating and establishing a connection.
 #[derive(Debug, Clone, Copy)]
 pub struct Timeouts {
-    /// Time to wait for the answer of the remote connection. Only used while dialing.
     pub negotiation: Duration,
 
-    /// Time to wait for the transport (ICE/DTLS) to start. Added to `channel` for the
-    /// total post-negotiation budget, since there's no separate signal to time the two
-    /// phases apart.
     pub start: Duration,
 
-    /// Time to wait for the data channels to open, once transports have started.
     pub channel: Duration,
 }
 
 impl Timeouts {
-    /// Total time allowed between negotiation finishing and the connection being usable.
     pub fn establish(&self) -> Duration {
         self.start + self.channel
     }
@@ -336,10 +256,6 @@ mod tests {
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
     }
 
-    /// Drives a connect()/accept() pair through the Signal choreography and the full
-    /// transport stack to both channels open, for a given `IceMode` - exercising the
-    /// same underlying Session stack as the module-level test, but through the
-    /// Connection/Signal API a real signaler would actually drive.
     fn assert_connects(ice_mode: IceMode) {
         let mut now = Instant::now();
 
@@ -375,7 +291,6 @@ mod tests {
             .handle(ConnectionInput::Signal(answer, now))
             .unwrap();
 
-        // Trickled candidates (if any) flow after the offer/answer.
         for signal in offer_iter {
             answerer
                 .handle(ConnectionInput::Signal(signal, now))
@@ -463,7 +378,6 @@ mod tests {
         let (mut offerer, _) =
             Connection::connect(session, description, 1, 7.to_string(), IceMode::Full);
         let unrelated = Signal::answer(999, "irrelevant".to_string(), "7".to_string());
-        // Wrong connection_id: ignored, not an error.
         offerer
             .handle(ConnectionInput::Signal(unrelated, now))
             .unwrap();
@@ -476,10 +390,6 @@ mod tests {
             .unwrap()
     }
 
-    /// An offerer attaches its own identity assertion, signed over its session's real
-    /// certificate fingerprint; the answerer inspects and verifies it via
-    /// `parse_offer` before deciding to `accept`, then attaches its own in the answer,
-    /// which the offerer in turn verifies once `handle_signal` applies it.
     #[test]
     fn identity_assertions_flow_and_verify_in_both_directions() {
         let now = Instant::now();
@@ -508,7 +418,6 @@ mod tests {
         );
         let offer = offer_signals.into_iter().next().unwrap();
 
-        // Answerer: pre-validate the offer's identity before accepting at all.
         let (remote_description, remote_candidates) = Connection::parse_offer(&offer).unwrap();
         let parsed =
             identity::parse_identity(remote_description.identity.as_ref().unwrap()).unwrap();
@@ -551,7 +460,6 @@ mod tests {
             .handle(ConnectionInput::Signal(answer.clone(), now))
             .unwrap();
 
-        // Offerer: verify the answerer's identity after applying the answer.
         let (answer_description, _) = Description::parse(&answer.data).unwrap();
         let parsed = identity::parse_identity(offerer.remote_identity().unwrap()).unwrap();
         assert_eq!(parsed.idp.domain, "answerer.example");

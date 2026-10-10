@@ -12,10 +12,6 @@ use std::sync::Arc;
 pub mod http;
 pub mod lan;
 
-/// The signaling a [`crate::transport::NetherServer`] accepts connections through.
-///
-/// Cheap to clone: each variant is a handle to the same underlying signaling, not a copy
-/// of it.
 #[derive(Clone)]
 pub enum ServerSignaling {
     Lan(Arc<LanSignaling>),
@@ -68,8 +64,6 @@ impl ServerSignaling {
         }
     }
 
-    /// Reports whether candidates must be embedded in the session description instead
-    /// of being signaled separately.
     pub fn disable_trickle_ice(&self) -> bool {
         match self {
             Self::Lan(s) => s.disable_trickle_ice(),
@@ -77,10 +71,6 @@ impl ServerSignaling {
         }
     }
 
-    /// The address a connection signaled from, if the signaling can tell.
-    ///
-    /// It seeds a connection before ICE settles and is what candidates are inferred from
-    /// when a peer gathered nothing a host on another network could reach.
     pub async fn remote_address(&self, addr: &Addr) -> Option<SocketAddr> {
         match self {
             Self::Lan(s) => s.remote_address(addr).await,
@@ -88,10 +78,6 @@ impl ServerSignaling {
         }
     }
 
-    /// The identity a connection was accepted with, for signaling that validates one
-    /// itself before the transport is created.
-    ///
-    /// LAN discovery never validates an identity, so it has none to report.
     pub async fn player(&self, addr: &Addr) -> Option<Arc<PlayerInfo>> {
         match self {
             Self::Lan(_) => None,
@@ -99,9 +85,6 @@ impl ServerSignaling {
         }
     }
 
-    /// The host an HTTP join asked for.
-    ///
-    /// LAN discovery has no request to take one from, so it has none to report.
     pub async fn host(&self, addr: &Addr) -> Option<String> {
         match self {
             Self::Lan(_) => None,
@@ -109,11 +92,6 @@ impl ServerSignaling {
         }
     }
 
-    /// Whether the signaling validates the identity of an offer before it reaches the
-    /// transport, so the transport must not validate it again.
-    ///
-    /// HTTP signaling does, against `HttpSignalerConfig::token_trust`; LAN discovery does
-    /// not.
     pub fn validates_offers(&self) -> bool {
         match self {
             Self::Lan(_) => false,
@@ -121,11 +99,6 @@ impl ServerSignaling {
         }
     }
 
-    /// Whether every answer must carry an identity assertion.
-    ///
-    /// The HTTP signaling guide requires `a=identity` in every answer (section 5.2) and a
-    /// client refuses the connection without it. LAN discovery is not covered by the
-    /// guide, so an identity stays optional there.
     pub fn requires_identity(&self) -> bool {
         match self {
             Self::Lan(_) => false,
@@ -133,7 +106,6 @@ impl ServerSignaling {
         }
     }
 
-    /// Sets the server data advertised to clients from a RakNet pong response.
     pub fn set_pong_data(&self, data: &[u8]) {
         match self {
             Self::Lan(s) => s.set_pong_data(data),
@@ -142,10 +114,6 @@ impl ServerSignaling {
     }
 }
 
-/// The signaling a [`crate::transport::NetherClient`] dials a connection through.
-///
-/// Cheap to clone: each variant is a handle to the same underlying signaling, not a copy
-/// of it.
 #[derive(Clone)]
 pub enum ClientSignaling {
     Lan(Arc<LanSignaling>),
@@ -198,8 +166,6 @@ impl ClientSignaling {
         }
     }
 
-    /// Reports whether candidates must be embedded in the session description instead
-    /// of being signaled separately.
     pub fn disable_trickle_ice(&self) -> bool {
         match self {
             Self::Lan(s) => s.disable_trickle_ice(),

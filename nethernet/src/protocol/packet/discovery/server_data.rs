@@ -1,8 +1,3 @@
-//! ServerData binary structure for Minecraft: Bedrock Edition.
-//!
-//! Encapsulated in ResponsePacket.ApplicationData and sent in response
-//! to RequestPacket broadcasted by clients on port 7551.
-
 use crate::error::{ProtocolError, Result};
 use crate::protocol::codec::{
     NetherCodec, read_bytes_u8, read_bytes_varuint, read_varint32, write_bytes_varuint,
@@ -11,7 +6,6 @@ use crate::protocol::codec::{
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Read, Write};
 
-/// Versions of ServerData the discovery module can read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServerDataVersion {
     V4,
@@ -21,7 +15,6 @@ enum ServerDataVersion {
 }
 
 impl ServerDataVersion {
-    /// Current version written by the discovery module.
     const CURRENT: Self = Self::V7;
 
     fn from_byte(byte: u8) -> Result<Self> {
@@ -47,49 +40,25 @@ impl ServerDataVersion {
     }
 }
 
-/// ServerData defines the binary structure representing worlds in Minecraft: Bedrock Edition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerData {
-    /// Name of the server (typically the player name of the owner)
     pub server_name: String,
-    /// Name of the world/level
     pub level_name: String,
-    /// Default game mode (0=Survival, 1=Creative, 2=Adventure, 3=Spectator)
     pub game_type: u8,
-    /// Current player count (should be at least 1 to appear in server list)
     pub player_count: i32,
-    /// Maximum player count allowed
     pub max_player_count: i32,
-    /// Whether this is an Editor Mode project
     pub editor_world: bool,
-    /// Whether hardcore mode is enabled
     pub hardcore: bool,
-    /// Whether the server accepts online-authenticated (Xbox Live) players.
-    /// Introduced in v5; observed as `1` on vanilla worlds.
     pub flag_a: bool,
-    /// Whether the server accepts self-signed (LAN) authentication.
-    /// Introduced in v5; observed as `1` on vanilla worlds.
     pub flag_b: bool,
-    /// Session identifier string introduced in v6; a 16-character lowercase
-    /// hex string on vanilla worlds.
     pub session_id: String,
-    /// Transport layer (2 = NetherNet)
     pub transport_layer: u8,
-    /// Connection type (4 = LAN)
     pub connection_type: u8,
-    /// Bedrock protocol version. Part of the binary discovery format since
-    /// ServerData v7; also used by the HTTP `GET /v1/join` capability check
-    /// (guide section 4).
     pub protocol_version: u32,
-    /// Bedrock game version string (e.g. `"1.26.50"`). Part of the binary
-    /// discovery format since ServerData v7; also used by the same endpoint.
     pub game_version: String,
 }
 
 impl ServerData {
-    /// The server data as the JSON the `GET /v1/join` capability-check endpoint answers
-    /// with (guide section 4), which the client uses to decide whether to attempt a
-    /// connection at all and to display server details beforehand.
     pub fn to_json(&self) -> String {
         format!(
             "{{\"name\":{},\"protocol\":{},\"version\":{},\"level\":{},\"players\":{},\
@@ -104,9 +73,6 @@ impl ServerData {
         )
     }
 
-    /// Reads the JSON the `GET /v1/join` capability-check endpoint answers with, the
-    /// counterpart of [`ServerData::to_json`]. Fields the JSON does not carry keep the
-    /// defaults of [`ServerData::new`].
     pub fn from_json(json: &str) -> Result<Self> {
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -131,19 +97,6 @@ impl ServerData {
         Ok(data)
     }
 
-    /// Constructs a ServerData for the given server and level names using sensible defaults.
-    ///
-    /// Defaults:
-    /// - game_type = 0 (Survival)
-    /// - player_count = 1
-    /// - max_player_count = 8
-    /// - editor_world = false
-    /// - hardcore = false
-    /// - flag_a = true
-    /// - flag_b = true
-    /// - session_id = "" (empty)
-    /// - transport_layer = 2 (NetherNet)
-    /// - connection_type = 4 (LAN)
     pub fn new(server_name: String, level_name: String) -> Self {
         Self {
             server_name,
@@ -156,19 +109,13 @@ impl ServerData {
             flag_a: true,
             flag_b: true,
             session_id: String::new(),
-            transport_layer: 2, // NetherNet
-            connection_type: 4, // LAN
+            transport_layer: 2,
+            connection_type: 4,
             protocol_version: 0,
             game_version: String::new(),
         }
     }
 
-    /// Parses a RakNet pong response as sent by Minecraft listeners.
-    ///
-    /// The pong is a `;` separated list, of which the server name, level name, player
-    /// counts, game mode, protocol and game version are used. Transport layer and
-    /// connection type are set to the values vanilla clients expect for LAN discovery
-    /// over NetherNet.
     pub fn from_pong_data(data: &[u8]) -> Result<Self> {
         let pong = std::str::from_utf8(data)
             .map_err(|e| ProtocolError::Other(format!("invalid pong data UTF-8: {}", e)))?;
@@ -198,9 +145,6 @@ impl ServerData {
         })
     }
 
-    /// Decodes a complete `ServerData` value from `data`, the way it arrives in
-    /// `ResponsePacket::application_data`, returning an error if any bytes remain
-    /// unconsumed afterward.
     pub fn decode(data: &[u8]) -> Result<Self> {
         let mut cursor = Cursor::new(data);
         let value = Self::deserialize(&mut cursor)?;
@@ -215,10 +159,6 @@ impl ServerData {
 }
 
 impl NetherCodec for ServerData {
-    /// Encode the ServerData into the binary format used for discovery
-    /// ResponsePacket.ApplicationData, at the current version (v7).
-    ///
-    /// Returns an error if a field value would overflow its encoded form or an I/O write fails.
     fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_u8(ServerDataVersion::CURRENT.as_byte())?;
         write_bytes_varuint(writer, self.server_name.as_bytes())?;
@@ -238,14 +178,6 @@ impl NetherCodec for ServerData {
         Ok(())
     }
 
-    /// Decode a ServerData value from its binary representation.
-    ///
-    /// The function auto-detects versions 4, 5, 6 and 7 from the first byte, reads each
-    /// field in the expected order, and validates UTF-8 for string fields. Fields a
-    /// version does not carry (v5/v6 fields on v4, session id on v5, protocol/version
-    /// on pre-v7) are populated with their defaults. On success returns a populated
-    /// ServerData; on failure returns a ProtocolError describing the problem. Use
-    /// [`ServerData::decode`] instead when `reader` should be fully consumed.
     fn deserialize<R: Read>(reader: &mut R) -> Result<Self> {
         let version = ServerDataVersion::from_byte(reader.read_u8()?)?;
 
@@ -260,15 +192,12 @@ impl NetherCodec for ServerData {
                 .map_err(|e| ProtocolError::Other(format!("invalid {} UTF-8: {}", what, e)))
         };
 
-        // From v5 on, strings carry a varuint32 length prefix instead of a u8 one.
         let server_name = if version == ServerDataVersion::V4 || version == ServerDataVersion::V6 {
             read_string(reader, "server name")?
         } else {
             read_var_string(reader, "server name")?
         };
 
-        // v7 moved protocol/version in front of the level name and switched the
-        // numeric fields to varint32.
         let (protocol_version, game_version) = if version == ServerDataVersion::V7 {
             let protocol = read_varint32(reader)?;
             let game_version = read_var_string(reader, "game version")?;
@@ -284,15 +213,12 @@ impl NetherCodec for ServerData {
         };
 
         let (player_count, max_player_count, game_type) = match version {
-            // v7 orders the fields player count, max player count, game type.
             ServerDataVersion::V7 => {
                 let player_count = read_varint32(reader)?;
                 let max_player_count = read_varint32(reader)?;
                 let game_type = read_varint32(reader)?;
                 (player_count, max_player_count, game_type)
             }
-            // v5 kept the game type first and the counts fixed i32, but switched
-            // the game type to a zigzag varint32.
             ServerDataVersion::V5 => {
                 let game_type = read_varint32(reader)?;
                 let player_count = reader.read_i32::<LittleEndian>()?;
@@ -315,7 +241,6 @@ impl NetherCodec for ServerData {
 
         let (flag_a, flag_b, session_id) = match version {
             ServerDataVersion::V4 => (true, true, String::new()),
-            // v5 introduced the two auth flags; the session id only exists from v6.
             ServerDataVersion::V5 => (
                 reader.read_u8()? != 0,
                 reader.read_u8()? != 0,
@@ -333,7 +258,6 @@ impl NetherCodec for ServerData {
             ),
         };
 
-        // v7 dropped the transport layer field; discovery only runs over NetherNet.
         let (transport_layer, connection_type) = match version {
             ServerDataVersion::V7 => (2, read_varint32(reader)?),
             ServerDataVersion::V5 => (read_varint32(reader)?, read_varint32(reader)?),
@@ -369,20 +293,23 @@ impl NetherCodec for ServerData {
     }
 
     fn size_hint(&self) -> usize {
-        1 // version
-            + 5 + self.server_name.len()
-            + 5 // protocol varint32
-            + 5 + self.game_version.len()
-            + 5 + self.level_name.len()
-            + 5 + 5 // player counts
-            + 5 // game_type
-            + 4 // booleans
-            + 5 + self.session_id.len()
-            + 5 // connection type
+        1 + 5
+            + self.server_name.len()
+            + 5
+            + 5
+            + self.game_version.len()
+            + 5
+            + self.level_name.len()
+            + 5
+            + 5
+            + 5
+            + 4
+            + 5
+            + self.session_id.len()
+            + 5
     }
 }
 
-/// Quotes a string as a JSON value, escaping what the grammar does not allow raw.
 fn escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
@@ -401,7 +328,6 @@ fn escape(value: &str) -> String {
     out
 }
 
-/// Returns the game type for the game mode name of a RakNet pong response.
 fn game_type(mode: &str) -> u8 {
     match mode.trim().to_ascii_lowercase().as_str() {
         "creative" => 1,
@@ -475,23 +401,12 @@ mod tests {
         assert_eq!(original.game_version, decoded.game_version);
     }
 
-    /// Byte-for-byte compatibility with go-nethernet's v7 test vector.
     #[test]
     fn test_v7_matches_go_nethernet_vector() {
         let vector: &[u8] = &[
-            0x07, 0x06, b's', b'e', b'r', b'v', b'e', b'r', // server name
-            0x8a, 0x22, // protocol: 2181 zigzag varint
-            0x07, b'1', b'.', b'2', b'6', b'.', b'5', b'0', // game version
-            0x05, b'w', b'o', b'r', b'l', b'd', // level name
-            0x02, // player count: 1
-            0x10, // max player count: 8
-            0x04, // game type: 2 (adventure)
-            0x00, // editor world: false
-            0x01, // hardcore: true
-            0x01, // flag a: true
-            0x01, // flag b: true
-            0x05, b'n', b'o', b'n', b'c', b'e', // session id
-            0x08, // connection type: 4
+            0x07, 0x06, b's', b'e', b'r', b'v', b'e', b'r', 0x8a, 0x22, 0x07, b'1', b'.', b'2',
+            b'6', b'.', b'5', b'0', 0x05, b'w', b'o', b'r', b'l', b'd', 0x02, 0x10, 0x04, 0x00,
+            0x01, 0x01, 0x01, 0x05, b'n', b'o', b'n', b'c', b'e', 0x08,
         ];
 
         let data = ServerData {
@@ -532,7 +447,6 @@ mod tests {
         assert_eq!(decoded.connection_type, 4);
     }
 
-    /// A response captured from a vanilla 1.26.51 client hosting a world.
     #[test]
     fn test_v7_real_game_capture() {
         let captured = hex::decode(
@@ -587,23 +501,22 @@ mod tests {
         assert_eq!(decoded.connection_type, 4);
     }
 
-    /// v6 decoding must stay byte-compatible with what pre-1.26 games send.
     #[test]
     fn test_v6_is_auto_detected() {
         let mut encoded = Vec::new();
         encoded.write_u8(ServerDataVersion::V6.as_byte()).unwrap();
         write_bytes_u8(&mut encoded, b"V6 Server").unwrap();
         write_bytes_u8(&mut encoded, b"V6 World").unwrap();
-        encoded.write_u8(2 << 1).unwrap(); // game type
+        encoded.write_u8(2 << 1).unwrap();
         encoded.write_i32::<LittleEndian>(3).unwrap();
         encoded.write_i32::<LittleEndian>(10).unwrap();
-        encoded.write_u8(0).unwrap(); // editor world
-        encoded.write_u8(1).unwrap(); // hardcore
-        encoded.write_u8(1).unwrap(); // flag a
-        encoded.write_u8(0).unwrap(); // flag b
+        encoded.write_u8(0).unwrap();
+        encoded.write_u8(1).unwrap();
+        encoded.write_u8(1).unwrap();
+        encoded.write_u8(0).unwrap();
         write_bytes_u8(&mut encoded, b"0123456789abcdef").unwrap();
-        encoded.write_u8(2 << 1).unwrap(); // transport layer
-        encoded.write_u8(4 << 1).unwrap(); // connection type
+        encoded.write_u8(2 << 1).unwrap();
+        encoded.write_u8(4 << 1).unwrap();
 
         let decoded = ServerData::decode(&encoded).unwrap();
 
@@ -619,27 +532,16 @@ mod tests {
         assert_eq!(decoded.session_id, "0123456789abcdef");
         assert_eq!(decoded.transport_layer, 2);
         assert_eq!(decoded.connection_type, 4);
-        // v6 has no protocol/version fields
         assert_eq!(decoded.protocol_version, 0);
         assert_eq!(decoded.game_version, "");
     }
 
-    /// Byte-for-byte compatibility with go-nethernet's v5 test vectors.
     #[test]
     fn test_v5_is_auto_detected() {
         let vector: &[u8] = &[
-            0x05, // version
-            0x06, b's', b'e', b'r', b'v', b'e', b'r', // server name
-            0x05, b'w', b'o', b'r', b'l', b'd', // level name
-            0x04, // game type: 2 (adventure)
-            0x01, 0x00, 0x00, 0x00, // player count: 1
-            0x08, 0x00, 0x00, 0x00, // max player count: 8
-            0x00, // editor world: false
-            0x01, // hardcore: true
-            0x01, // accepts online auth: true
-            0x01, // accepts self-signed auth: true
-            0x04, // transport layer: 2 (NetherNet)
-            0x08, // connection type: 4 (LAN)
+            0x05, 0x06, b's', b'e', b'r', b'v', b'e', b'r', 0x05, b'w', b'o', b'r', b'l', b'd',
+            0x04, 0x01, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x04,
+            0x08,
         ];
 
         let decoded = ServerData::decode(vector).unwrap();
@@ -654,13 +556,10 @@ mod tests {
         assert!(decoded.flag_b);
         assert_eq!(decoded.transport_layer, 2);
         assert_eq!(decoded.connection_type, 4);
-        // v5 predates the session id and protocol/version fields.
         assert_eq!(decoded.session_id, "");
         assert_eq!(decoded.protocol_version, 0);
         assert_eq!(decoded.game_version, "");
 
-        // The second upstream vector only flips self-signed auth off, the third
-        // byte from the end.
         let mut vector = vector.to_vec();
         let flag_b_index = vector.len() - 3;
         vector[flag_b_index] = 0x00;
@@ -669,8 +568,6 @@ mod tests {
         assert!(!decoded.flag_b);
     }
 
-    /// v5 was the first version with varuint32-prefixed strings, so names are
-    /// no longer limited to 255 bytes.
     #[test]
     fn test_v5_allows_long_varint_strings() {
         let server_name = "s".repeat(300);
@@ -718,7 +615,7 @@ mod tests {
 
     #[test]
     fn test_version_mismatch() {
-        let data = vec![3]; // Unsupported version
+        let data = vec![3];
         let result = ServerData::decode(&data);
         assert!(result.is_err());
     }

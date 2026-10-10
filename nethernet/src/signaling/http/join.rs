@@ -1,31 +1,20 @@
-//! What a peer posts to join over the HTTP endpoint, and how it reads the answer back.
-//!
-//! Transport-agnostic: building and sending the actual request, and reading the response
-//! off the wire, is left to the caller.
-
 use crate::error::{ProtocolError, SignalErrorCode};
 use crate::protocol::packet::discovery::ServerData;
 use crate::signaling::http::JOIN_PATH;
 use thiserror::Error;
 
-/// Content type a join request's body, and a successful answer's body, are sent as.
 pub const CONTENT_TYPE: &str = "application/sdp";
 
-/// User agent Minecraft's own HTTP client sends, which some servers require.
 pub const CLIENT_USER_AGENT: &str = "libhttpclient/1.0.0.0";
 
-/// Largest answer accepted from a server.
 pub const MAX_ANSWER_SIZE: usize = 1 << 20;
 
-/// The path the server data of a network is read from.
 pub const STATUS_PATH: &str = JOIN_PATH;
 
-/// The path a peer posts its offer to on the given network.
 pub fn join_path(network_id: &str) -> String {
     format!("{JOIN_PATH}/{network_id}")
 }
 
-/// Why a join response could not be used as an answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum JoinResponseError {
     #[error("server answered with status {0}")]
@@ -37,13 +26,10 @@ pub enum JoinResponseError {
     #[error("answer exceeds {0} bytes")]
     TooLarge(usize),
 
-    /// A join that fails is answered with the numeric error code as the body, per the
-    /// HTTP signaling guide, rather than out of band.
     #[error("server rejected the offer with code {0:?}")]
     Rejected(SignalErrorCode),
 }
 
-/// Why a status response could not be read as server data.
 #[derive(Debug, Error)]
 pub enum StatusResponseError {
     #[error("server answered with status {0}")]
@@ -53,7 +39,6 @@ pub enum StatusResponseError {
     Malformed(#[source] ProtocolError),
 }
 
-/// Reads the server data out of the response of the status endpoint.
 pub fn validate_status_response(
     status: u16,
     body: &[u8],
@@ -64,8 +49,6 @@ pub fn validate_status_response(
     ServerData::from_json(&String::from_utf8_lossy(body)).map_err(StatusResponseError::Malformed)
 }
 
-/// Checks a join response's status and body for the answer, per the HTTP signaling
-/// guide's section 5.
 pub fn validate_join_response(status: u16, body: &str) -> Result<(), JoinResponseError> {
     if !(200..300).contains(&status) {
         return Err(JoinResponseError::Status(status));

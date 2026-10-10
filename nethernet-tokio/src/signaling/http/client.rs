@@ -1,9 +1,3 @@
-//! Signaling over the HTTP endpoints exposed by NetherNet servers.
-//!
-//! Dedicated servers accept an SDP offer on `/v1/join/{network id}` and answer with the
-//! SDP of the connection in the response body. As a request only carries a single
-//! description, candidates are embedded in it instead of being signaled separately.
-
 use crate::error::{NetherError, Result};
 use crate::protocol::packet::discovery::ServerData;
 use crate::protocol::{Signal, SignalType};
@@ -17,14 +11,8 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use url::Url;
 
-/// Guards installation of the process-wide TLS provider.
 static PROVIDER: Once = Once::new();
 
-/// Signaling implementation for connecting to servers that expose an HTTP endpoint.
-///
-/// The network ID of a remote connection is the base URL of its endpoint, such as
-/// `https://example.com:19132`, while the local network ID identifies this client to
-/// the server.
 pub struct HttpSignaling {
     network_id: String,
     client: Client,
@@ -32,10 +20,6 @@ pub struct HttpSignaling {
 }
 
 impl HttpSignaling {
-    /// Creates a signaling implementation using a default HTTP client.
-    ///
-    /// Installs the process-wide TLS provider if no other one has been installed yet,
-    /// as building an HTTP client requires one.
     pub fn new(network_id: String) -> Result<Self> {
         PROVIDER.call_once(|| {
             let _ = rustls::crypto::ring::default_provider().install_default();
@@ -49,10 +33,6 @@ impl HttpSignaling {
         Ok(Self::with_client(network_id, client))
     }
 
-    /// Creates a signaling implementation using the given HTTP client.
-    ///
-    /// Building a client requires a process-wide TLS provider, which
-    /// [`HttpSignaling::new`] installs.
     pub fn with_client(network_id: String, client: Client) -> Self {
         let (signal_tx, _) = broadcast::channel(16);
 
@@ -63,7 +43,6 @@ impl HttpSignaling {
         }
     }
 
-    /// Returns the URL an offer for the remote network is sent to.
     fn join_url(&self, network_id: &str) -> Result<Url> {
         let url = Url::parse(network_id)
             .map_err(|e| NetherError::Other(format!("parse network ID as URL: {}", e)))?;
@@ -78,14 +57,12 @@ impl HttpSignaling {
             .map_err(|e| NetherError::Other(format!("build join URL: {}", e)))
     }
 
-    /// Returns the URL the capability check of the remote network is read from.
     fn status_url(&self, network_id: &str) -> Result<Url> {
         let mut url = self.join_url(network_id)?;
         url.set_path(join::STATUS_PATH);
         Ok(url)
     }
 
-    /// Reads the data the remote network advertises on its status endpoint.
     pub async fn server_data(&self, network_id: &str) -> Result<ServerData> {
         let response = self
             .client
@@ -103,7 +80,6 @@ impl HttpSignaling {
         Ok(join::validate_status_response(status.as_u16(), &body)?)
     }
 
-    /// Sends the offer to the endpoint of the remote network and returns its answer.
     async fn join(&self, signal: &Signal) -> Result<String> {
         let response = self
             .client
@@ -131,10 +107,6 @@ impl HttpSignaling {
 }
 
 impl HttpSignaling {
-    /// Signals an offer to the endpoint of the remote network and notifies its answer.
-    ///
-    /// Only offers are supported, as an answer is the response of the request carrying
-    /// the offer and candidates are embedded in both.
     pub async fn signal(&self, signal: Signal) -> Result<()> {
         match signal.signal_type {
             SignalType::Offer => {
@@ -174,8 +146,6 @@ impl HttpSignaling {
         self.network_id.clone()
     }
 
-    /// Always returns `true`, as a request carries a single description that must
-    /// already contain every local candidate.
     pub fn disable_trickle_ice(&self) -> bool {
         true
     }

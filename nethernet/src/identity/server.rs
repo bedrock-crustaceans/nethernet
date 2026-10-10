@@ -1,5 +1,3 @@
-//! The identity a server signs its answers with.
-
 use crate::identity::error::{IdentityError, Result};
 use crate::identity::{Assertion, Identity, Idp, canonical_fingerprint_json};
 use base64::Engine;
@@ -12,15 +10,8 @@ use p384::pkcs8::{EncodePublicKey, LineEnding};
 use serde_json::json;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// How long a token is issued for when the caller names no expiry of its own.
 pub const DEFAULT_TOKEN_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Produces the identity assertion embedded in each answer.
-///
-/// Clients pin the public key of a server, so the key should be kept between restarts.
-/// [`ServerIdentity::from_pem`] loads one that was stored, while
-/// [`ServerIdentity::generate`] produces an ephemeral one that prompts returning players
-/// again.
 #[derive(Debug, Clone)]
 pub struct ServerIdentity {
     signing: SigningKey,
@@ -30,12 +21,10 @@ pub struct ServerIdentity {
 }
 
 impl ServerIdentity {
-    /// Generates a key that is not stored anywhere and issues a token for it.
     pub fn generate(domain: impl Into<String>, now: SystemTime) -> Result<Self> {
         Self::generate_with_expiry(domain, now, Some(DEFAULT_TOKEN_LIFETIME))
     }
 
-    /// Generates a key and issues a token that is valid for the given lifetime.
     pub fn generate_with_expiry(
         domain: impl Into<String>,
         now: SystemTime,
@@ -44,14 +33,10 @@ impl ServerIdentity {
         Self::from_key(SigningKey::generate(), domain, now, lifetime)
     }
 
-    /// Loads the key from an unencrypted PEM, either SEC1 `EC PRIVATE KEY` or PKCS#8
-    /// `PRIVATE KEY`, and issues a token for it. A PEM carries no subject, so the domain
-    /// is named by the caller.
     pub fn from_pem(pem: &str, domain: impl Into<String>, now: SystemTime) -> Result<Self> {
         Self::from_pem_with_expiry(pem, domain, now, Some(DEFAULT_TOKEN_LIFETIME))
     }
 
-    /// Loads the key from a PEM and issues a token that is valid for the given lifetime.
     pub fn from_pem_with_expiry(
         pem: &str,
         domain: impl Into<String>,
@@ -64,7 +49,6 @@ impl ServerIdentity {
         Self::from_key(secret.into(), domain, now, lifetime)
     }
 
-    /// Issues a token for a key that was loaded elsewhere.
     pub fn from_key(
         signing: SigningKey,
         domain: impl Into<String>,
@@ -99,7 +83,6 @@ impl ServerIdentity {
         })
     }
 
-    /// Writes the key as a SEC1 PEM, which keeps the public point alongside the scalar.
     pub fn to_pem(&self) -> Result<String> {
         let secret = SecretKey::from(self.signing.as_nonzero_scalar());
         Ok(secret
@@ -108,22 +91,18 @@ impl ServerIdentity {
             .to_string())
     }
 
-    /// The key answers are signed with.
     pub fn verifying_key(&self) -> &VerifyingKey {
         &self.verifying
     }
 
-    /// The token embedded in every assertion.
     pub fn token(&self) -> &str {
         &self.token
     }
 
-    /// The domain the identity names itself with.
     pub fn domain(&self) -> &str {
         &self.domain
     }
 
-    /// Builds the value of the `a=identity` attribute for a description.
     pub fn identity_value(&self, answer: &str) -> Result<String> {
         let fingerprints = canonical_fingerprint_json(answer)?;
         let signed = sign(&self.signing, &fingerprints)?;
@@ -149,8 +128,6 @@ impl ServerIdentity {
         .to_base64()
     }
 
-    /// Inserts the identity into a description, directly above its first media
-    /// description, which is where the protocol expects to find it.
     pub fn augment(&self, answer: &str) -> Result<String> {
         let attribute = format!("a=identity:{}", self.identity_value(answer)?);
         let eol = match answer.contains("\r\n") {
@@ -179,7 +156,6 @@ impl ServerIdentity {
     }
 }
 
-/// Signs a payload and returns its compact serialization.
 fn sign(key: &SigningKey, payload: &str) -> Result<String> {
     let header = URL_SAFE_NO_PAD.encode("{\"alg\":\"ES384\"}");
     let payload = URL_SAFE_NO_PAD.encode(payload);

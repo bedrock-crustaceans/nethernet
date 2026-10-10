@@ -17,7 +17,6 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-/// Signals an error back to the remote connection referenced by the IDs.
 async fn signal_error(
     signaling: &ServerSignaling,
     connection_id: u64,
@@ -32,16 +31,10 @@ async fn signal_error(
     }
 }
 
-/// Connections are referenced by both the remote network ID and the connection ID, as
-/// connection IDs are only unique within a single network.
 type ConnectionKey = (String, u64);
 
-/// Per-connection dispatch table, owned entirely by the signal handler task; dropping it
-/// (when that task ends) drops every sender in it, which is what lets a forwarder task
-/// waiting on the matching receiver see the channel close.
 type SignalDispatchers = HashMap<ConnectionKey, mpsc::UnboundedSender<Signal>>;
 
-/// NetherNet listener - accepts NetherNet connections
 pub struct NetherServer {
     incoming: mpsc::UnboundedReceiver<AcceptedSession>,
     local_addr: Addr,
@@ -50,22 +43,10 @@ pub struct NetherServer {
 }
 
 impl NetherServer {
-    /// Create a new [`NetherServer`] on the local network of the signaling implementation.
-    ///
-    /// The returned listener is ready to accept inbound sessions. It initializes internal
-    /// queues and dispatch structures, and spawns a background task to process signaling
-    /// events; dropping the listener cancels that task.
     pub async fn bind(signaling: impl Into<ServerSignaling>) -> Result<Self> {
         Self::bind_with(signaling, ConnectionConfig::default()).await
     }
 
-    /// Creates a [`NetherServer`] using the timeouts of the given configuration.
-    ///
-    /// # Errors
-    ///
-    /// [`NetherError::IdentityRequired`] when the signaling is HTTP and the configuration
-    /// has no identity, since a vanilla client refuses answers that carry none. Setting
-    /// [`ConnectionConfig::allow_unsigned_answers`] opts out.
     pub async fn bind_with(
         signaling: impl Into<ServerSignaling>,
         config: ConnectionConfig,
@@ -127,7 +108,6 @@ impl NetherServer {
                                         }
                                     }
                                     SignalType::Answer | SignalType::Candidate | SignalType::Error => {
-                                        // Dispatch to per-connection channel
                                         let key = (signal.network_id.clone(), signal.connection_id);
                                         if let Some(tx) = dispatchers.get(&key) {
                                             let _ = tx.send(signal);
@@ -143,8 +123,6 @@ impl NetherServer {
         })
     }
 
-    /// Answers an offer signaled by a remote connection and establishes the connection
-    /// once it is ready.
     async fn handle_offer(
         signal: Signal,
         signaling: &ServerSignaling,
@@ -172,8 +150,6 @@ impl NetherServer {
         }
     }
 
-    /// Answers the offer, reporting the error code to be signaled back to the remote
-    /// connection when a step fails.
     async fn answer_offer(
         signal: Signal,
         signaling: &ServerSignaling,
@@ -289,7 +265,6 @@ impl NetherServer {
         Ok(())
     }
 
-    /// Waits for and returns the next inbound session.
     pub async fn accept(&mut self) -> Result<AcceptedSession> {
         self.incoming
             .recv()
@@ -297,10 +272,6 @@ impl NetherServer {
             .ok_or(NetherError::ConnectionClosed)
     }
 
-    /// Closes the listener and every session that has not been accepted yet.
-    ///
-    /// Blocked calls to [`NetherServer::accept`] return
-    /// [`NetherError::ConnectionClosed`] once the listener is closed.
     pub async fn close(&mut self) -> Result<()> {
         self.cancel_token.cancel();
         self.incoming.close();
@@ -311,9 +282,6 @@ impl NetherServer {
             }
         }
 
-        // Waiting for the task to actually finish, rather than just cancelling it, is
-        // what guarantees its dispatch table (and every sender in it) is dropped before
-        // this returns.
         if let Some(task) = self.signal_handler_task.take() {
             let _ = task.await;
         }
@@ -321,16 +289,11 @@ impl NetherServer {
         Ok(())
     }
 
-    /// Address of the local network this listener accepts connections on.
     pub fn local_addr(&self) -> &Addr {
         &self.local_addr
     }
 }
 
-/// Keeps forwarding further signals (e.g. a late-trickled or redundant candidate, or a
-/// remote error) into the now-running connection, until either the dispatcher's route is
-/// exhausted or the connection stops (which drops the driver's command receiver, so
-/// `command_tx.send` starts failing).
 fn spawn_late_signal_forwarder(
     mut signals: mpsc::UnboundedReceiver<Signal>,
     command_tx: mpsc::UnboundedSender<Command>,
@@ -347,7 +310,6 @@ fn spawn_late_signal_forwarder(
     });
 }
 
-/// Waits for the session to signal readiness (both data channels open), or times out.
 async fn wait_ready(
     ready_rx: tokio::sync::oneshot::Receiver<()>,
     timeout: std::time::Duration,

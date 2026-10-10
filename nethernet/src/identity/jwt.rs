@@ -1,5 +1,3 @@
-//! Parsing of the compact JWS serialization and of the claims a token carries.
-
 use crate::identity::error::{IdentityError, Result};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -10,10 +8,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Clock skew allowed when an expiry is checked.
 const LEEWAY: Duration = Duration::from_secs(60);
 
-/// The header of a signed token.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Header {
     #[serde(default)]
@@ -23,7 +19,6 @@ pub struct Header {
     pub kid: Option<String>,
 }
 
-/// A token split into the parts the signature covers.
 #[derive(Debug, Clone)]
 pub struct Jws {
     pub header: Header,
@@ -33,7 +28,6 @@ pub struct Jws {
 }
 
 impl Jws {
-    /// Splits a compact serialization, decoding its header, payload and signature.
     pub fn parse(compact: &str) -> Result<Self> {
         let mut parts = compact.split('.');
         let (Some(header), Some(payload), Some(signature), None) =
@@ -53,8 +47,6 @@ impl Jws {
         })
     }
 
-    /// Splits a detached serialization, which carries its payload elsewhere, and attaches
-    /// the payload the signature is supposed to cover.
     pub fn parse_detached(compact: &str, payload: &str) -> Result<Self> {
         let mut parts = compact.split('.');
         let (Some(header), Some(""), Some(signature), None) =
@@ -75,7 +67,6 @@ impl Jws {
         })
     }
 
-    /// Verifies an ES384 signature against the given key.
     pub fn verify_es384(&self, key: &VerifyingKey) -> Result<()> {
         if self.header.alg != "ES384" {
             return Err(IdentityError::Malformed(format!(
@@ -91,7 +82,6 @@ impl Jws {
             .map_err(|_| IdentityError::FingerprintMismatch)
     }
 
-    /// Decodes the payload as the claims of a token.
     pub fn claims(&self) -> Result<Claims> {
         serde_json::from_slice(&self.payload)
             .map(Claims::new)
@@ -99,8 +89,6 @@ impl Jws {
     }
 }
 
-/// The claims of a token, kept as they were written so that anything the protocol does
-/// not read is still available to the application.
 #[derive(Debug, Clone, Default)]
 pub struct Claims {
     values: serde_json::Map<String, Value>,
@@ -111,38 +99,30 @@ impl Claims {
         Self { values }
     }
 
-    /// The claims as they were written.
     pub fn values(&self) -> &serde_json::Map<String, Value> {
         &self.values
     }
 
-    /// Returns a claim as a string, for claims this crate does not read itself.
     pub fn string(&self, claim: &str) -> Option<&str> {
         self.values.get(claim).and_then(Value::as_str)
     }
 
-    /// The subject of the token.
     pub fn subject(&self) -> Option<&str> {
         self.string("sub")
     }
 
-    /// The issuer of the token.
     pub fn issuer(&self) -> Option<&str> {
         self.string("iss")
     }
 
-    /// The Xbox user ID of the player, which is only attested when the token is issued by
-    /// the Minecraft authorization service.
     pub fn xuid(&self) -> Option<&str> {
         self.string("xid")
     }
 
-    /// The Xbox gamertag of the player, attested under the same terms as the user ID.
     pub fn display_name(&self) -> Option<&str> {
         self.string("xname")
     }
 
-    /// The audiences the token is addressed to.
     pub fn audience(&self) -> Vec<&str> {
         match self.values.get("aud") {
             Some(Value::String(audience)) => vec![audience.as_str()],
@@ -151,18 +131,11 @@ impl Claims {
         }
     }
 
-    /// The expiry of the token.
     pub fn expiry(&self) -> Option<SystemTime> {
         let seconds = self.values.get("exp").and_then(Value::as_u64)?;
         Some(UNIX_EPOCH + Duration::from_secs(seconds))
     }
 
-    /// The key the peer proved it holds, from the `cpk` claim.
-    ///
-    /// Nothing below the transport ties this to whatever identity the application carries
-    /// afterwards. If the login step presents its own signed identity, compare its key to
-    /// this one and reject a mismatch, or a peer can present an identity it captured
-    /// elsewhere and did not sign for.
     pub fn client_public_key(&self) -> Result<VerifyingKey> {
         let cpk = self.string("cpk").ok_or_else(|| {
             IdentityError::ClientPublicKey("the token carries no cpk".to_string())
@@ -176,7 +149,6 @@ impl Claims {
             .map_err(|e| IdentityError::ClientPublicKey(format!("not a key on P-384: {}", e)))
     }
 
-    /// Checks that the token carries an expiry and is within it.
     pub fn check_expiry(&self, now: SystemTime) -> Result<()> {
         let expiry = self
             .expiry()

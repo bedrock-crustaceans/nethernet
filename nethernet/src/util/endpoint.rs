@@ -1,30 +1,16 @@
-//! Numeric classification of endpoint addresses.
-//!
-//! Nothing here resolves a name or probes reachability, so a lookup can never block a
-//! state machine or leave the host.
-
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-/// Where an address sits, following the IANA special purpose registries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
-    /// Globally reachable unicast.
     Public,
 
-    /// Reachable from the same network or overlay: RFC 1918, carrier grade NAT, unique local.
     Private,
 
-    /// This host only.
     Loopback,
 
-    /// Special purpose, documentation, or otherwise no use to a peer.
     Unusable,
 }
 
-/// Reads an IP literal, never a name.
-///
-/// The character set also turns away a zone ID, brackets and surrounding space, which
-/// the standard library would otherwise accept in some shapes.
 pub fn parse(value: &str) -> Option<IpAddr> {
     if value.is_empty()
         || value.len() > 45
@@ -39,7 +25,6 @@ pub fn parse(value: &str) -> Option<IpAddr> {
     Some(normalize(address))
 }
 
-/// Unwraps an IPv4 mapped IPv6 address so that two spellings of one address compare equal.
 pub fn normalize(address: IpAddr) -> IpAddr {
     match address {
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
@@ -50,7 +35,6 @@ pub fn normalize(address: IpAddr) -> IpAddr {
     }
 }
 
-/// Returns the scope of the address.
 pub fn scope(address: IpAddr) -> Scope {
     match normalize(address) {
         IpAddr::V4(address) => scope_v4(address),
@@ -71,7 +55,6 @@ fn scope_v4(address: Ipv4Addr) -> Scope {
     if a == 127 {
         return Scope::Loopback;
     }
-    // 192.0.0.9 and .10 are the PCP and TURN anycast addresses, which a peer can reach
     if a == 0
         || a >= 224
         || (a == 169 && b == 254)
@@ -94,7 +77,6 @@ fn scope_v6(address: Ipv6Addr) -> Scope {
     if address.is_loopback() {
         return Scope::Loopback;
     }
-    // Global unicast is 2000::/3 alone, less 6to4, the protocol block and the two doc ranges
     if a & 0xe000 != 0x2000
         || a == 0x2002
         || (a == 0x2001 && (b < 0x200 || b == 0xdb8))
@@ -105,10 +87,6 @@ fn scope_v6(address: Ipv6Addr) -> Scope {
     Scope::Public
 }
 
-/// Reports whether an address is worth publishing.
-///
-/// A private, carrier grade NAT or unique local address is, since a peer on the same
-/// network or overlay reaches it. Loopback only counts when a proxy sits in front.
 pub fn advertisable(address: IpAddr, local_development: bool) -> bool {
     match scope(address) {
         Scope::Public | Scope::Private => true,
@@ -117,7 +95,6 @@ pub fn advertisable(address: IpAddr, local_development: bool) -> bool {
     }
 }
 
-/// Reports whether a peer on another network could reach the address.
 pub fn routable(address: IpAddr) -> bool {
     matches!(scope(address), Scope::Public | Scope::Private)
 }

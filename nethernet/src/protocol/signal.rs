@@ -2,8 +2,6 @@ use crate::error::{ProtocolError, SignalErrorCode};
 use std::fmt;
 use std::str::FromStr;
 
-/// The type of a [`Signal`], named on the wire as `CONNECTREQUEST`, `CONNECTRESPONSE`,
-/// `CANDIDATEADD` and `CONNECTERROR` respectively.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalType {
     Offer,
@@ -43,18 +41,15 @@ impl fmt::Display for SignalType {
     }
 }
 
-/// NetherNet signal message
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signal {
     pub signal_type: SignalType,
     pub connection_id: u64,
-    /// The SDP, ICE candidate, or error code, depending on `signal_type`.
     pub data: String,
     pub network_id: String,
 }
 
 impl Signal {
-    /// Constructs a Signal from its components.
     pub fn new(
         signal_type: SignalType,
         connection_id: u64,
@@ -90,7 +85,6 @@ impl Signal {
         )
     }
 
-    /// Parses a `TYPE CONNECTION_ID DATA` string and assigns the given network ID.
     pub fn from_string(s: &str, network_id: String) -> Result<Self, ProtocolError> {
         let parts: Vec<&str> = s.splitn(3, ' ').collect();
         if parts.len() != 3 {

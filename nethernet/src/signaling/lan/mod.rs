@@ -1,10 +1,3 @@
-//! Signaling over the LAN discovery protocol.
-//!
-//! Servers answer the requests clients broadcast to the discovery port, and both sides
-//! carry their offers, answers and candidates in the message packets that follow. The
-//! state machine below owns the address table, the broadcasts and the retransmissions,
-//! and leaves every socket operation to its caller.
-
 pub mod config;
 pub mod error;
 pub mod input;
@@ -24,11 +17,8 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-/// Keepalive clients broadcast between their discovery requests. It is not a negotiation
-/// signal and carries nothing to act on.
 const PING: &str = "Ping";
 
-/// The signaling of a single NetherNet network on the local network.
 pub struct LanSignaler {
     network_id: u64,
     config: LanSignalerConfig,
@@ -79,7 +69,6 @@ impl Sans for LanSignaler {
 }
 
 impl LanSignaler {
-    /// Creates the signaling of the network with the given ID.
     pub fn new(network_id: u64, config: LanSignalerConfig) -> Self {
         Self {
             network_id,
@@ -94,29 +83,24 @@ impl LanSignaler {
         }
     }
 
-    /// The ID of the local network.
     pub fn network_id(&self) -> u64 {
         self.network_id
     }
 
-    /// The servers that have answered a discovery request, keyed by their network ID.
     pub fn discovered(&self) -> &HashMap<u64, ServerData> {
         &self.discovered
     }
 
-    /// The address a remote network was last seen at.
     pub fn address(&self, network_id: u64) -> Option<SocketAddr> {
         self.addresses.get(&network_id).map(|entry| entry.addr)
     }
 
-    /// The addresses every known network was last seen at.
     pub fn addresses(&self) -> impl Iterator<Item = (u64, SocketAddr)> + '_ {
         self.addresses
             .iter()
             .map(|(&network_id, entry)| (network_id, entry.addr))
     }
 
-    /// The signals that are still waiting to be answered.
     pub fn pending_signals(&self) -> usize {
         self.pending.len()
     }
@@ -127,7 +111,6 @@ impl LanSignaler {
         addr: SocketAddr,
         now: Instant,
     ) -> Result<(), LanSignalerError> {
-        // Anything that is not a discovery packet belongs to another service on the port
         let (packet, sender) = match decode(buf) {
             Ok(decoded) => decoded,
             Err(e) => {
@@ -175,7 +158,6 @@ impl LanSignaler {
                     return Ok(());
                 };
 
-                // The remote connection answered, so nothing has to be retransmitted for it
                 self.pending.retain(|pending| {
                     pending.target != sender || pending.signal.connection_id != signal.connection_id
                 });
@@ -269,7 +251,6 @@ impl LanSignaler {
         });
 
         for (signal, target) in due {
-            // The address may have expired since the signal was queued
             if self.send_signal(&signal, target).is_err() {
                 self.pending
                     .retain(|pending| pending.target != target || pending.signal != signal);
@@ -296,10 +277,6 @@ impl LanSignaler {
         self.output
             .push_back(LanSignalerOutput::Datagram(buf.clone(), addr));
 
-        // Some sandboxed/containerized environments do not route
-        // 255.255.255.255 back into the local network namespace. The loopback
-        // copy preserves discovery of same-host servers without changing LAN
-        // behavior.
         let loopback = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), addr.port());
         if loopback != addr {
             self.output
@@ -318,7 +295,6 @@ impl LanSignaler {
         self.last_cleanup = Some(now);
     }
 
-    /// How long the caller may wait before the next broadcast or retransmission is due.
     fn next_timer(&self, now: Instant) -> Duration {
         let mut wait = self.config.address_timeout;
 

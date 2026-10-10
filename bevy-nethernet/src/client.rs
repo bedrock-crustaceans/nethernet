@@ -42,8 +42,6 @@ impl NetherClientPlugin {
     }
 }
 
-/// PreUpdate set containing NetherClientPlugin's update system. Order your own
-/// systems `.after(NetherClientSet)` to see this tick's events/received data.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NetherClientSet;
 

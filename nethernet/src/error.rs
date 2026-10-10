@@ -1,35 +1,26 @@
-//! Errors shared by the protocol and the signaling state machines.
-
 use std::io;
 use thiserror::Error;
 
-/// Errors produced while encoding or decoding the NetherNet protocol.
 #[derive(Debug, Error)]
 pub enum ProtocolError {
-    /// IO error raised by a cursor over an encoded packet.
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
 
-    /// A message or one of its segments could not be parsed.
     #[error("Message parse error: {0}")]
     MessageParse(String),
 
-    /// A message exceeds the maximum size the protocol allows.
     #[error("Message too large: exceeds maximum size of {0} bytes")]
     MessageTooLarge(usize),
 
-    /// A discovery packet failed to encrypt, decrypt or authenticate.
     #[error("Crypto error: {0}")]
     Crypto(String),
 
-    /// General error.
     #[error("{0}")]
     Other(String),
 }
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;
 
-/// Error codes carried by a `CONNECTERROR` signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum SignalErrorCode {

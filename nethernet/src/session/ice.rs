@@ -1,6 +1,3 @@
-//! ICE connectivity, restricted to NetherNet's requirements: UDP-only, host candidates
-//! only, no STUN/TURN (see the NetherNet HTTP signaling guide, section 6).
-
 use crate::error::ProtocolError;
 use crate::protocol::webrtc::certificate;
 use bytes::BytesMut;
@@ -15,17 +12,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Wraps a single [`Agent`] bound to exactly one local host candidate. NetherNet never
-/// gathers server-reflexive or relay candidates, so there is never more than one local
-/// address to track.
 pub struct IceLayer {
     agent: Agent,
     local_addr: SocketAddr,
 }
 
 impl IceLayer {
-    /// Creates an ICE layer for the given locally bound address. `is_controlling`
-    /// matches the WebRTC offerer/answerer split: the offering side controls.
     pub fn new(
         local_addr: SocketAddr,
         is_controlling: bool,
@@ -63,17 +55,14 @@ impl IceLayer {
         Ok(Self { agent, local_addr })
     }
 
-    /// The local credentials (ufrag/pwd) to be signaled in this side's description.
     pub fn local_credentials(&self) -> &Credentials {
         self.agent.get_local_credentials()
     }
 
-    /// This side's one gathered host candidate.
     pub fn local_candidate(&self) -> &Candidate {
         &self.agent.get_local_candidates()[0]
     }
 
-    /// Applies the remote side's ICE credentials, signaled in its description.
     pub fn set_remote_credentials(
         &mut self,
         ufrag: String,
@@ -84,8 +73,6 @@ impl IceLayer {
             .map_err(|e| ProtocolError::Other(format!("{e}")))
     }
 
-    /// Adds a candidate signaled by the remote connection (embedded in a full-ICE SDP,
-    /// or trickled separately via `CANDIDATEADD`).
     pub fn add_remote_candidate(&mut self, candidate: Candidate) -> Result<(), ProtocolError> {
         self.agent
             .add_remote_candidate(candidate)
@@ -93,9 +80,6 @@ impl IceLayer {
             .map_err(|e| ProtocolError::Other(format!("{e}")))
     }
 
-    /// Feeds an inbound datagram addressed to this layer's local candidate. Returns
-    /// `false` if `data` isn't a STUN packet destined for this layer (the caller should
-    /// then try handing it to the next layer, e.g. DTLS).
     pub fn handle_read(
         &mut self,
         data: &[u8],
@@ -122,14 +106,12 @@ impl IceLayer {
         Ok(true)
     }
 
-    /// Returns the next outbound STUN datagram to send, if any.
     pub fn poll_write(&mut self) -> Option<(Vec<u8>, SocketAddr)> {
         self.agent
             .poll_write()
             .map(|msg| (msg.message.to_vec(), msg.transport.peer_addr))
     }
 
-    /// Returns the next connection-state or selected-pair event, if any.
     pub fn poll_event(&mut self) -> Option<Event> {
         self.agent.poll_event().map(|tagged| tagged.event)
     }
@@ -144,7 +126,6 @@ impl IceLayer {
         self.agent.poll_timeout()
     }
 
-    /// The currently selected candidate pair's remote address, once connected.
     pub fn selected_remote_addr(&self) -> Option<SocketAddr> {
         self.agent
             .get_selected_candidate_pair()
@@ -152,8 +133,6 @@ impl IceLayer {
     }
 }
 
-/// Distinguishes a STUN packet from everything else sharing the same 5-tuple (DTLS
-/// records, in NetherNet's case).
 fn is_stun_packet(data: &[u8]) -> bool {
     rtc::stun::message::is_stun_message(data)
 }
@@ -168,10 +147,6 @@ mod tests {
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
     }
 
-    /// Drives two ICE agents to completion by relaying each side's outbound STUN
-    /// datagrams into the other's `handle_read`, exactly as a real UDP socket would,
-    /// advancing a simulated clock to whichever timeout either side next requests so
-    /// retransmission/backoff timers actually progress.
     #[test]
     fn two_agents_connect_over_loopback() {
         let mut now = Instant::now();
@@ -245,12 +220,9 @@ mod tests {
 
     #[test]
     fn stun_demux_rejects_non_stun_datagrams() {
-        // DTLS records (handshake=22, application_data=23, ...) are far too short here
-        // and lack STUN's magic cookie at bytes 4..8.
         assert!(!is_stun_packet(&[22, 0, 0]));
         assert!(!is_stun_packet(&[23, 0, 0]));
 
-        // A real (if minimal) STUN header: type + length + magic cookie + transaction id.
         let mut stun_header = vec![0x00, 0x01, 0x00, 0x00];
         stun_header.extend_from_slice(&0x2112A442u32.to_be_bytes());
         stun_header.extend_from_slice(&[0u8; 12]);

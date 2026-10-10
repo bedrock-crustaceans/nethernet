@@ -1,15 +1,8 @@
-//! Loading the identity a server signs its answers with off the filesystem.
-
 use crate::error::{NetherError, Result};
 use nethernet::identity::ServerIdentity;
 use std::path::Path;
 use std::time::SystemTime;
 
-/// Loads the identity from a PEM private key, creating a P-384 key there on first use.
-///
-/// The file is never replaced once it exists, because clients pin the public key and a new
-/// one prompts every returning player again. On Unix it is created readable only by its
-/// owner.
 pub async fn from_pem_or_create(
     pem: impl AsRef<Path>,
     domain: impl Into<String>,
@@ -32,7 +25,6 @@ pub async fn from_pem_or_create(
     }
 }
 
-/// Loads the identity from a PEM private key that has to exist already.
 pub async fn from_pem(pem: impl AsRef<Path>, domain: impl Into<String>) -> Result<ServerIdentity> {
     let contents = tokio::fs::read_to_string(pem.as_ref()).await?;
 

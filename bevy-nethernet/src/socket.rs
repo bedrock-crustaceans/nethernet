@@ -1,8 +1,6 @@
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 
-// Binding to 0.0.0.0 would advertise that literal address as the session's one ICE
-// candidate, so pick a real routable address instead (loopback if none is up).
 pub(crate) fn local_bind_addr() -> SocketAddr {
     let probe = || -> std::io::Result<IpAddr> {
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
@@ -13,15 +11,12 @@ pub(crate) fn local_bind_addr() -> SocketAddr {
     SocketAddr::new(probe().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)), 0)
 }
 
-/// Binds the one socket every session of a client or server shares (see
-/// [`crate::connection::SessionPool`]).
 pub(crate) fn bind_shared_socket() -> std::io::Result<(UdpSocket, SocketAddr)> {
     let socket = UdpSocket::bind(local_bind_addr())?;
     let addr = socket.local_addr()?;
     Ok((socket, addr))
 }
 
-// Wildcard binds are dual-stack like the game's own socket, so neither can silently shadow the other on the port.
 pub(crate) fn bind_discovery_socket(addr: SocketAddr) -> std::io::Result<UdpSocket> {
     let socket = match addr.ip() {
         IpAddr::V4(ip) if ip.is_unspecified() => bind_dual_stack(addr)?,

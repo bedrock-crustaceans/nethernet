@@ -1,11 +1,3 @@
-//! Signaling over the HTTP endpoint dedicated servers expose.
-//!
-//! A peer posts its offer to `/v1/join/{network id}` and the answer is the body of the
-//! response, so a connection is negotiated in a single exchange and no candidate is ever
-//! signaled on its own. The state machine below owns the routing, the limits and the
-//! validation of the identity each offer carries, and leaves every socket operation, the
-//! TLS and the HTTP framing itself to its caller.
-
 pub mod config;
 pub mod error;
 pub mod input;
@@ -27,10 +19,8 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
-/// The header a reverse proxy names the originating client in.
 const FORWARDED_FOR: &str = "x-forwarded-for";
 
-/// The path a peer posts its offer to.
 const JOIN_PATH: &str = "/v1/join";
 
 struct Connection {
@@ -44,7 +34,6 @@ struct Pending {
     deadline: Instant,
 }
 
-/// The signaling of a single NetherNet network behind an HTTP endpoint.
 pub struct HttpSignaler {
     config: HttpSignalerConfig,
 
@@ -98,13 +87,10 @@ impl HttpSignaler {
         }
     }
 
-    /// How many joins are waiting for an answer.
     pub fn pending_joins(&self) -> usize {
         self.pending.len()
     }
 
-    /// How many connections are open, including the ones that have not asked for anything
-    /// yet.
     pub fn connections(&self) -> usize {
         self.connections.len()
     }
@@ -112,7 +98,6 @@ impl HttpSignaler {
     fn connected(&mut self, connection: u64, addr: SocketAddr) {
         let peer = endpoint::normalize(addr.ip());
 
-        // Every client behind a trusted proxy shares its address, so they are not counted
         if self.config.trusted_proxies.contains(peer) {
             self.connections.insert(
                 connection,
@@ -162,7 +147,6 @@ impl HttpSignaler {
             }
         }
 
-        // A join whose connection is gone has nowhere to deliver its answer
         self.pending
             .retain(|_, pending| pending.connection != connection);
     }
@@ -173,8 +157,6 @@ impl HttpSignaler {
         request: &Request<String>,
         now: Instant,
     ) -> Result<(), HttpSignalerError> {
-        // A peer sends its status check and its join on one connection, so what it asked
-        // for here decides whether the next request has anywhere to land
         let keep_alive = keep_alive(request);
         let path = request.uri().path().to_string();
 
@@ -222,7 +204,6 @@ impl HttpSignaler {
         keep_alive: bool,
         now: Instant,
     ) -> Result<(), HttpSignalerError> {
-        // Ahead of the signature check, so a flood cannot make us verify its way to the limit
         if self.pending.len() >= self.config.max_pending_joins {
             tracing::warn!(
                 "refusing joins, {} are already waiting for an answer",
@@ -249,7 +230,6 @@ impl HttpSignaler {
             None => None,
         };
 
-        // The network ID cannot double as the connection ID, it can fall outside the range
         let connection_id = rand::random::<u64>();
         self.pending.insert(
             connection_id,
@@ -329,7 +309,6 @@ impl HttpSignaler {
         Ok(())
     }
 
-    /// The address of the peer, or the one a trusted proxy forwarded on its behalf.
     fn client_address(&self, connection: u64, request: &Request<String>) -> Option<SocketAddr> {
         let remote = self.connections.get(&connection).map(|entry| entry.addr)?;
         if !self
@@ -345,9 +324,6 @@ impl HttpSignaler {
             .get(FORWARDED_FOR)
             .and_then(|value| value.to_str().ok())?;
 
-        // The leftmost entry is the originating client, and only an address literal is
-        // read: resolving a name here would block on DNS and let the header stand for
-        // whatever the answer happened to be
         let first = forwarded.split(',').next()?.trim();
         let first = first.strip_prefix('[').unwrap_or(first);
         let first = first.strip_suffix(']').unwrap_or(first);
@@ -417,10 +393,6 @@ fn keep_alive(request: &Request<String>) -> bool {
     }
 }
 
-/// The wall clock an [`Instant`] falls on, which is what a token expiry is compared to.
-///
-/// The two clocks are read at the same moment, so the difference between them is the time
-/// spent in this call rather than anything a token would notice.
 fn systemtime(now: Instant) -> std::time::SystemTime {
     let elapsed = Instant::now().saturating_duration_since(now);
     std::time::SystemTime::now() - elapsed

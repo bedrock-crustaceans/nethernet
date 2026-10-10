@@ -1,5 +1,3 @@
-//! Encoding and decoding of the NetherNet protocol.
-
 pub mod codec;
 pub mod constants;
 pub mod message;

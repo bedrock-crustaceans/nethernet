@@ -1,9 +1,3 @@
-//! The key set an issuer publishes, and verification of the tokens it signs.
-//!
-//! Fetching the set is left to the caller, which keeps this crate free of IO. A set is
-//! usually read from the `.well-known/keys` endpoint of the issuer and refreshed when a
-//! token names a key that is not in it yet.
-
 use crate::identity::error::{IdentityError, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -12,14 +6,11 @@ use rsa::sha2::{Digest, Sha256};
 use rsa::{BigUint, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 
-/// A set of keys an issuer signs its tokens with.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct JwkSet {
     pub keys: Vec<Jwk>,
 }
 
-/// A single key of a [`JwkSet`]. Only RSA keys are read, as that is what the Minecraft
-/// authorization service publishes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Jwk {
     #[serde(default)]
@@ -36,7 +27,6 @@ pub struct Jwk {
 }
 
 impl JwkSet {
-    /// Returns the key the token names, or every key of the set when it names none.
     pub fn candidates(&self, kid: Option<&str>) -> Vec<&Jwk> {
         match kid {
             Some(kid) => self
@@ -48,14 +38,12 @@ impl JwkSet {
         }
     }
 
-    /// Reports whether the set holds a key with the given ID.
     pub fn contains(&self, kid: &str) -> bool {
         self.keys.iter().any(|key| key.kid.as_deref() == Some(kid))
     }
 }
 
 impl Jwk {
-    /// Verifies an RS256 signature over the signing input of a token.
     pub fn verify_rs256(&self, signing_input: &[u8], signature: &[u8]) -> Result<()> {
         if self.kty != "RSA" {
             return Err(IdentityError::Untrusted(format!(

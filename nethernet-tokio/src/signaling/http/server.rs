@@ -1,9 +1,3 @@
-//! The HTTP endpoint a dedicated server answers offers on.
-//!
-//! The routing, the limits and the identity validation live in the sans-IO state machine,
-//! while this module owns the socket, the optional TLS and the HTTP framing. A listener
-//! bound to this signaling accepts the connections the endpoint negotiates.
-
 use crate::addr::Addr;
 use crate::error::{NetherError, Result};
 use crate::protocol::{Signal, SignalType};
@@ -31,25 +25,18 @@ use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
-/// Largest offer that is read off a connection.
 const MAX_BODY: u64 = 1 << 20;
 
-/// Longest the driver sleeps when the state machine asks for nothing sooner.
 const MAX_IDLE: Duration = Duration::from_secs(1);
 
-/// Options of the endpoint.
 #[derive(Clone)]
 pub struct HttpServerConfig {
-    /// The network ID of this server, which is what a peer names in the path it posts to.
     pub network_id: String,
 
-    /// The routing, the limits and the identity policy.
     pub signaler: HttpSignalerConfig,
 
-    /// The TLS the endpoint is served over, or [`None`] to serve plain HTTP.
     pub tls: Option<Arc<rustls::ServerConfig>>,
 
-    /// How long a connection may sit unused before it is closed.
     pub idle_timeout: Duration,
 }
 
@@ -91,7 +78,6 @@ struct Response {
     keep_alive: bool,
 }
 
-/// Signaling that answers offers posted to the HTTP endpoint of this server.
 pub struct HttpSignalingServer {
     network_id: String,
     local_addr: SocketAddr,
@@ -102,7 +88,6 @@ pub struct HttpSignalingServer {
 }
 
 impl HttpSignalingServer {
-    /// Binds the endpoint and starts serving it.
     pub async fn bind(addr: SocketAddr, config: HttpServerConfig) -> Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
@@ -135,13 +120,10 @@ impl HttpSignalingServer {
         })
     }
 
-    /// The address the endpoint is served on, which is what its network ID has to resolve
-    /// to for a peer to reach it.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
-    /// Stops the endpoint and waits for its driver to finish.
     pub async fn shutdown(mut self) {
         self.cancel_token.cancel();
         if let Some(task) = self.task.take() {
@@ -149,7 +131,6 @@ impl HttpSignalingServer {
         }
     }
 
-    /// Sets the data the status endpoint advertises.
     pub fn set_server_data(&self, server_data: ServerData) {
         let _ = self
             .commands
@@ -187,7 +168,6 @@ impl HttpSignalingServer {
                     break;
                 }
 
-                // The state machine decides whether this peer is holding too many already
                 if !admitted_rx.await.unwrap_or(false) {
                     continue;
                 }
@@ -236,8 +216,6 @@ impl HttpSignalingServer {
                                 Instant::now(),
                             ));
 
-                            // A refusal is the only output a connection produces before it
-                            // has asked for anything
                             let mut refused = false;
                             while let Some(output) = signaler.poll() {
                                 if matches!(output, HttpSignalerOutput::Close(id) if id == connection) {
@@ -352,10 +330,6 @@ impl Drop for HttpSignalingServer {
 }
 
 impl HttpSignalingServer {
-    /// Delivers the answer, or the rejection, of a join that is waiting for one.
-    ///
-    /// A request carries a single description, so nothing else can be signaled back: a
-    /// candidate has to be part of the answer itself.
     pub async fn signal(&self, signal: Signal) -> Result<()> {
         let command = match signal.signal_type {
             SignalType::Answer => Command::Answer {
@@ -399,8 +373,6 @@ impl HttpSignalingServer {
         self.network_id.clone()
     }
 
-    /// Always returns `true`, as the answer is the response to the request carrying the
-    /// offer and must already hold every candidate.
     pub fn disable_trickle_ice(&self) -> bool {
         true
     }
@@ -437,7 +409,6 @@ impl HttpSignalingServer {
     }
 }
 
-/// Serves one connection, over TLS when an acceptor is given.
 async fn serve(
     stream: TcpStream,
     connection: u64,

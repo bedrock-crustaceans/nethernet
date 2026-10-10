@@ -1,15 +1,3 @@
-//! Drives a sans-IO [`nethernet::connection::Connection`] over a real UDP socket.
-//!
-//! NetherNet's actual WebRTC session (ICE, DTLS, SCTP, DCEP) is implemented directly on
-//! top of the `rtc` crate in the sans-IO `nethernet` crate; this module is the Tokio
-//! glue that feeds it datagrams and timers from a real socket, in a background task, and
-//! exposes the async `send`/`recv` surface the rest of this crate is built on.
-//!
-//! All mutable state lives only inside that task; callers reach it through a `Command`
-//! channel instead of a lock. Receiving is split out into [`SessionReceiver`], since each
-//! channel only ever has one legitimate reader, while [`Session`] itself is cheap to
-//! clone and hand to every task that needs to send or query it.
-
 pub(crate) mod command;
 
 pub(crate) use command::Command;
@@ -30,13 +18,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-/// Longest the driver sleeps when the connection asks for nothing sooner.
 const MAX_IDLE: Duration = Duration::from_secs(1);
 
-/// Default capacity for the bounded packet channels of a session.
 const PACKET_CHANNEL_CAPACITY: usize = 1024;
 
-/// Aborts the driver task once nothing references it anymore.
 struct TaskGuard {
     close_token: CancellationToken,
     task: JoinHandle<()>,
@@ -49,38 +34,21 @@ impl Drop for TaskGuard {
     }
 }
 
-/// A cheaply-cloneable handle to a NetherNet session: a [`SansConnection`] driven over a
-/// real UDP socket in a background task.
-///
-/// Cloning it does not spawn anything new; every clone talks to the same background
-/// task, which is aborted once every clone and every [`SessionReceiver`] of it are
-/// dropped.
 #[derive(Clone)]
 pub struct Session {
     local_addr: Addr,
-    /// The remote's identity (network and connection ID); its `socket_addr` is always
-    /// `None` here and read from the driver task instead, since it is the only part
-    /// learned after the session starts.
     remote_addr: Addr,
     command_tx: mpsc::UnboundedSender<Command>,
     close_token: CancellationToken,
     _guard: Arc<TaskGuard>,
 }
 
-/// The receiving half of one of a session's data channels.
-///
-/// Not `Clone`: only one place should ever pull the "next" message off a channel. Holds
-/// its own clone of the driver's guard, so dropping every [`Session`] handle doesn't cut
-/// off a receiver still in use elsewhere.
 pub struct SessionReceiver {
     rx: mpsc::Receiver<Bytes>,
     _guard: Arc<TaskGuard>,
 }
 
 impl SessionReceiver {
-    /// Receives the next complete packet from the channel.
-    ///
-    /// Returns `Ok(None)` once the session has been closed.
     pub async fn recv(&mut self) -> Result<Option<Bytes>> {
         Ok(self.rx.recv().await)
     }
@@ -90,8 +58,6 @@ impl SessionReceiver {
     }
 }
 
-/// A session handed back once it is usable, alongside the exclusive receivers of its two
-/// data channels.
 pub struct AcceptedSession {
     pub session: Session,
     pub reliable: SessionReceiver,
@@ -99,11 +65,6 @@ pub struct AcceptedSession {
 }
 
 impl Session {
-    /// Spawns the background driver for an already-negotiated-enough [`SansConnection`]
-    /// (the initial offer/answer and, for trickle ICE, the first candidate should already
-    /// be applied - see [`crate::transport::server`]/[`crate::transport::client`]), and
-    /// returns the session handle, the receivers of its two data channels, and a receiver
-    /// that resolves once both channels are open.
     pub(crate) fn spawn(
         socket: Arc<UdpSocket>,
         connection: SansConnection,
@@ -158,8 +119,6 @@ impl Session {
         )
     }
 
-    /// A sender that forwards further signals (e.g. a late-trickled or redundant
-    /// candidate) into the running connection.
     pub(crate) fn signal_sender(&self) -> mpsc::UnboundedSender<Command> {
         self.command_tx.clone()
     }
@@ -275,16 +234,10 @@ impl Session {
         })
     }
 
-    /// Sends data over the session using the reliable data channel, splitting the
-    /// payload into protocol segments as needed.
     pub async fn send(&self, data: Bytes) -> Result<()> {
         self.send_on(Channel::Reliable, data).await
     }
 
-    /// Sends data over the session using the unreliable data channel.
-    ///
-    /// Data sent over a channel that was opened out of band is dropped by remote
-    /// connections that did not open the matching channel themselves.
     pub async fn send_unreliable(&self, data: Bytes) -> Result<()> {
         self.send_on(Channel::Unreliable, data).await
     }
@@ -297,21 +250,15 @@ impl Session {
         reply_rx.await.map_err(|_| NetherError::ConnectionClosed)?
     }
 
-    /// Shuts down the session by stopping its background driver.
-    ///
-    /// After this call the session is considered closed; calling `close` again is a
-    /// no-op.
     pub async fn close(&self) -> Result<()> {
         self.close_token.cancel();
         Ok(())
     }
 
-    /// Returns the local address of the session.
     pub async fn local_addr(&self) -> Addr {
         self.local_addr.clone()
     }
 
-    /// Returns the address of the remote connection, once known.
     pub async fn remote_addr(&self) -> Addr {
         let (reply_tx, reply_rx) = oneshot::channel();
         let socket_addr = match self.command_tx.send(Command::RemoteAddr(reply_tx)) {
@@ -324,7 +271,6 @@ impl Session {
         }
     }
 
-    /// The current round-trip-time estimate, once the data channels are open.
     pub async fn rtt(&self) -> Option<Duration> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self.command_tx.send(Command::Rtt(reply_tx)).is_err() {
@@ -333,16 +279,10 @@ impl Session {
         reply_rx.await.ok().flatten()
     }
 
-    /// Records the identity the connection was accepted with.
     pub async fn set_player(&self, player: Arc<PlayerInfo>) {
         let _ = self.command_tx.send(Command::SetPlayer(player));
     }
 
-    /// The identity the connection was accepted with, or [`None`] when identities are not
-    /// validated or the connection was dialed rather than accepted.
-    ///
-    /// Everything it claims is only as trustworthy as the policy the offer was validated
-    /// with, and only its public key is bound to a key the peer had to hold.
     pub async fn player(&self) -> Option<Arc<PlayerInfo>> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self.command_tx.send(Command::Player(reply_tx)).is_err() {
@@ -351,13 +291,10 @@ impl Session {
         reply_rx.await.ok().flatten()
     }
 
-    /// Records the host the connection was offered to.
     pub async fn set_host(&self, host: String) {
         let _ = self.command_tx.send(Command::SetHost(host));
     }
 
-    /// The host an HTTP join asked for, or [`None`] when the connection did not arrive
-    /// over HTTP signaling or the request named none.
     pub async fn host(&self) -> Option<String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self.command_tx.send(Command::Host(reply_tx)).is_err() {
@@ -366,12 +303,10 @@ impl Session {
         reply_rx.await.ok().flatten()
     }
 
-    /// Resolves once the session has been closed.
     pub async fn closed(&self) {
         self.close_token.cancelled().await
     }
 
-    /// Reports whether the session has been closed.
     pub async fn is_closed(&self) -> bool {
         self.close_token.is_cancelled()
     }

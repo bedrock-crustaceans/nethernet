@@ -1,15 +1,9 @@
-//! The TLS a host serves its HTTP endpoint over.
-
 use crate::error::{NetherError, Result};
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::path::Path;
 use std::sync::Arc;
 
-/// Builds the TLS configuration from a certificate chain and a private key, both PEM.
-///
-/// The chain is served as it is written, so the leaf certificate has to come first and any
-/// intermediates after it.
 pub async fn from_pem(
     certificate_chain: impl AsRef<Path>,
     private_key: impl AsRef<Path>,
@@ -20,7 +14,6 @@ pub async fn from_pem(
     from_pem_bytes(&chain, &key)
 }
 
-/// Builds the TLS configuration from a certificate chain and a private key already read.
 pub fn from_pem_bytes(certificate_chain: &[u8], private_key: &[u8]) -> Result<Arc<ServerConfig>> {
     let chain: Vec<CertificateDer<'static>> =
         rustls_pemfile::certs(&mut std::io::Cursor::new(certificate_chain))

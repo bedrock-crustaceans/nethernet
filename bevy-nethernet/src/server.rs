@@ -41,13 +41,9 @@ impl NetherServerPlugin {
     }
 }
 
-/// PreUpdate set containing NetherServerPlugin's update system. Order your own
-/// systems `.after(NetherServerSet)` to see this tick's events/received data.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NetherServerSet;
 
-/// Unique within a [`NetherServer`], not globally: connection IDs are only unique
-/// within the signaling network that issued them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NetherSessionId {
     pub network_id: String,

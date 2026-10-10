@@ -1,6 +1,3 @@
-//! Sans-IO WebRTC session: ICE, DTLS, SCTP and data channels, driven directly rather
-//! than through a generic peer connection (see [`crate::protocol::webrtc`]).
-
 mod dcep;
 mod dtls;
 mod ice;
@@ -23,67 +20,37 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-/// Stream IDs the controlling (offerer) side opens its channels on. NetherNet's
-/// offerer always resolves to the DTLS server role (see [`ResolvedRole`]), and per
-/// [RFC 8832 §6](https://www.rfc-editor.org/rfc/rfc8832#section-6) the DTLS server
-/// numbers the channels it opens with odd stream IDs - the same convention Pion (and
-/// so any real WebRTC/NetherNet peer) follows. The answerer never opens a channel of
-/// its own; it learns the actual IDs from the incoming `DATA_CHANNEL_OPEN` messages
-/// instead of assuming these constants (see [`Channels`]).
 const RELIABLE_STREAM_ID: StreamId = 1;
 const UNRELIABLE_STREAM_ID: StreamId = 3;
 
-/// Which of NetherNet's two fixed data channels a message belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
     Reliable,
     Unreliable,
 }
 
-/// Events the driving application should react to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionEvent {
-    /// Both data channels are open; [`SessionInput::Send`] and
-    /// [`SessionOutput::Message`] are now meaningful.
     Ready,
-    /// ICE or SCTP entered a state it cannot recover from - the peer vanished, the
-    /// association was lost, or similar. The session is done; the driver should close
-    /// it rather than wait on it further.
     Failed,
 }
 
-/// Output produced by driving a [`Session`].
 pub enum SessionOutput {
-    /// A datagram the driver must send over the (single, shared) UDP socket.
     Send(Vec<u8>, SocketAddr),
     Event(SessionEvent),
-    /// A complete, reassembled message received on a data channel.
     Message(Channel, Vec<u8>),
-    /// How long the caller may wait before it has to drive
-    /// [`SessionInput::Timeout`] again.
     Wait(Duration),
 }
 
-/// Input fed to a [`Session`] (see [`Sans`]).
 pub enum SessionInput {
-    /// An inbound datagram received on the local socket.
     Packet(Box<[u8]>, SocketAddr, Instant),
 
-    /// Applies the remote's description once known, plus any candidates embedded in
-    /// it (full ICE) or already trickled.
     RemoteDescription(Description, Vec<Candidate>, Instant),
 
-    /// Adds a candidate trickled separately from the description (LAN/trickle-ICE
-    /// signaling only).
     RemoteCandidate(Candidate, Instant),
 
-    /// A complete application message to send on a channel.
     Send(Channel, bytes::Bytes, Instant),
 
-    /// Drives ICE/DTLS/SCTP retransmission and keepalive timers. The only input that
-    /// produces a [`SessionOutput::Wait`], matching
-    /// [`crate::signaling::lan::LanSignaler`] and
-    /// [`crate::signaling::http::HttpSignaler`].
     Timeout(Instant),
 }
 
@@ -93,14 +60,8 @@ struct RemoteInfo {
 
 #[derive(Default)]
 struct Channels {
-    /// The stream ID actually carrying each channel: the fixed
-    /// [`RELIABLE_STREAM_ID`]/[`UNRELIABLE_STREAM_ID`] when this side opened them
-    /// (controlling), or whatever the peer's `DATA_CHANNEL_OPEN` named (answering).
-    /// `None` until the channel is open.
     reliable_stream_id: Option<StreamId>,
     unreliable_stream_id: Option<StreamId>,
-    /// Reassembly state for the reliable channel's fragmentation (see
-    /// [`crate::protocol::message`]); the unreliable channel never fragments.
     reassembly: Framing,
     ready_emitted: bool,
     failed_emitted: bool,
@@ -122,27 +83,13 @@ impl Channels {
     }
 }
 
-/// A single NetherNet peer-to-peer connection: ICE connectivity, a DTLS handshake, an
-/// SCTP association, and the two data channels the HTTP signaling guide's section 6
-/// mandates, wired together and driven explicitly rather than through a generic peer
-/// connection.
-///
-/// This type performs no I/O itself: feed it datagrams and timer ticks via [`Sans::handle`]
-/// (see [`SessionInput`]), drain the resulting datagrams-to-send/events/messages via
-/// [`Sans::poll`], and drive the actual UDP socket externally. [`SessionOutput::Wait`]
-/// tells the driver how long it may wait before the next [`SessionInput::Timeout`].
 pub struct Session {
     is_controlling: bool,
     local_addr: SocketAddr,
     local_description: Description,
     ice: IceLayer,
-    /// The certificate whose fingerprint was advertised in `local_description`; reused
-    /// (not regenerated) when the DTLS layer is actually started, since the peer will
-    /// reject a handshake with a certificate that doesn't match what we signaled.
     certificate: Option<rtc::dtls::crypto::Certificate>,
 
-    /// Set once the remote description is known but no remote candidate has arrived
-    /// yet (trickle ICE only): the role/fingerprint to use once one does.
     pending_role_fingerprint: Option<(ResolvedRole, (String, String))>,
 
     remote: Option<RemoteInfo>,
@@ -156,16 +103,6 @@ pub struct Session {
 pub use dtls::DtlsLayer;
 
 impl Session {
-    /// Starts a session. `is_controlling` matches NetherNet's fixed offerer/answerer
-    /// convention (see [`crate::protocol::webrtc::description`]): the offering
-    /// (connecting) side controls ICE, announces the `actpass` DTLS role, and is the
-    /// side that opens the two data channels once transports are up; the answering
-    /// (accepting) side does the opposite of all three.
-    ///
-    /// Returns the session and the local [`Description`] to signal out as this side's
-    /// offer or answer (its one gathered candidate is available via
-    /// [`Self::local_candidate`], to embed directly under full ICE or signal
-    /// separately under trickle ICE).
     pub fn new(
         local_addr: SocketAddr,
         is_controlling: bool,
@@ -184,8 +121,6 @@ impl Session {
             },
             fingerprint,
             sctp_max_message_size: SCTP_MAX_MESSAGE_SIZE,
-            // Set by the caller (see `crate::connection::Connection`) if this
-            // connection needs an `a=identity` assertion attached before encoding.
             identity: None,
         };
 
@@ -206,31 +141,20 @@ impl Session {
         Ok((session, local_description))
     }
 
-    /// This side's one gathered host candidate, to be signaled (embedded directly in a
-    /// full-ICE SDP, or trickled separately as `CANDIDATEADD`).
     pub fn local_candidate(&self) -> &Candidate {
         self.ice.local_candidate()
     }
 
-    /// The remote peer's address, once known: the ICE-selected pair's remote address
-    /// once connectivity checks have picked one, or (since NetherNet only ever gathers
-    /// one candidate per side) the address transports were started with, meanwhile.
     pub fn remote_addr(&self) -> Option<SocketAddr> {
         self.ice
             .selected_remote_addr()
             .or_else(|| self.remote.as_ref().map(|r| r.addr))
     }
 
-    /// The current round-trip-time estimate, once the SCTP association exists.
     pub fn rtt(&self) -> Option<Duration> {
         self.sctp.as_ref().and_then(|s| s.rtt())
     }
 
-    /// Applies the remote's description once known (for the offerer: once the answer
-    /// arrives; for the answerer: immediately, from the offer that prompted creating
-    /// this session), plus any candidates embedded in it (full ICE) or already
-    /// trickled. DTLS/SCTP aren't started until at least one remote candidate is known
-    /// (here, or via a later [`SessionInput::RemoteCandidate`]).
     fn set_remote_description(
         &mut self,
         remote: &Description,
@@ -250,15 +174,12 @@ impl Session {
         if let Some(candidate) = candidates.into_iter().next() {
             self.start_transports(candidate.addr(), resolved_role, fingerprint, now)?;
         } else {
-            // Trickle ICE: remember the role/fingerprint for when a candidate arrives.
             self.pending_role_fingerprint = Some((resolved_role, fingerprint));
         }
 
         Ok(())
     }
 
-    /// Adds a candidate trickled separately from the description (LAN/trickle-ICE
-    /// signaling only).
     fn add_remote_candidate(
         &mut self,
         candidate: Candidate,
@@ -310,7 +231,6 @@ impl Session {
         Ok(())
     }
 
-    /// Feeds an inbound datagram received on the local socket.
     fn handle_packet(
         &mut self,
         data: &[u8],
@@ -369,10 +289,6 @@ impl Session {
         .min()
     }
 
-    /// Sends a complete application message on the given channel, fragmenting it (per
-    /// [`crate::protocol::message`]) if it's too large for one SCTP message and this is
-    /// the reliable channel; the unreliable channel never fragments and rejects
-    /// anything too large instead.
     fn send(
         &mut self,
         channel: Channel,
@@ -414,9 +330,6 @@ impl Session {
         Ok(())
     }
 
-    /// Pumps data between layers (SCTP -> DTLS -> wire) and advances the DCEP/channel
-    /// state machine. Must run after any call that might have produced new outbound
-    /// data or state transitions.
     fn pump(&mut self, now: Instant) -> Result<(), ProtocolError> {
         while let Some((data, to)) = self.ice.poll_write() {
             self.output.push_back(SessionOutput::Send(data, to));
@@ -544,8 +457,6 @@ fn open_channels_if_controlling(
     Ok(())
 }
 
-/// Accepts newly opened streams (answerer), reads/acks DCEP control messages, and
-/// delivers data messages (reassembling the reliable channel's fragments).
 fn drain_dcep_and_data(
     sctp: &mut SctpLayer,
     channels: &mut Channels,
@@ -593,8 +504,6 @@ fn drain_dcep_and_data(
             };
 
             if is_dcep {
-                // The controlling side's own opens are already marked open in
-                // `open_channels_if_controlling`; an incoming ack just confirms it.
                 continue;
             }
 
@@ -635,10 +544,6 @@ mod tests {
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
     }
 
-    /// Drives an offerer and an answerer session, connected via full-ICE-style
-    /// descriptions (candidates embedded up front, as HTTP signaling would deliver
-    /// them), through the entire stack - ICE, DTLS, SCTP, DCEP - to both data channels
-    /// opening, then exchanges messages in both directions on both channels.
     #[test]
     fn full_handshake_and_bidirectional_data_exchange() {
         let mut now = Instant::now();
@@ -646,10 +551,6 @@ mod tests {
         let (mut offerer, offer) = Session::new(addr(40100), true, now).unwrap();
         let (mut answerer, answer) = Session::new(addr(40101), false, now).unwrap();
 
-        // Round-trip through the real SDP codec (full ICE, as HTTP signaling would
-        // deliver it) rather than passing the structs directly, since DtlsRole::Auto
-        // only ever normalizes to Client/Server by way of encode()+parse() - passing
-        // the pre-encode struct would skip that and break role resolution.
         let offer_sdp = offer.encode_full(&[offerer.local_candidate().clone()]);
         let answer_sdp = answer.encode_full(&[answerer.local_candidate().clone()]);
 
@@ -733,7 +634,6 @@ mod tests {
         assert_eq!(offerer.remote_addr(), Some(addr(40101)));
         assert_eq!(answerer.remote_addr(), Some(addr(40100)));
 
-        // Exchange messages in both directions on both channels.
         offerer
             .handle(SessionInput::Send(
                 Channel::Reliable,

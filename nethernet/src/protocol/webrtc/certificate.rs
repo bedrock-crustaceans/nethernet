@@ -1,29 +1,19 @@
-//! DTLS certificate generation and fingerprinting.
-//!
-//! WebRTC (and NetherNet) authenticates a peer by comparing the DTLS certificate's
-//! fingerprint against the one signaled in SDP, not by validating a CA chain, so a
-//! fresh self-signed certificate is generated per session.
-
 use crate::error::ProtocolError;
 use rtc::crypto::RTCCryptoProvider;
 use rtc::dtls::crypto::Certificate;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-/// The crypto backend handed to every rtc layer, which no longer picks one on its own.
 pub(crate) fn crypto_provider() -> Result<Arc<dyn RTCCryptoProvider>, ProtocolError> {
     rtc::crypto::default_provider()
         .map_err(|e| ProtocolError::Other(format!("crypto provider: {e}")))
 }
 
-/// Generates a fresh self-signed certificate for a single DTLS session.
 pub fn generate() -> Result<Certificate, ProtocolError> {
     Certificate::generate_self_signed(vec!["nethernet".to_string()], crypto_provider()?.crypto())
         .map_err(|e| ProtocolError::Other(format!("generate certificate: {e}")))
 }
 
-/// Computes the SDP `a=fingerprint` value for a certificate: the algorithm name and
-/// a colon-separated uppercase hex digest, e.g. `("sha-256", "AA:BB:CC:...")`.
 pub fn fingerprint(certificate: &Certificate) -> Result<(String, String), ProtocolError> {
     let der = certificate
         .certificate
@@ -50,7 +40,6 @@ mod tests {
         let (algorithm, digest) = fingerprint(&cert).unwrap();
 
         assert_eq!(algorithm, "sha-256");
-        // 32 bytes, colon-separated, uppercase hex: "AA:BB:...:FF" -> 32*2 hex chars + 31 colons.
         assert_eq!(digest.len(), 32 * 2 + 31);
         assert!(digest.chars().all(|c| c.is_ascii_hexdigit() || c == ':'));
         assert_eq!(digest, digest.to_uppercase());

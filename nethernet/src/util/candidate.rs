@@ -1,5 +1,3 @@
-//! Helpers for the candidate lines of the descriptions exchanged during signaling.
-
 use crate::util::endpoint;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
@@ -7,7 +5,6 @@ use thiserror::Error;
 
 const ATTRIBUTE_PREFIX: &str = "a=candidate:";
 
-/// Why a candidate line could not be read.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CandidateLineError {
     #[error("the candidate line has fewer than eight tokens")]
@@ -20,7 +17,6 @@ pub enum CandidateLineError {
     InvalidPort,
 }
 
-/// Where a candidate came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateKind {
     Host,
@@ -40,18 +36,11 @@ impl CandidateKind {
         }
     }
 
-    /// Whether a STUN or TURN exchange produced the candidate, describing the outside
-    /// rather than an interface.
     pub fn is_reflexive_or_relayed(self) -> bool {
         self != Self::Host
     }
 }
 
-/// The parts of a candidate line this crate reads.
-///
-/// The grammar of RFC 5245 section 15.1 is foundation, component, transport, priority,
-/// address, port, `typ` and the type, split on single spaces. Anything after the type is
-/// not read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CandidateLine<'a> {
     transport: &'a str,
@@ -61,26 +50,16 @@ pub struct CandidateLine<'a> {
 }
 
 impl<'a> CandidateLine<'a> {
-    /// How many ports are guessed at for one peer. A peer gathers one port per interface
-    /// it holds, so a handful covers any real client, and the offer deciding how many
-    /// packets leave here is not something a peer should get to choose.
     const MAX_INFERRED: usize = 8;
 
-    /// Priority announced for an inferred candidate, matching what a peer would announce
-    /// for a server reflexive candidate of its own.
     const INFERRED_PRIORITY: u32 = 1677721855;
 
-    /// Foundation the inferred candidates are numbered from.
     const INFERRED_FOUNDATION: u32 = 90_000_000;
 
-    /// Priority a translated candidate is announced at: RFC 8445 section 5.1.2.1's
-    /// server-reflexive preference, below any host.
     const TRANSLATED_PRIORITY: u32 = (100 << 24) | (65535 << 8) | 255;
 
-    /// Foundation the translated candidates are numbered from.
     const TRANSLATED_FOUNDATION: u32 = 80_000_000;
 
-    /// The connection address, which may be a name such as an mDNS `.local` host.
     pub fn address(&self) -> &'a str {
         self.address
     }
@@ -150,10 +129,6 @@ impl<'a> TryFrom<&'a str> for CandidateLine<'a> {
     }
 }
 
-/// Reports whether a description holds a host candidate at a routable address.
-///
-/// A host that gathered one is reachable as the protocol expects, and needs none of the
-/// guessing [`inferred_peer_candidates`] does.
 pub fn has_routable_host_candidate(sdp: &str) -> bool {
     candidates(sdp).any(|candidate| {
         candidate.kind() == CandidateKind::Host
@@ -161,17 +136,6 @@ pub fn has_routable_host_candidate(sdp: &str) -> bool {
     })
 }
 
-/// Candidates for the address a peer signaled from, one per port it gathered locally.
-///
-/// A peer that holds no reflexive candidate of its own offers nothing a host on another
-/// network can reach, and its own checks die on the first NAT they meet. Its public
-/// address is known anyway, because it just signaled from it, and consumer NATs usually
-/// keep the port a socket already uses. Checking there costs a few packets, and if it
-/// does map that way the check opens the path in both directions.
-///
-/// Nothing is inferred for a peer that already carries a reflexive or relayed candidate,
-/// or that signaled from an address on this network, since there is a real path in both
-/// cases. The candidates are returned in the `candidate:` form signaled over the wire.
 pub fn inferred_peer_candidates(sdp: &str, signaled_from: Option<SocketAddr>) -> Vec<String> {
     let Some(from) = signaled_from.map(|addr| endpoint::normalize(addr.ip())) else {
         return Vec::new();
@@ -200,23 +164,6 @@ pub fn inferred_peer_candidates(sdp: &str, signaled_from: Option<SocketAddr>) ->
         .collect()
 }
 
-/// Drops every host candidate whose address is not in `allowed`, and, for an allowed
-/// address this host never actually gathered, announces it as a server-reflexive
-/// candidate translated from a host candidate of the same address family.
-///
-/// ICE gathers a candidate on every interface it can see, which on a host network
-/// includes container and overlay addresses that are unreachable from outside. Each one
-/// costs the remote connection a round of connectivity checks before it gives up, so a
-/// host that knows which of its addresses are reachable can announce only those.
-/// Reflexive and relayed candidates always stay, since they already describe what the
-/// outside sees rather than an interface.
-///
-/// The translation covers a server sitting behind a NAT or a port forward that never
-/// shows up in what ICE gathers locally, but that a peer can still reach: the port a
-/// forward maps to is normally the same one the host candidate uses, since consumer NATs
-/// and forwards alike preserve it. If nothing would be left - no held candidate and
-/// nothing to translate - the description is returned untouched, since no candidates at
-/// all can never connect.
 pub fn with_advertised_candidates(sdp: &str, allowed: &[String]) -> String {
     if allowed.is_empty() {
         return sdp.to_string();
@@ -287,9 +234,6 @@ pub fn with_advertised_candidates(sdp: &str, allowed: &[String]) -> String {
     out
 }
 
-/// A server-reflexive candidate for every foreign address, based on a host candidate of
-/// the same family. One per address and port, since every interface shares the socket
-/// and would otherwise give the same line.
 fn translated_candidates(hosts: &[CandidateLine], foreign: &[String]) -> Vec<String> {
     let mut candidates = Vec::new();
     let mut emitted: HashSet<(&str, u16)> = HashSet::new();
@@ -320,17 +264,12 @@ fn translated_candidates(hosts: &[CandidateLine], foreign: &[String]) -> Vec<Str
     candidates
 }
 
-/// The readable candidate lines of a description, skipping malformed ones.
 fn candidates(sdp: &str) -> impl Iterator<Item = CandidateLine<'_>> {
     sdp.split(['\r', '\n'])
         .filter(|line| line.starts_with(ATTRIBUTE_PREFIX))
         .filter_map(|line| CandidateLine::try_from(line).ok())
 }
 
-/// The canonical form of an address, so that the same address written two ways compares
-/// equal. Anything that is not an IP literal, such as an mDNS `.local` candidate, is left
-/// alone rather than resolved, since a lookup here would block and can only answer for
-/// this host.
 fn normalized(address: &str) -> String {
     endpoint::parse(address).map_or_else(|| address.to_string(), |literal| literal.to_string())
 }
