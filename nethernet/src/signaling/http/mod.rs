@@ -67,9 +67,8 @@ impl Sans for HttpSignaler {
             HttpSignalerInput::Request {
                 connection,
                 request,
-                proxied,
                 now,
-            } => self.handle_request(connection, &request, proxied, now)?,
+            } => self.handle_request(connection, &request, now)?,
             HttpSignalerInput::Answer { connection_id, sdp } => self.answer(connection_id, &sdp)?,
             HttpSignalerInput::Reject {
                 connection_id,
@@ -172,7 +171,6 @@ impl HttpSignaler {
         &mut self,
         connection: u64,
         request: &Request<String>,
-        proxied: Option<SocketAddr>,
         now: Instant,
     ) -> Result<(), HttpSignalerError> {
         // A peer sends its status check and its join on one connection, so what it asked
@@ -195,14 +193,7 @@ impl HttpSignaler {
             return self.respond(connection, StatusCode::METHOD_NOT_ALLOWED, keep_alive);
         }
 
-        self.join(
-            connection,
-            network_id.to_string(),
-            request,
-            proxied,
-            keep_alive,
-            now,
-        )
+        self.join(connection, network_id.to_string(), request, keep_alive, now)
     }
 
     fn status(
@@ -228,7 +219,6 @@ impl HttpSignaler {
         connection: u64,
         network_id: String,
         request: &Request<String>,
-        proxied: Option<SocketAddr>,
         keep_alive: bool,
         now: Instant,
     ) -> Result<(), HttpSignalerError> {
@@ -241,7 +231,7 @@ impl HttpSignaler {
             return self.respond(connection, StatusCode::SERVICE_UNAVAILABLE, keep_alive);
         }
 
-        let client_address = self.client_address(connection, request, proxied);
+        let client_address = self.client_address(connection, request);
         let sdp = request.body();
 
         let player = match &self.config.token_trust {
@@ -340,12 +330,7 @@ impl HttpSignaler {
     }
 
     /// The address of the peer, or the one a trusted proxy forwarded on its behalf.
-    fn client_address(
-        &self,
-        connection: u64,
-        request: &Request<String>,
-        proxied: Option<SocketAddr>,
-    ) -> Option<SocketAddr> {
+    fn client_address(&self, connection: u64, request: &Request<String>) -> Option<SocketAddr> {
         let remote = self.connections.get(&connection).map(|entry| entry.addr)?;
         if !self
             .config
@@ -353,11 +338,6 @@ impl HttpSignaler {
             .contains(endpoint::normalize(remote.ip()))
         {
             return Some(remote);
-        }
-
-        // A PROXY header is the more trustworthy of the two, so it wins
-        if let Some(proxied) = proxied {
-            return Some(proxied);
         }
 
         let forwarded = request
@@ -494,7 +474,6 @@ mod tests {
             .handle(HttpSignalerInput::Request {
                 connection,
                 request,
-                proxied: None,
                 now: Instant::now(),
             })
             .unwrap();
@@ -643,7 +622,6 @@ mod tests {
             .handle(HttpSignalerInput::Request {
                 connection: 1,
                 request: request(Method::POST, "/v1/join/1234", &signed_offer()),
-                proxied: None,
                 now,
             })
             .unwrap();

@@ -18,14 +18,13 @@ use nethernet::prelude::{
     HttpSignaler, HttpSignalerConfig, HttpSignalerInput, HttpSignalerOutput, PlayerInfo,
     RejectReason, Sans, ServerData,
 };
-use nethernet::util::proxy_protocol;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -69,7 +68,6 @@ enum Command {
     Request {
         connection: u64,
         request: Box<http::Request<String>>,
-        proxied: Option<SocketAddr>,
         reply: oneshot::Sender<Response>,
     },
     Connected(u64, SocketAddr, oneshot::Sender<bool>),
@@ -202,7 +200,7 @@ impl HttpSignalingServer {
                 tokio::spawn(async move {
                     let served = tokio::select! {
                         _ = cancel_token.cancelled() => Ok(()),
-                        served = serve(stream, peer, connection, config, acceptor, commands.clone()) => served,
+                        served = serve(stream, connection, config, acceptor, commands.clone()) => served,
                     };
                     if let Err(e) = served {
                         tracing::debug!("Connection from {} ended: {}", peer, e);
@@ -248,12 +246,11 @@ impl HttpSignalingServer {
                             }
                             let _ = admitted.send(!refused);
                         }
-                        Some(Command::Request { connection, request, proxied, reply }) => {
+                        Some(Command::Request { connection, request, reply }) => {
                             waiting.insert(connection, reply);
                             if let Err(e) = signaler.handle(HttpSignalerInput::Request {
                                 connection,
                                 request,
-                                proxied,
                                 now: Instant::now(),
                             }) {
                                 tracing::debug!("Failed to handle a request: {}", e);
@@ -440,36 +437,29 @@ impl HttpSignalingServer {
     }
 }
 
-/// Serves one connection, reading the PROXY header a trusted proxy put in front of it.
+/// Serves one connection, over TLS when an acceptor is given.
 async fn serve(
-    mut stream: TcpStream,
-    peer: SocketAddr,
+    stream: TcpStream,
     connection: u64,
     config: HttpServerConfig,
     acceptor: Option<TlsAcceptor>,
     commands: mpsc::UnboundedSender<Command>,
 ) -> Result<()> {
-    let proxied = match config.signaler.reads_proxy_header(peer) {
-        true => read_proxy_header(&mut stream).await?,
-        false => None,
-    };
-
     match acceptor {
         Some(acceptor) => {
             let stream = acceptor
                 .accept(stream)
                 .await
                 .map_err(|e| NetherError::Other(format!("TLS handshake: {}", e)))?;
-            serve_http(stream, connection, proxied, config, commands).await
+            serve_http(stream, connection, config, commands).await
         }
-        None => serve_http(stream, connection, proxied, config, commands).await,
+        None => serve_http(stream, connection, config, commands).await,
     }
 }
 
 async fn serve_http<S>(
     stream: S,
     connection: u64,
-    proxied: Option<SocketAddr>,
     config: HttpServerConfig,
     commands: mpsc::UnboundedSender<Command>,
 ) -> Result<()>
@@ -506,7 +496,6 @@ where
             let sent = commands.send(Command::Request {
                 connection,
                 request: Box::new(request),
-                proxied,
                 reply: reply_tx,
             });
 
@@ -544,31 +533,4 @@ where
     connection
         .await
         .map_err(|e| NetherError::Other(format!("HTTP connection: {}", e)))
-}
-
-/// Reads the PROXY header off the front of a connection, leaving the bytes that follow it
-/// to the protocol.
-async fn read_proxy_header(stream: &mut TcpStream) -> Result<Option<SocketAddr>> {
-    let mut buf = [0u8; 232];
-    let mut filled = 0;
-
-    loop {
-        let peeked = stream.peek(&mut buf[..]).await?;
-        if peeked <= filled && peeked < buf.len() {
-            // The peer stopped sending, so whatever is there is all there will be
-            return Ok(None);
-        }
-        filled = peeked;
-
-        match proxy_protocol::read(&buf[..filled]) {
-            proxy_protocol::Header::Proxied { source, length } => {
-                let mut header = vec![0u8; length];
-                stream.read_exact(&mut header).await?;
-                return Ok(source);
-            }
-            proxy_protocol::Header::Absent => return Ok(None),
-            proxy_protocol::Header::Incomplete if filled >= buf.len() => return Ok(None),
-            proxy_protocol::Header::Incomplete => continue,
-        }
-    }
 }

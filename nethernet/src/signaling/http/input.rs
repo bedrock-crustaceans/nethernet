@@ -39,12 +39,10 @@ pub enum HttpSignalerInput {
     /// A connection was accepted from the given address.
     Connected(u64, SocketAddr, Instant),
 
-    /// A request arrived on a connection. `proxied` is the source a trusted proxy
-    /// declared in its PROXY header, which the caller reads off the connection.
+    /// A request arrived on a connection.
     Request {
         connection: u64,
         request: Box<Request<String>>,
-        proxied: Option<SocketAddr>,
         now: Instant,
     },
 

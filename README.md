@@ -35,7 +35,7 @@ The WebRTC-based network protocol used in newer versions of Minecraft. It provid
 - Signaling over LAN discovery or over the HTTP endpoint of a dedicated server, as a client and as a server
 - Identity assertions: offers are validated against the fingerprints they carry, and answers are signed with the identity of the server
 - Candidate inference for peers that gathered nothing a host on another network can reach
-- Connection limits, trusted proxies and the PROXY protocol on the HTTP endpoint
+- Connection limits and trusted proxies on the HTTP endpoint
 
 ### Usage
 

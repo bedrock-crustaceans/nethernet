@@ -14,7 +14,6 @@ use nethernet::prelude::{
     RejectReason, Sans, ServerData, ServerIdentity,
 };
 use nethernet::session::Channel;
-use nethernet::util::proxy_protocol;
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpListener};
@@ -22,7 +21,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 const MAX_ACCEPTS_PER_TICK: usize = 64;
-const MAX_PROXY_HEADER: usize = 232;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct NetherHttpServerPlugin;
@@ -63,37 +61,14 @@ pub enum NetherHttpServerEvent {
     SessionDisconnected(NetherSessionId),
 }
 
-enum ProxyHeader {
-    Expected,
-    Read(Option<SocketAddr>),
-}
-
 struct TcpConn {
     stream: HttpStream,
-    proxy_header: ProxyHeader,
     close_after_write: bool,
     continued: bool,
     last_active: Instant,
 }
 
 impl TcpConn {
-    fn read_proxy_header(&mut self) {
-        if !matches!(self.proxy_header, ProxyHeader::Expected) {
-            return;
-        }
-        self.proxy_header = match proxy_protocol::read(&self.stream.inbound) {
-            proxy_protocol::Header::Proxied { source, length } => {
-                self.stream.inbound.drain(..length);
-                ProxyHeader::Read(source)
-            }
-            proxy_protocol::Header::Absent => ProxyHeader::Read(None),
-            proxy_protocol::Header::Incomplete if self.stream.inbound.len() >= MAX_PROXY_HEADER => {
-                ProxyHeader::Read(None)
-            }
-            proxy_protocol::Header::Incomplete => ProxyHeader::Expected,
-        };
-    }
-
     fn refuse(&mut self, status: StatusCode) {
         let response = Response::builder()
             .status(status)
@@ -119,7 +94,6 @@ struct SessionEntry {
 pub struct NetherHttpServer {
     listener: TcpListener,
     signaler: HttpSignaler,
-    config: HttpSignalerConfig,
     pool: SessionPool<NetherSessionId>,
     session_local_addr: SocketAddr,
     identity: Option<ServerIdentity>,
@@ -150,8 +124,7 @@ impl NetherHttpServer {
 
         Ok(Self {
             listener,
-            signaler: HttpSignaler::new(config.clone()),
-            config,
+            signaler: HttpSignaler::new(config),
             pool: SessionPool::new(session_socket),
             session_local_addr,
             identity: None,
@@ -318,16 +291,11 @@ impl NetherHttpServer {
 
             let id = self.next_conn_id;
             self.next_conn_id += 1;
-            let proxy_header = match self.config.reads_proxy_header(peer) {
-                true => ProxyHeader::Expected,
-                false => ProxyHeader::Read(None),
-            };
 
             self.connections.insert(
                 id,
                 TcpConn {
                     stream: self.tls.accept(stream),
-                    proxy_header,
                     close_after_write: false,
                     continued: false,
                     last_active: now,
@@ -378,11 +346,6 @@ impl NetherHttpServer {
                 Ok(Inbound::Idle) => {}
             }
 
-            conn.read_proxy_header();
-            let ProxyHeader::Read(proxied) = conn.proxy_header else {
-                continue;
-            };
-
             if matches!(conn.stream.establish(), Ok(Inbound::Closed) | Err(_))
                 || conn.stream.flush().is_err()
             {
@@ -409,7 +372,7 @@ impl NetherHttpServer {
                             request.uri(),
                             request.headers().len()
                         );
-                        requests.push((id, request, proxied));
+                        requests.push((id, request));
                     }
                     Ok(http_wire::Parsed::Partial { .. })
                         if conn.stream.inbound.len() > http_wire::MAX_BODY =>
@@ -440,11 +403,10 @@ impl NetherHttpServer {
             }
         }
 
-        for (connection, request, proxied) in requests {
+        for (connection, request) in requests {
             let _ = self.signaler.handle(HttpSignalerInput::Request {
                 connection,
                 request: Box::new(request),
-                proxied,
                 now,
             });
         }

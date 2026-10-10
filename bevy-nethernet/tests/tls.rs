@@ -123,27 +123,6 @@ fn a_tls_server_answers_pipelined_requests_and_stays_open() {
     assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
 }
 
-#[test]
-fn a_proxy_header_is_read_before_the_tls_handshake() {
-    let (server_config, client_config) = self_signed_pair();
-    let (mut server, addr) = serve_with(server_config, |config| {
-        config.trusted_proxies = nethernet::prelude::IpRangeSet::parse(["127.0.0.1"]);
-        config.proxy_protocol = true;
-    });
-
-    let reply = tls_get(
-        &mut server,
-        addr,
-        client_config,
-        "PROXY TCP4 93.184.216.34 127.0.0.1 5000 19132\r\n",
-        JOIN_REQUEST,
-        1,
-    )
-    .unwrap();
-
-    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
-}
-
 fn join_server(tls: Arc<ServerConfig>) -> (NetherHttpServer, u16) {
     let mut server = NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |config| {
         config.token_trust = None;

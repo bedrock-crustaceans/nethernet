@@ -258,66 +258,6 @@ mod raw {
         assert!(reply.closed);
     }
 
-    const PROXY_LINE: &str = "PROXY TCP4 93.184.216.34 127.0.0.1 5000 19132\r\n";
-    const JOIN_REQUEST: &str = "GET /v1/join HTTP/1.1\r\nhost: x\r\n\r\n";
-
-    fn trusting_loopback(proxy_protocol: bool) -> impl FnOnce(&mut HttpSignalerConfig) {
-        move |config| {
-            config.trusted_proxies = nethernet::prelude::IpRangeSet::parse(["127.0.0.1"]);
-            config.proxy_protocol = proxy_protocol;
-        }
-    }
-
-    #[test]
-    fn a_trusted_proxy_header_is_read_before_the_request() {
-        let (mut server, addr) = bind(trusting_loopback(true));
-        let mut stream = connect(addr);
-        stream
-            .write_all(format!("{PROXY_LINE}{JOIN_REQUEST}").as_bytes())
-            .unwrap();
-
-        let reply = collect(&mut server, &mut stream, Duration::from_millis(500));
-
-        assert!(reply.text.starts_with("HTTP/1.1 200"), "{}", reply.text);
-    }
-
-    #[test]
-    fn a_request_without_a_proxy_header_is_answered_from_a_trusted_proxy() {
-        let (mut server, addr) = bind(trusting_loopback(true));
-        let mut stream = connect(addr);
-        stream.write_all(JOIN_REQUEST.as_bytes()).unwrap();
-
-        let reply = collect(&mut server, &mut stream, Duration::from_millis(500));
-
-        assert!(reply.text.starts_with("HTTP/1.1 200"), "{}", reply.text);
-    }
-
-    #[test]
-    fn a_proxy_header_is_a_bad_request_when_the_option_is_off() {
-        let (mut server, addr) = bind(trusting_loopback(false));
-        let mut stream = connect(addr);
-        stream
-            .write_all(format!("{PROXY_LINE}{JOIN_REQUEST}").as_bytes())
-            .unwrap();
-
-        let reply = collect(&mut server, &mut stream, Duration::from_millis(500));
-
-        assert!(reply.text.starts_with("HTTP/1.1 400"), "{}", reply.text);
-    }
-
-    #[test]
-    fn a_proxy_header_is_a_bad_request_from_an_untrusted_peer() {
-        let (mut server, addr) = bind(|config| config.proxy_protocol = true);
-        let mut stream = connect(addr);
-        stream
-            .write_all(format!("{PROXY_LINE}{JOIN_REQUEST}").as_bytes())
-            .unwrap();
-
-        let reply = collect(&mut server, &mut stream, Duration::from_millis(500));
-
-        assert!(reply.text.starts_with("HTTP/1.1 400"), "{}", reply.text);
-    }
-
     #[test]
     fn pipelined_requests_are_all_answered() {
         let (mut server, addr) = bind(|_| {});
