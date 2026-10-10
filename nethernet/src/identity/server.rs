@@ -1,13 +1,12 @@
 //! The server's own identity: a P-384 key and a self-signed token that sign answers.
 use crate::identity::error::{IdentityError, Result};
+use crate::identity::jwk::EcJwk;
 use crate::identity::jws::Jws;
 use crate::identity::{Assertion, Identity, Idp, fingerprint_payload, sdp_fingerprints};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use p384::SecretKey;
 use p384::ecdsa::{SigningKey, VerifyingKey};
 use p384::elliptic_curve::Generate;
-use p384::pkcs8::{EncodePublicKey, LineEnding};
+use p384::pkcs8::LineEnding;
 use serde_json::json;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -62,12 +61,8 @@ impl ServerIdentity {
         let verifying = *signing.verifying_key();
         let domain = domain.into();
 
-        let der = verifying
-            .to_public_key_der()
-            .map_err(|e| IdentityError::Key(e.to_string()))?;
-
         let mut claims = json!({
-            "cpk": STANDARD.encode(der.as_bytes()),
+            "cpk": EcJwk::from(&verifying),
             "iat": seconds(now),
         });
         if !domain.is_empty() {
@@ -170,7 +165,8 @@ mod tests {
     use super::*;
     use crate::identity::jwt::Jws;
     use crate::identity::{TokenTrust, validate_sdp};
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
     use serde_json::json;
 
     const ANSWER: &str = "v=0\r\n\
@@ -254,7 +250,7 @@ D9X8Fh+xaDyPt2Z7rVGnwVihOy/Uu1zzizzcYTJMluYn8XetihGgczU=
         m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
         a=sctp-port:5000\r\n";
 
-    const GOLDEN_IDENTITY_VALUE: &str = "eyJpZHAiOnsiZG9tYWluIjoiZXhhbXBsZS5jb20iLCJwcm90b2NvbCI6ImRlZmF1bHQifSwiYXNzZXJ0aW9uIjoie1widG9rZW5cIjpcImV5SmhiR2NpT2lKRlV6TTROQ0o5LmV5SmpjR3NpT2lKTlNGbDNSVUZaU0V0dldrbDZhakJEUVZGWlJrczBSVVZCUTBsRVdXZEJSVkZMY1RWb00xRkllR2RQUVdWNGVrODNTelZ5WldOdFNFRkdSVkp2WjJaNE4ybHVkMmRYVkV0T1MzUjVZM1l5WlhOTlZYQTRiRzVxYm1aR2JFOVdLMnAxYVdaQ2NUbDJaeXQzTDFZdlFsbG1jMWRuT0dvM1pHMWxOakZTY0RoR1dXOVVjM1l4VEhSak9EUnpPRE5IUlhsVVNtSnRTaTlHTTNKWmIxSnZTRTB4SWl3aVpYaHdJam94TnpBd01EZzJOREF3TENKcFlYUWlPakUzTURBd01EQXdNREFzSW1semN5STZJbVY0WVcxd2JHVXVZMjl0SW4wLjRIenhFOEtqeHU5RHI1VGVVclo5OUlta0lYdnAzVmJiVzJjajZUQ0RROVVweDVPWlRlSjdHVjZOYWk5UFNUZ05qM1VEMTVCNVgzc294R1hqS3Y3U0xmbEtKdXFFdUdtMlhhXzBwakEwRzZIRzlDUkN2b01zN081V2c3eWlZNFFWXCIsXCJmaW5nZXJwcmludHNcIjpcImV5SmhiR2NpT2lKRlV6TTROQ0o5Li4td2JVV1U4d2t5RTA1bnBtS2RyX0VLN0ZkZWR3X3dnaWdtQkJRM0pGQndISklRMFVZR19aMk9VdHc4UUdrUTJyWDJFZzFKUXYzeS1Zbks5VzJHME9nTVVZdDRCUF84VnB1bHE0TzltdnV3ZFJVcEo2RjRNLXFLWGpTaUVXQWtMY1wifSJ9";
+    const GOLDEN_IDENTITY_VALUE: &str = "eyJpZHAiOnsiZG9tYWluIjoiZXhhbXBsZS5jb20iLCJwcm90b2NvbCI6ImRlZmF1bHQifSwiYXNzZXJ0aW9uIjoie1widG9rZW5cIjpcImV5SmhiR2NpT2lKRlV6TTROQ0o5LmV5SmpjR3NpT25zaVkzSjJJam9pVUMwek9EUWlMQ0pyZEhraU9pSkZReUlzSW5naU9pSlJTM0UxYUROUlNIaG5UMEZsZUhwUE4wczFjbVZqYlVoQlJrVlNiMmRtZURkcGJuZG5WMVJMVGt0MGVXTjJNbVZ6VFZWd09HeHVhbTVtUm14UFZpMXFJaXdpZVNJNkluVnBaa0p4T1habkxYZGZWbDlDV1daelYyYzRhamRrYldVMk1WSndPRVpaYjFSemRqRk1kR000TkhNNE0wZEZlVlJLWW0xS1gwWXpjbGx2VW05SVRURWlmU3dpWlhod0lqb3hOekF3TURnMk5EQXdMQ0pwWVhRaU9qRTNNREF3TURBd01EQXNJbWx6Y3lJNkltVjRZVzF3YkdVdVkyOXRJbjAuMm1NMGVQUXNqT25RSWh0VGxyZEl0N3duTkNfZUFPbXNnWTVhd05NQlpfS2xuUkVYXy1CSGtoaDNtd0F3UnVRUHNaTXJTRjdES0JVSlRpdGN5THIyY2VhYXpHODBaTy15LTRSYW5IYVlWX2JhUlBJODM5VjhoLTNuVk5Razd1TUFcIixcImZpbmdlcnByaW50c1wiOlwiZXlKaGJHY2lPaUpGVXpNNE5DSjkuLi13YlVXVTh3a3lFMDVucG1LZHJfRUs3RmRlZHdfd2dpZ21CQlEzSkZCd0hKSVEwVVlHX1oyT1V0dzhRR2tRMnJYMkVnMUpRdjN5LVluSzlXMkcwT2dNVVl0NEJQXzhWcHVscTRPOW12dXdkUlVwSjZGNE0tcUtYalNpRVdBa0xjXCJ9In0=";
 
     fn fixture_now() -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(FIXTURE_NOW_SECONDS)
@@ -301,17 +297,40 @@ D9X8Fh+xaDyPt2Z7rVGnwVihOy/Uu1zzizzcYTJMluYn8XetihGgczU=
     }
 
     #[test]
-    fn the_token_cpk_is_the_fixed_base64_public_key_der() {
+    fn the_token_cpk_is_the_fixed_public_key_as_a_jwk_object() {
         let jws = Jws::parse(fixture_identity().token()).unwrap();
         let claims = jws.claims().unwrap();
 
-        assert_eq!(claims.string("cpk"), Some(FIXTURE_CPK));
+        assert_eq!(
+            claims.values()["cpk"],
+            json!({
+                "kty": "EC",
+                "crv": "P-384",
+                "x": "QKq5h3QHxgOAexzO7K5recmHAFERogfx7inwgWTKNKtycv2esMUp8lnjnfFlOV-j",
+                "y": "uifBq9vg-w_V_BYfsWg8j7dme61Rp8FYoTsv1Ltc84s83GEyTJbmJ_F3rYoRoHM1",
+            })
+        );
+        assert_eq!(claims.client_public_key().unwrap(), fixture_cpk_key());
         assert_eq!(claims.issuer(), Some("example.com"));
         assert_eq!(
             claims.expiry(),
             Some(fixture_now() + DEFAULT_TOKEN_LIFETIME)
         );
         assert_eq!(jws.header.alg, "ES384");
+    }
+
+    #[test]
+    fn the_token_cpk_object_has_48_byte_coordinates() {
+        let jws = Jws::parse(fixture_identity().token()).unwrap();
+        let claims = jws.claims().unwrap();
+        let cpk = claims.values()["cpk"].as_object().unwrap();
+
+        for coordinate in ["x", "y"] {
+            let bytes = URL_SAFE_NO_PAD
+                .decode(cpk[coordinate].as_str().unwrap())
+                .unwrap();
+            assert_eq!(bytes.len(), 48);
+        }
     }
 
     #[test]
@@ -358,6 +377,16 @@ D9X8Fh+xaDyPt2Z7rVGnwVihOy/Uu1zzizzcYTJMluYn8XetihGgczU=
 
         let claims = validate_sdp(&augmented, &TokenTrust::Any, fixture_now()).unwrap();
 
+        assert_eq!(claims.client_public_key().unwrap(), fixture_cpk_key());
+    }
+
+    #[test]
+    fn our_own_signed_answer_validates_under_any_trust_with_the_jwk_cpk() {
+        let augmented = fixture_identity().augment(FIXTURE_ANSWER).unwrap();
+
+        let claims = validate_sdp(&augmented, &TokenTrust::Any, fixture_now()).unwrap();
+
+        assert!(claims.values()["cpk"].is_object());
         assert_eq!(claims.client_public_key().unwrap(), fixture_cpk_key());
     }
 

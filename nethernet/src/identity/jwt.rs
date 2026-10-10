@@ -1,10 +1,12 @@
 //! Token claims.
 use crate::identity::error::{IdentityError, Result};
+use crate::identity::jwk::EcJwk;
 pub use crate::identity::jws::{Header, Jws};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use p384::ecdsa::VerifyingKey;
 use p384::pkcs8::DecodePublicKey;
+use serde::Deserialize;
 use serde_json::Value;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -57,12 +59,25 @@ impl Claims {
         Some(UNIX_EPOCH + Duration::from_secs(seconds))
     }
 
-    /// The `cpk` claim, a base64 DER P-384 public key.
+    /// The `cpk` claim: a P-384 key as a JWK object or as a base64 SPKI DER string.
     pub fn client_public_key(&self) -> Result<VerifyingKey> {
-        let cpk = self.string("cpk").ok_or_else(|| {
-            IdentityError::ClientPublicKey("the token carries no cpk".to_string())
-        })?;
+        match self.values.get("cpk") {
+            None => Err(IdentityError::ClientPublicKey(
+                "the token carries no cpk".to_string(),
+            )),
+            Some(Value::String(cpk)) => Self::spki_key(cpk),
+            Some(object @ Value::Object(_)) => {
+                let jwk = EcJwk::deserialize(object)
+                    .map_err(|e| IdentityError::ClientPublicKey(format!("invalid JWK: {}", e)))?;
+                VerifyingKey::try_from(&jwk)
+            }
+            Some(_) => Err(IdentityError::ClientPublicKey(
+                "the cpk is neither a string nor a JWK object".to_string(),
+            )),
+        }
+    }
 
+    fn spki_key(cpk: &str) -> Result<VerifyingKey> {
         let der = STANDARD
             .decode(cpk)
             .map_err(|e| IdentityError::ClientPublicKey(format!("invalid base64: {}", e)))?;
@@ -188,6 +203,80 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, IdentityError::ClientPublicKey(_)));
+    }
+
+    const FIXTURE_SPKI: &str = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEQKq5h3QHxgOAexzO7K5recmHAFERogfx7inwgWTKNKtycv2esMUp8lnjnfFlOV+juifBq9vg+w/V/BYfsWg8j7dme61Rp8FYoTsv1Ltc84s83GEyTJbmJ/F3rYoRoHM1";
+
+    fn fixture_jwk() -> Value {
+        json!({
+            "kty": "EC",
+            "crv": "P-384",
+            "x": "QKq5h3QHxgOAexzO7K5recmHAFERogfx7inwgWTKNKtycv2esMUp8lnjnfFlOV-j",
+            "y": "uifBq9vg-w_V_BYfsWg8j7dme61Rp8FYoTsv1Ltc84s83GEyTJbmJ_F3rYoRoHM1",
+        })
+    }
+
+    #[test]
+    fn a_jwk_cpk_is_the_same_key_as_the_spki_string_cpk() {
+        let from_jwk = claims(json!({"cpk": fixture_jwk()}))
+            .client_public_key()
+            .unwrap();
+        let from_spki = claims(json!({"cpk": FIXTURE_SPKI}))
+            .client_public_key()
+            .unwrap();
+
+        assert_eq!(from_jwk, from_spki);
+    }
+
+    #[test]
+    fn a_jwk_cpk_on_another_curve_or_type_is_not_a_client_public_key() {
+        for (field, value) in [("crv", "P-256"), ("kty", "RSA")] {
+            let mut jwk = fixture_jwk();
+            jwk[field] = json!(value);
+
+            let error = claims(json!({"cpk": jwk})).client_public_key().unwrap_err();
+
+            assert!(matches!(error, IdentityError::ClientPublicKey(_)));
+        }
+    }
+
+    #[test]
+    fn a_jwk_cpk_with_malformed_coordinates_is_not_a_client_public_key() {
+        let x = fixture_jwk()["x"].as_str().unwrap().to_string();
+        let malformed = [
+            x[..x.len() - 4].to_string(),
+            format!("{}AAAA", x),
+            "***".to_string(),
+            x.replace('-', "+"),
+            format!("{}=", &x[..x.len() - 1]),
+        ];
+
+        for x in malformed {
+            let mut jwk = fixture_jwk();
+            jwk["x"] = json!(x);
+
+            let error = claims(json!({"cpk": jwk})).client_public_key().unwrap_err();
+
+            assert!(matches!(error, IdentityError::ClientPublicKey(_)));
+        }
+    }
+
+    #[test]
+    fn a_jwk_cpk_missing_a_coordinate_is_not_a_client_public_key() {
+        let error = claims(json!({"cpk": {"kty": "EC", "crv": "P-384"}}))
+            .client_public_key()
+            .unwrap_err();
+
+        assert!(matches!(error, IdentityError::ClientPublicKey(_)));
+    }
+
+    #[test]
+    fn a_cpk_that_is_an_array_or_a_number_is_not_a_client_public_key() {
+        for cpk in [json!([fixture_jwk()]), json!(384)] {
+            let error = claims(json!({"cpk": cpk})).client_public_key().unwrap_err();
+
+            assert!(matches!(error, IdentityError::ClientPublicKey(_)));
+        }
     }
 
     #[test]
