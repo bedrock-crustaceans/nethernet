@@ -50,9 +50,6 @@ pub struct HttpServerConfig {
     /// The TLS the endpoint is served over, or [`None`] to serve plain HTTP.
     pub tls: Option<Arc<rustls::ServerConfig>>,
 
-    /// Whether a PROXY header from a trusted proxy is read off the front of a connection.
-    pub proxy_protocol: bool,
-
     /// How long a connection may sit unused before it is closed.
     pub idle_timeout: Duration,
 }
@@ -63,7 +60,6 @@ impl Default for HttpServerConfig {
             network_id: String::new(),
             signaler: HttpSignalerConfig::default(),
             tls: None,
-            proxy_protocol: false,
             idle_timeout: Duration::from_secs(30),
         }
     }
@@ -453,8 +449,7 @@ async fn serve(
     acceptor: Option<TlsAcceptor>,
     commands: mpsc::UnboundedSender<Command>,
 ) -> Result<()> {
-    let proxied = match config.proxy_protocol && config.signaler.trusted_proxies.contains(peer.ip())
-    {
+    let proxied = match config.signaler.reads_proxy_header(peer) {
         true => read_proxy_header(&mut stream).await?,
         false => None,
     };
