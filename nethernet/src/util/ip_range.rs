@@ -1,48 +1,14 @@
 //! Sets of addresses written as single hosts or CIDR ranges.
 
 use crate::util::endpoint;
+use ipnet::{IpNet, Ipv4Net};
 use std::net::IpAddr;
 
 /// A set of addresses written as single hosts or CIDR ranges, such as `10.0.0.0/8` or
 /// `2001:db8::/32`. An address with no prefix matches only itself.
 #[derive(Debug, Clone, Default)]
 pub struct IpRangeSet {
-    rules: Vec<Rule>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Rule {
-    address: IpAddr,
-    prefix: u8,
-}
-
-impl Rule {
-    fn contains(&self, address: IpAddr) -> bool {
-        match (self.address, address) {
-            (IpAddr::V4(rule), IpAddr::V4(address)) => {
-                matches(&rule.octets(), &address.octets(), self.prefix)
-            }
-            (IpAddr::V6(rule), IpAddr::V6(address)) => {
-                matches(&rule.octets(), &address.octets(), self.prefix)
-            }
-            _ => false,
-        }
-    }
-}
-
-fn matches(rule: &[u8], address: &[u8], prefix: u8) -> bool {
-    let bytes = prefix as usize / 8;
-    if rule[..bytes] != address[..bytes] {
-        return false;
-    }
-
-    let bits = prefix % 8;
-    if bits == 0 {
-        return true;
-    }
-
-    let mask = 0xffu8 << (8 - bits);
-    rule[bytes] & mask == address[bytes] & mask
+    ranges: Vec<IpNet>,
 }
 
 impl IpRangeSet {
@@ -57,53 +23,53 @@ impl IpRangeSet {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let rules = entries
+        let ranges = entries
             .into_iter()
             .filter_map(|entry| {
                 let entry = entry.as_ref().trim();
-                match rule(entry) {
-                    Some(rule) => Some(rule),
-                    None => {
-                        tracing::warn!("ignoring malformed address or range: {}", entry);
-                        None
-                    }
+                let range = range(entry);
+                if range.is_none() {
+                    tracing::warn!("ignoring malformed address or range: {}", entry);
                 }
+                range
             })
             .collect();
 
-        Self { rules }
+        Self { ranges }
     }
 
     /// Reports whether the set matches nothing.
     pub fn is_empty(&self) -> bool {
-        self.rules.is_empty()
+        self.ranges.is_empty()
     }
 
     /// Reports whether the address falls into one of the ranges.
     pub fn contains(&self, address: IpAddr) -> bool {
         let address = endpoint::normalize(address);
-        self.rules.iter().any(|rule| rule.contains(address))
+        self.ranges.iter().any(|range| range.contains(&address))
+    }
+
+    fn into_ipv4_when_mapped(range: IpNet) -> Option<IpNet> {
+        const MAPPED_PREFIX: u8 = 96;
+        let IpNet::V6(v6) = range else {
+            return Some(range);
+        };
+        let Some(v4) = v6.addr().to_ipv4_mapped() else {
+            return Some(range);
+        };
+        let prefix = v6.prefix_len().checked_sub(MAPPED_PREFIX)?;
+        Ipv4Net::new(v4, prefix).ok().map(IpNet::V4)
     }
 }
 
-fn rule(entry: &str) -> Option<Rule> {
-    let (address, prefix) = match entry.split_once('/') {
-        Some((address, prefix)) => (address, Some(prefix)),
-        None => (entry, None),
-    };
-
-    let address = endpoint::normalize(address.parse::<IpAddr>().ok()?);
-    let bits = match address {
-        IpAddr::V4(_) => 32,
-        IpAddr::V6(_) => 128,
-    };
-
-    let prefix = match prefix {
-        Some(prefix) => prefix.parse::<u8>().ok().filter(|&prefix| prefix <= bits)?,
-        None => bits,
-    };
-
-    Some(Rule { address, prefix })
+fn range(entry: &str) -> Option<IpNet> {
+    match entry.parse::<IpNet>() {
+        Ok(range) => IpRangeSet::into_ipv4_when_mapped(range),
+        Err(_) => {
+            let address = endpoint::normalize(entry.parse::<IpAddr>().ok()?);
+            Some(IpNet::from(address))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -153,5 +119,83 @@ mod tests {
 
         assert!(set.contains(ip("10.0.0.1")));
         assert!(!set.is_empty());
+    }
+
+    #[test]
+    fn a_zero_prefix_matches_every_address_of_its_family() {
+        let set = IpRangeSet::parse(["0.0.0.0/0"]);
+
+        assert!(set.contains(ip("198.51.100.9")));
+        assert!(set.contains(ip("::ffff:198.51.100.9")));
+        assert!(!set.contains(ip("2001:db8::1")));
+    }
+
+    #[test]
+    fn a_full_prefix_matches_only_its_host() {
+        let set = IpRangeSet::parse(["203.0.113.7/32", "2001:db8::7/128"]);
+
+        assert!(set.contains(ip("203.0.113.7")));
+        assert!(!set.contains(ip("203.0.113.6")));
+        assert!(set.contains(ip("2001:db8::7")));
+        assert!(!set.contains(ip("2001:db8::8")));
+    }
+
+    #[test]
+    fn entries_are_trimmed() {
+        let set = IpRangeSet::parse([
+            "  10.0.0.0/8 ",
+            "	2001:db8::1
+",
+        ]);
+
+        assert!(set.contains(ip("10.9.9.9")));
+        assert!(set.contains(ip("2001:db8::1")));
+    }
+
+    #[test]
+    fn a_mapped_bare_entry_matches_the_ipv4_host() {
+        let set = IpRangeSet::parse(["::ffff:203.0.113.7"]);
+
+        assert!(set.contains(ip("203.0.113.7")));
+        assert!(set.contains(ip("::ffff:203.0.113.7")));
+        assert!(!set.contains(ip("203.0.113.8")));
+    }
+
+    #[test]
+    fn ipv4_ranges_never_match_unmapped_ipv6_addresses() {
+        let set = IpRangeSet::parse(["0.0.0.0/0"]);
+
+        assert!(!set.contains(ip("::1")));
+    }
+
+    #[test]
+    fn a_mapped_range_matches_the_ipv4_addresses_it_covers() {
+        let set = IpRangeSet::parse(["::ffff:10.0.0.0/104"]);
+
+        assert!(set.contains(ip("10.1.2.3")));
+        assert!(set.contains(ip("::ffff:10.1.2.3")));
+        assert!(!set.contains(ip("11.0.0.1")));
+    }
+
+    #[test]
+    fn a_mapped_host_with_full_prefix_matches_only_itself() {
+        let set = IpRangeSet::parse(["::ffff:10.0.0.1/128"]);
+
+        assert!(set.contains(ip("10.0.0.1")));
+        assert!(!set.contains(ip("10.0.0.2")));
+    }
+
+    #[test]
+    fn a_mapped_range_shorter_than_96_bits_is_skipped() {
+        let set = IpRangeSet::parse(["::ffff:0:0/64"]);
+
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn a_set_of_only_malformed_entries_is_empty() {
+        let set = IpRangeSet::parse(["", "10.0.0.0/", "10.0.0.0/33", "::1/129", "/8"]);
+
+        assert!(set.is_empty());
     }
 }

@@ -1734,6 +1734,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "http",
+ "ipnet",
  "p384",
  "rand 0.10.3",
  "ring",
