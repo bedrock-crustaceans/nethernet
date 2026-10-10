@@ -1,5 +1,5 @@
 use http::header::{
-    CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, EXPECT, HOST, InvalidHeaderValue, TRANSFER_ENCODING,
+    CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, InvalidHeaderValue, TRANSFER_ENCODING,
     USER_AGENT,
 };
 use http::uri::{InvalidUri, PathAndQuery};
@@ -28,6 +28,8 @@ pub(crate) enum RequestError {
     Malformed,
     #[error("request too large")]
     TooLarge,
+    #[error("request body has no content length")]
+    LengthRequired,
 }
 
 impl From<FramingError> for RequestError {
@@ -181,24 +183,15 @@ impl ChunkedBody {
     }
 }
 
-fn expects_continue(headers: &[httparse::Header]) -> bool {
-    headers.iter().any(|h| {
-        h.name.eq_ignore_ascii_case(EXPECT.as_str())
-            && h.value
-                .trim_ascii()
-                .eq_ignore_ascii_case(WireFormat::CONTINUE_EXPECTATION.as_bytes())
-    })
-}
-
 #[derive(Debug)]
 pub(crate) enum Parsed<T> {
-    Complete(Box<T>, usize),
-    Partial { expects_continue: bool },
+    Complete(Box<T>),
+    Partial,
 }
 
 /// Parses a complete HTTP/1.x request out of the front of a buffer, once one is fully
-/// buffered. `Partial` means more bytes are needed, and says whether the client is
-/// waiting for a `100 Continue` before it sends the body.
+/// buffered. `Partial` means more bytes are needed. The body must be sized by
+/// `Content-Length`: any `Transfer-Encoding` is refused with `LengthRequired`.
 pub(crate) struct RequestReader;
 
 impl RequestReader {
@@ -210,16 +203,26 @@ impl RequestReader {
             _ => RequestError::Malformed,
         })?;
         let httparse::Status::Complete(header_len) = status else {
-            return Ok(Parsed::Partial {
-                expects_continue: false,
-            });
+            return Ok(Parsed::Partial);
         };
 
-        let framing = BodyFraming::of(parsed.headers)?.unwrap_or(BodyFraming::Length(0));
-        let Some((body, body_len)) = framing.read(&buf[header_len..])? else {
-            return Ok(Parsed::Partial {
-                expects_continue: expects_continue(parsed.headers),
+        let has_header = |name: &str| {
+            parsed
+                .headers
+                .iter()
+                .any(|h| h.name.eq_ignore_ascii_case(name))
+        };
+        if has_header(TRANSFER_ENCODING.as_str()) {
+            return Err(if has_header(CONTENT_LENGTH.as_str()) {
+                RequestError::Malformed
+            } else {
+                RequestError::LengthRequired
             });
+        }
+
+        let framing = BodyFraming::of(parsed.headers)?.unwrap_or(BodyFraming::Length(0));
+        let Some((body, _)) = framing.read(&buf[header_len..])? else {
+            return Ok(Parsed::Partial);
         };
 
         let mut builder = Request::builder()
@@ -230,7 +233,7 @@ impl RequestReader {
         }
         let request = builder.body(body).map_err(|_| RequestError::Malformed)?;
 
-        Ok(Parsed::Complete(Box::new(request), header_len + body_len))
+        Ok(Parsed::Complete(Box::new(request)))
     }
 }
 
@@ -247,16 +250,12 @@ impl ResponseReader {
             _ => ResponseError::Malformed,
         })?;
         let httparse::Status::Complete(header_len) = status else {
-            return Ok(Parsed::Partial {
-                expects_continue: false,
-            });
+            return Ok(Parsed::Partial);
         };
 
         let framing = BodyFraming::of(parsed.headers)?.ok_or(ResponseError::UnboundedBody)?;
-        let Some((body, body_len)) = framing.read(&buf[header_len..])? else {
-            return Ok(Parsed::Partial {
-                expects_continue: false,
-            });
+        let Some((body, _)) = framing.read(&buf[header_len..])? else {
+            return Ok(Parsed::Partial);
         };
 
         let mut builder = Response::builder().status(parsed.code.ok_or(ResponseError::Malformed)?);
@@ -265,7 +264,7 @@ impl ResponseReader {
         }
         let response = builder.body(body).map_err(|_| ResponseError::Malformed)?;
 
-        Ok(Parsed::Complete(Box::new(response), header_len + body_len))
+        Ok(Parsed::Complete(Box::new(response)))
     }
 }
 
@@ -282,8 +281,6 @@ struct WireFormat;
 impl WireFormat {
     const CRLF: &'static str = "\r\n";
     const VERSION: &'static str = "HTTP/1.1";
-    const CONTINUE_EXPECTATION: &'static str = "100-continue";
-    const KEEP_ALIVE: HeaderValue = HeaderValue::from_static("keep-alive");
     const CLOSE: HeaderValue = HeaderValue::from_static("close");
 
     fn status_line(status: StatusCode) -> String {
@@ -300,7 +297,7 @@ impl WireFormat {
         format!("{method} {target} {}{}", Self::VERSION, Self::CRLF)
     }
 
-    fn serialize(start_line: &str, headers: &HeaderMap, body: &str, keep_alive: bool) -> Vec<u8> {
+    fn serialize(start_line: &str, headers: &HeaderMap, body: &str) -> Vec<u8> {
         let mut head = String::from(start_line);
         for (name, value) in headers {
             if name == CONTENT_LENGTH || name == CONNECTION {
@@ -313,12 +310,7 @@ impl WireFormat {
             CONTENT_LENGTH.as_str(),
             body.len().to_string().as_bytes(),
         );
-        let connection = if keep_alive {
-            Self::KEEP_ALIVE
-        } else {
-            Self::CLOSE
-        };
-        Self::push_header(&mut head, CONNECTION.as_str(), connection.as_bytes());
+        Self::push_header(&mut head, CONNECTION.as_str(), Self::CLOSE.as_bytes());
         head.push_str(Self::CRLF);
 
         let mut out = head.into_bytes();
@@ -337,22 +329,14 @@ impl WireFormat {
 pub(crate) struct ResponseWriter;
 
 impl ResponseWriter {
-    /// Serializes an `http::Response<String>`, overriding any Content-Length or
-    /// Connection header with the body's actual length and the keep-alive choice.
-    pub(crate) fn encode(response: &Response<String>, keep_alive: bool) -> Vec<u8> {
+    /// Serializes an `http::Response<String>`, overriding any Content-Length header with
+    /// the body's actual length and the Connection header with `close`.
+    pub(crate) fn encode(response: &Response<String>) -> Vec<u8> {
         WireFormat::serialize(
             &WireFormat::status_line(response.status()),
             response.headers(),
             response.body(),
-            keep_alive,
         )
-    }
-
-    /// The interim `100 Continue` response that releases a client waiting to send its body.
-    pub(crate) fn continue_interim() -> Vec<u8> {
-        let mut out = WireFormat::status_line(StatusCode::CONTINUE).into_bytes();
-        out.extend_from_slice(WireFormat::CRLF.as_bytes());
-        out
     }
 }
 
@@ -394,7 +378,6 @@ impl RequestWriter {
             &WireFormat::request_line(method, &target),
             headers,
             body,
-            false,
         ))
     }
 }
@@ -403,18 +386,18 @@ impl RequestWriter {
 mod tests {
     use super::*;
 
-    fn parsed_request(wire: &[u8]) -> (Request<String>, usize) {
-        let Ok(Parsed::Complete(request, consumed)) = RequestReader::parse(wire) else {
+    fn parsed_request(wire: &[u8]) -> Request<String> {
+        let Ok(Parsed::Complete(request)) = RequestReader::parse(wire) else {
             panic!("the request was not parsed as complete");
         };
-        (TextBody::request(*request).unwrap(), consumed)
+        TextBody::request(*request).unwrap()
     }
 
-    fn parsed_response(wire: &[u8]) -> (Response<Vec<u8>>, usize) {
-        let Ok(Parsed::Complete(response, consumed)) = ResponseReader::parse(wire) else {
+    fn parsed_response(wire: &[u8]) -> Response<Vec<u8>> {
+        let Ok(Parsed::Complete(response)) = ResponseReader::parse(wire) else {
             panic!("the response was not parsed as complete");
         };
-        (*response, consumed)
+        *response
     }
 
     fn response_headers(wire: &[u8]) -> Vec<(String, String)> {
@@ -434,27 +417,16 @@ mod tests {
     }
 
     #[test]
-    fn a_chunked_body_is_decoded() {
-        let wire = b"POST /v1/join HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
-
-        let (request, consumed) = parsed_request(wire);
-
-        assert_eq!(request.body(), "hello world");
-        assert_eq!(consumed, wire.len());
-    }
-
-    #[test]
     fn a_status_request_is_a_bodiless_get_of_the_status_path() {
         let wire = RequestWriter::get("example.com:19132", join::STATUS_PATH).unwrap();
 
-        let (request, consumed) = parsed_request(&wire);
+        let request = parsed_request(&wire);
 
         assert_eq!(request.method(), Method::GET);
         assert_eq!(request.uri().path(), join::STATUS_PATH);
         assert_eq!(request.headers()[HOST], "example.com:19132");
         assert_eq!(request.headers()[USER_AGENT], join::CLIENT_USER_AGENT);
         assert!(request.body().is_empty());
-        assert_eq!(consumed, wire.len());
     }
 
     #[test]
@@ -467,7 +439,7 @@ mod tests {
         )
         .unwrap();
 
-        let (request, consumed) = parsed_request(&wire);
+        let request = parsed_request(&wire);
 
         assert_eq!(request.method(), Method::POST);
         assert_eq!(request.uri().path(), "/v1/join/abc");
@@ -477,7 +449,6 @@ mod tests {
         assert_eq!(request.headers()[USER_AGENT], join::CLIENT_USER_AGENT);
         assert_eq!(request.headers()[CONNECTION], "close");
         assert_eq!(request.body(), "{\"k\":\"v\"}");
-        assert_eq!(consumed, wire.len());
     }
 
     #[test]
@@ -489,12 +460,11 @@ mod tests {
             .body("hello".to_string())
             .unwrap();
 
-        let wire = ResponseWriter::encode(&response, true);
+        let wire = ResponseWriter::encode(&response);
 
-        let (parsed, consumed) = parsed_response(&wire);
+        let parsed = parsed_response(&wire);
         assert_eq!(parsed.status(), StatusCode::CREATED);
         assert_eq!(parsed.body(), b"hello");
-        assert_eq!(consumed, wire.len());
         let headers = response_headers(&wire);
         assert!(headers.contains(&("content-type".into(), "application/json".into())));
         assert_eq!(
@@ -510,40 +480,64 @@ mod tests {
     fn a_chunked_response_is_decoded() {
         let wire = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
 
-        let (response, consumed) = parsed_response(wire);
+        let response = parsed_response(wire);
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.body(), b"hello world");
-        assert_eq!(consumed, wire.len());
     }
 
     #[test]
-    fn a_chunked_request_with_trailers_is_consumed_through_them() {
-        let wire = b"POST /v1/join HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nx-sum: 1\r\nx-other: 2\r\n\r\nGET /next";
+    fn a_chunked_body_with_trailers_is_consumed_through_them() {
+        let wire = b"5\r\nhello\r\n0\r\nx-sum: 1\r\nx-other: 2\r\n\r\nHTTP/1.1 204";
 
-        let (request, consumed) = parsed_request(wire);
-
-        assert_eq!(request.body(), "hello");
-        assert_eq!(consumed, wire.len() - b"GET /next".len());
+        assert_eq!(
+            ChunkedBody::decode(wire),
+            Ok(ChunkedBody::Complete {
+                body: b"hello".to_vec(),
+                consumed: wire.len() - b"HTTP/1.1 204".len(),
+            })
+        );
     }
 
     #[test]
     fn a_malformed_trailer_section_is_malformed() {
-        let wire = b"POST /v1/join HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nno colon here\r\n\r\n";
+        let wire = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nno colon here\r\n\r\n";
 
-        assert!(matches!(
-            RequestReader::parse(wire),
-            Err(RequestError::Malformed)
-        ));
+        assert_eq!(
+            ResponseReader::parse(wire).unwrap_err(),
+            ResponseError::Malformed
+        );
     }
 
     #[test]
     fn an_unterminated_trailer_section_is_partial() {
-        let wire = b"POST /v1/join HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nx-sum: 1\r\n";
+        let wire =
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nx-sum: 1\r\n";
+
+        assert!(matches!(ResponseReader::parse(wire), Ok(Parsed::Partial)));
+    }
+
+    #[test]
+    fn a_request_with_any_transfer_encoding_requires_a_length() {
+        for coding in ["chunked", "gzip"] {
+            let wire = format!(
+                "POST /v1/join HTTP/1.1\r\nhost: x\r\ntransfer-encoding: {coding}\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+            );
+
+            assert!(matches!(
+                RequestReader::parse(wire.as_bytes()),
+                Err(RequestError::LengthRequired)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_request_with_a_length_and_a_transfer_encoding_is_malformed() {
+        let wire = b"POST /v1/join HTTP/1.1\r\nhost: x\r\ncontent-length: 5\r\ntransfer-encoding: chunked\r\n\r\nhello";
 
         assert!(matches!(
             RequestReader::parse(wire),
-            Ok(Parsed::Partial { .. })
+            Err(RequestError::Malformed)
         ));
     }
 
@@ -561,31 +555,29 @@ mod tests {
     fn a_non_utf8_body_is_returned_as_bytes_and_refused_as_text() {
         let wire = b"POST /v1/join HTTP/1.1\r\nhost: x\r\ncontent-length: 2\r\n\r\n\xff\xfe";
 
-        let Ok(Parsed::Complete(request, consumed)) = RequestReader::parse(wire) else {
+        let Ok(Parsed::Complete(request)) = RequestReader::parse(wire) else {
             panic!("the request was not parsed as complete");
         };
 
         assert_eq!(request.body(), &[0xff, 0xfe]);
-        assert_eq!(consumed, wire.len());
         assert!(TextBody::request(*request).is_err());
     }
 
     #[test]
-    fn keep_alive_sets_the_connection_header_of_a_response() {
-        let response = Response::new(String::new());
+    fn a_response_always_closes_the_connection() {
+        let response = Response::builder()
+            .header(CONNECTION, "keep-alive")
+            .body(String::new())
+            .unwrap();
 
-        let keep = response_headers(&ResponseWriter::encode(&response, true));
-        let close = response_headers(&ResponseWriter::encode(&response, false));
+        let headers = response_headers(&ResponseWriter::encode(&response));
 
-        assert!(keep.contains(&("connection".into(), "keep-alive".into())));
-        assert!(close.contains(&("connection".into(), "close".into())));
-    }
-
-    #[test]
-    fn the_continue_interim_is_a_bare_status_line() {
         assert_eq!(
-            ResponseWriter::continue_interim(),
-            b"HTTP/1.1 100 Continue\r\n\r\n"
+            headers
+                .iter()
+                .filter(|(name, _)| name == CONNECTION.as_str())
+                .collect::<Vec<_>>(),
+            [&("connection".to_string(), "close".to_string())]
         );
     }
 

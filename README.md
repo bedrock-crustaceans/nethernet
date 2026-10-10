@@ -71,7 +71,8 @@ let signaling = HttpSignalingServer::bind(
 )
 .await?;
 
-// Required: a real client refuses any answer that carries no a=identity assertion.
+// Required for HTTP by default: NetherServer::bind_with fails with NetherError::IdentityRequired
+// without it, unless ConnectionConfig::allow_unsigned_answers is set.
 let identity = nethernet_tokio::util::identity::from_pem_or_create("identity.pem", "example.com").await?;
 let config = ConnectionConfig {
     identity: Some(Arc::new(identity)),
@@ -85,9 +86,14 @@ let AcceptedSession { session, .. } = listener.accept().await?;
 Answers are signed with the identity in `ConnectionConfig::identity`, which
 `nethernet_tokio::util::identity::from_pem_or_create` loads from a PEM and creates on first
 use. Clients pin that key, so it should be kept between restarts, and **every answer must
-carry one** - a client refuses the connection otherwise, whether signaling ran over HTTPS
-or plaintext HTTP. Offers over HTTP are validated against `HttpSignalerConfig::token_trust`
-alone, and `ConnectionConfig::token_trust` applies only to offers over LAN discovery. It
+carry one** (guide section 5.2) - a vanilla client refuses the connection otherwise, whether
+signaling ran over HTTPS or plaintext HTTP, so an HTTP server refuses to start without one by
+default. A server that only serves non-vanilla clients, which do not verify answers, can opt out
+with `ConnectionConfig::allow_unsigned_answers`; an identity that is set still signs. It stays
+optional over LAN discovery. In `bevy-nethernet`, `NetherHttpServer::set_identity` is required
+the same way and joins are answered with 503 until it is called, unless
+`NetherHttpServer::allow_unsigned_answers(true)` opts out. Offers over
+HTTP are validated against `HttpSignalerConfig::token_trust` alone, and `ConnectionConfig::token_trust` applies only to offers over LAN discovery. It
 defaults to accepting any self-signed token while still binding it to the certificate the
 peer presents. `nethernet_tokio::util::jwks::Jwks::minecraft` fetches the keys needed to
 require a token issued by the Minecraft authorization service instead.

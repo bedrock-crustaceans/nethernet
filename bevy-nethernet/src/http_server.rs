@@ -64,7 +64,7 @@ pub enum NetherHttpServerEvent {
 struct TcpConn {
     stream: HttpStream,
     close_after_write: bool,
-    continued: bool,
+    requested: bool,
     last_active: Instant,
 }
 
@@ -75,7 +75,7 @@ impl TcpConn {
             .body(String::new())
             .expect("a status and an empty body are always a valid response");
         self.stream
-            .queue(&http_wire::ResponseWriter::encode(&response, false));
+            .queue(&http_wire::ResponseWriter::encode(&response));
         self.close_after_write = true;
         self.stream.inbound.clear();
     }
@@ -97,6 +97,9 @@ pub struct NetherHttpServer {
     pool: SessionPool<NetherSessionId>,
     session_local_addr: SocketAddr,
     identity: Option<ServerIdentity>,
+    warned_missing_identity: bool,
+    allow_unsigned_answers: bool,
+    warned_unsigned_answers: bool,
     infer_peer_candidates: bool,
     timeouts: Timeouts,
     idle_timeout: Duration,
@@ -128,6 +131,9 @@ impl NetherHttpServer {
             pool: SessionPool::new(session_socket),
             session_local_addr,
             identity: None,
+            warned_missing_identity: false,
+            allow_unsigned_answers: false,
+            warned_unsigned_answers: false,
             infer_peer_candidates: true,
             timeouts: Timeouts::default(),
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
@@ -149,8 +155,23 @@ impl NetherHttpServer {
         self.idle_timeout = idle_timeout;
     }
 
+    /// Sets the identity every answer is signed with.
+    ///
+    /// The HTTP signaling guide requires an `a=identity` assertion in every answer
+    /// (section 5.2) and a vanilla client refuses the connection without one, so until
+    /// this is called every join is answered with 503, unless
+    /// [`allow_unsigned_answers`](Self::allow_unsigned_answers) opts out. With an
+    /// identity set, answers are signed regardless of that flag.
     pub fn set_identity(&mut self, identity: ServerIdentity) {
         self.identity = Some(identity);
+    }
+
+    /// Lets joins be answered without an identity when none is set.
+    ///
+    /// Vanilla Minecraft clients refuse unsigned answers (guide section 5.2), so enable
+    /// this only for a server that serves non-vanilla clients. It is off by default.
+    pub fn allow_unsigned_answers(&mut self, allow: bool) {
+        self.allow_unsigned_answers = allow;
     }
 
     #[cfg(feature = "tls")]
@@ -297,7 +318,7 @@ impl NetherHttpServer {
                 TcpConn {
                     stream: self.tls.accept(stream),
                     close_after_write: false,
-                    continued: false,
+                    requested: false,
                     last_active: now,
                 },
             );
@@ -353,52 +374,47 @@ impl NetherHttpServer {
                 continue;
             }
 
-            loop {
-                match http_wire::RequestReader::parse(&conn.stream.inbound) {
-                    Ok(http_wire::Parsed::Complete(request, consumed)) => {
-                        let request = match http_wire::TextBody::request(*request) {
-                            Ok(request) => request,
-                            Err(error) => {
-                                tracing::debug!("refusing an unreadable http request: {error}");
-                                conn.refuse(StatusCode::BAD_REQUEST);
-                                break;
-                            }
-                        };
-                        conn.stream.inbound.drain(..consumed);
-                        conn.continued = false;
-                        tracing::debug!(
-                            "http request {} {} with {} headers",
-                            request.method(),
-                            request.uri(),
-                            request.headers().len()
-                        );
-                        requests.push((id, request));
-                    }
-                    Ok(http_wire::Parsed::Partial { .. })
-                        if conn.stream.inbound.len() > http_wire::MAX_BODY =>
-                    {
-                        conn.refuse(StatusCode::PAYLOAD_TOO_LARGE);
-                        break;
-                    }
-                    Ok(http_wire::Parsed::Partial { expects_continue }) => {
-                        if expects_continue && !conn.continued {
-                            conn.continued = true;
-                            conn.stream
-                                .queue(&http_wire::ResponseWriter::continue_interim());
+            if conn.requested {
+                conn.stream.inbound.clear();
+                continue;
+            }
+
+            match http_wire::RequestReader::parse(&conn.stream.inbound) {
+                Ok(http_wire::Parsed::Complete(request)) => {
+                    let request = match http_wire::TextBody::request(*request) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            tracing::debug!("refusing an unreadable http request: {error}");
+                            conn.refuse(StatusCode::BAD_REQUEST);
+                            continue;
                         }
-                        break;
-                    }
-                    Err(error) => {
-                        tracing::debug!("refusing an unreadable http request: {error:?}");
-                        conn.refuse(match error {
-                            http_wire::RequestError::TooManyHeaders => {
-                                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
-                            }
-                            http_wire::RequestError::Malformed => StatusCode::BAD_REQUEST,
-                            http_wire::RequestError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-                        });
-                        break;
-                    }
+                    };
+                    conn.stream.inbound.clear();
+                    conn.requested = true;
+                    tracing::debug!(
+                        "http request {} {} with {} headers",
+                        request.method(),
+                        request.uri(),
+                        request.headers().len()
+                    );
+                    requests.push((id, request));
+                }
+                Ok(http_wire::Parsed::Partial)
+                    if conn.stream.inbound.len() > http_wire::MAX_BODY =>
+                {
+                    conn.refuse(StatusCode::PAYLOAD_TOO_LARGE);
+                }
+                Ok(http_wire::Parsed::Partial) => {}
+                Err(error) => {
+                    tracing::debug!("refusing an unreadable http request: {error:?}");
+                    conn.refuse(match error {
+                        http_wire::RequestError::TooManyHeaders => {
+                            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+                        }
+                        http_wire::RequestError::Malformed => StatusCode::BAD_REQUEST,
+                        http_wire::RequestError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+                        http_wire::RequestError::LengthRequired => StatusCode::LENGTH_REQUIRED,
+                    });
                 }
             }
         }
@@ -422,12 +438,12 @@ impl NetherHttpServer {
             HttpSignalerOutput::Response {
                 connection,
                 response,
-                keep_alive,
+                ..
             } => {
                 if let Some(conn) = self.connections.get_mut(&connection) {
                     conn.stream
-                        .queue(&http_wire::ResponseWriter::encode(&response, keep_alive));
-                    conn.close_after_write = !keep_alive;
+                        .queue(&http_wire::ResponseWriter::encode(&response));
+                    conn.close_after_write = true;
                 }
             }
             HttpSignalerOutput::Close(connection) => {
@@ -441,6 +457,25 @@ impl NetherHttpServer {
     }
 
     fn handle_offer(&mut self, offer: Offer, now: Instant) {
+        if self.identity.is_none() {
+            if !self.allow_unsigned_answers {
+                if !self.warned_missing_identity {
+                    self.warned_missing_identity = true;
+                    tracing::warn!(
+                        "refusing joins with 503 until NetherHttpServer::set_identity is called"
+                    );
+                }
+                let _ = self.signaler.handle(HttpSignalerInput::Reject {
+                    connection_id: offer.connection_id,
+                    reason: RejectReason::Unavailable,
+                });
+                return;
+            }
+            if !self.warned_unsigned_answers {
+                self.warned_unsigned_answers = true;
+                tracing::warn!("answering joins without an identity; vanilla clients refuse these");
+            }
+        }
         let mut policy = OfferPolicy::new(IceMode::Full)
             .with_inferred_peer_candidates(self.infer_peer_candidates);
         if let Some(identity) = &self.identity {

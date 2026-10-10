@@ -60,11 +60,23 @@ impl NetherServer {
     }
 
     /// Creates a [`NetherServer`] using the timeouts of the given configuration.
+    ///
+    /// # Errors
+    ///
+    /// [`NetherError::IdentityRequired`] when the signaling is HTTP and the configuration
+    /// has no identity, since a vanilla client refuses answers that carry none. Setting
+    /// [`ConnectionConfig::allow_unsigned_answers`] opts out.
     pub async fn bind_with(
         signaling: impl Into<ServerSignaling>,
         config: ConnectionConfig,
     ) -> Result<Self> {
         let signaling: ServerSignaling = signaling.into();
+        if signaling.requires_identity()
+            && config.identity.is_none()
+            && !config.allow_unsigned_answers
+        {
+            return Err(NetherError::IdentityRequired);
+        }
         let local_addr = Addr::network(signaling.network_id());
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();

@@ -2,7 +2,9 @@
 
 use bytes::Bytes;
 use nethernet_tokio::signaling::http::{HttpServerConfig, HttpSignaling, HttpSignalingServer};
-use nethernet_tokio::{AcceptedSession, ConnectionConfig, NetherClient, NetherServer, ServerData};
+use nethernet_tokio::{
+    AcceptedSession, ConnectionConfig, NetherClient, NetherError, NetherServer, ServerData,
+};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,6 +39,15 @@ fn http_client() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
 }
 
+fn server_connection_config() -> ConnectionConfig {
+    ConnectionConfig {
+        identity: Some(Arc::new(
+            ServerIdentity::generate("server", std::time::SystemTime::now()).unwrap(),
+        )),
+        ..Default::default()
+    }
+}
+
 async fn serve(config: HttpServerConfig) -> (String, NetherServer) {
     let signaling = HttpSignalingServer::bind("127.0.0.1:0".parse().unwrap(), config)
         .await
@@ -44,7 +55,9 @@ async fn serve(config: HttpServerConfig) -> (String, NetherServer) {
     signaling.set_server_data(ServerData::new("test".into(), "world".into()));
 
     let addr = signaling.local_addr();
-    let listener = NetherServer::bind(signaling).await.unwrap();
+    let listener = NetherServer::bind_with(signaling, server_connection_config())
+        .await
+        .unwrap();
 
     (format!("http://{addr}"), listener)
 }
@@ -89,6 +102,61 @@ async fn offer_is_negotiated_over_the_endpoint() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn binding_an_http_server_without_an_identity_is_refused() {
+    let signaling = HttpSignalingServer::bind("127.0.0.1:0".parse().unwrap(), server_config())
+        .await
+        .unwrap();
+
+    let result = NetherServer::bind_with(signaling, ConnectionConfig::default()).await;
+
+    assert!(
+        matches!(result, Err(NetherError::IdentityRequired)),
+        "an HTTP server without an identity must not bind"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_http_server_without_an_identity_binds_when_unsigned_answers_are_allowed() {
+    let config = HttpServerConfig {
+        signaler: HttpSignalerConfig {
+            answer_timeout: Duration::from_secs(5),
+            token_trust: None,
+            ..Default::default()
+        },
+        ..server_config()
+    };
+    let signaling = HttpSignalingServer::bind("127.0.0.1:0".parse().unwrap(), config)
+        .await
+        .unwrap();
+    let url = format!("http://{}", signaling.local_addr());
+    let connection_config = ConnectionConfig {
+        allow_unsigned_answers: true,
+        ..Default::default()
+    };
+    let mut listener = NetherServer::bind_with(signaling, connection_config)
+        .await
+        .expect("an opt-out server without an identity must bind");
+    tokio::spawn(async move {
+        let _accepted = listener.accept().await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+
+    let signaling = HttpSignaling::new(NETWORK_ID.to_string()).unwrap();
+    let connected = tokio::time::timeout(
+        Duration::from_secs(20),
+        NetherClient::connect_with(signaling, url, ConnectionConfig::default()),
+    )
+    .await
+    .expect("negotiation timed out");
+
+    assert!(
+        connected.is_ok(),
+        "a client without an identity should connect: {:?}",
+        connected.err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_offer_without_an_identity_is_turned_away() {
     let (url, _listener) = serve(server_config()).await;
 
@@ -123,7 +191,7 @@ async fn connection_trust_does_not_revalidate_http_offers() {
     let url = format!("http://{}", signaling.local_addr());
     let connection_config = ConnectionConfig {
         token_trust: Some(TokenTrust::Any),
-        ..Default::default()
+        ..server_connection_config()
     };
     let mut listener = NetherServer::bind_with(signaling, connection_config)
         .await

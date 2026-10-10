@@ -1,5 +1,7 @@
 use bevy_nethernet::prelude::*;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 fn spin<F: FnMut() -> bool>(deadline: Instant, mut done: F) -> bool {
@@ -18,6 +20,7 @@ fn client_connects_to_server_over_http_and_exchanges_data() {
         config.token_trust = None;
     })
     .unwrap();
+    server.set_identity(server_identity());
     server.set_server_data(ServerData::new("Test Server".into(), "World".into()));
     let server_url = format!("http://{}", server.local_addr().unwrap());
 
@@ -55,6 +58,7 @@ fn client_connects_with_candidate_inference_disabled() {
         config.token_trust = None;
     })
     .unwrap();
+    server.set_identity(server_identity());
     server.set_infer_peer_candidates(false);
     let server_url = format!("http://{}", server.local_addr().unwrap());
 
@@ -74,6 +78,7 @@ fn a_connected_session_reports_its_address_and_round_trip_time() {
         config.token_trust = None;
     })
     .unwrap();
+    server.set_identity(server_identity());
     let server_url = format!("http://{}", server.local_addr().unwrap());
     let mut client = NetherHttpClient::new();
     client.connect("5678".to_string(), server_url).unwrap();
@@ -118,9 +123,116 @@ fn a_connected_session_reports_its_address_and_round_trip_time() {
     );
 }
 
+fn server_identity() -> ServerIdentity {
+    ServerIdentity::generate("server", std::time::SystemTime::now()).unwrap()
+}
+
+fn relay_recording_replies(upstream: SocketAddr) -> (SocketAddr, Arc<Mutex<Vec<u8>>>) {
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+    let address = listener.local_addr().unwrap();
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let recorded = replies.clone();
+    std::thread::spawn(move || {
+        for downstream in listener.incoming().flatten() {
+            let Ok(server) = TcpStream::connect(upstream) else {
+                continue;
+            };
+            let (Ok(mut up_read), Ok(mut up_write)) = (downstream.try_clone(), server.try_clone())
+            else {
+                continue;
+            };
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut up_read, &mut up_write);
+            });
+            let recorded = recorded.clone();
+            std::thread::spawn(move || {
+                let (mut from_server, mut to_client) = (server, downstream);
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = from_server.read(&mut chunk) {
+                    if n == 0 || to_client.write_all(&chunk[..n]).is_err() {
+                        break;
+                    }
+                    recorded.lock().unwrap().extend_from_slice(&chunk[..n]);
+                }
+            });
+        }
+    });
+    (address, replies)
+}
+
+fn join_through_relay(server: &mut NetherHttpServer) -> (bool, String) {
+    let (relay, replies) = relay_recording_replies(server.local_addr().unwrap());
+    let mut client = NetherHttpClient::new();
+    client.set_identity(ServerIdentity::generate("client", std::time::SystemTime::now()).unwrap());
+    client
+        .connect("5678".to_string(), format!("http://{relay}"))
+        .unwrap();
+
+    let mut failed = false;
+    spin(Instant::now() + Duration::from_secs(5), || {
+        server.update();
+        client.update();
+        while let Some(event) = client.next_event() {
+            failed |= matches!(event, NetherHttpClientEvent::ConnectFailed);
+        }
+        failed || (client.is_connected() && server.sessions().next().is_some())
+    });
+    let text = String::from_utf8_lossy(&replies.lock().unwrap()).into_owned();
+    (client.is_connected(), text)
+}
+
+#[test]
+fn a_join_on_a_server_without_an_identity_is_answered_with_503() {
+    let mut server =
+        NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |_| {}).unwrap();
+
+    let (connected, replies) = join_through_relay(&mut server);
+
+    assert!(!connected, "a server without an identity accepted a join");
+    assert!(replies.contains("HTTP/1.1 503"), "{replies}");
+}
+
+#[test]
+fn a_join_succeeds_once_the_server_has_an_identity() {
+    let mut server =
+        NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |_| {}).unwrap();
+    server.set_identity(server_identity());
+
+    let (connected, replies) = join_through_relay(&mut server);
+
+    assert!(connected, "{replies}");
+    assert!(!replies.contains("HTTP/1.1 503"), "{replies}");
+}
+
+#[test]
+fn a_server_allowing_unsigned_answers_admits_a_join_without_an_identity() {
+    let mut server =
+        NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |_| {}).unwrap();
+    server.allow_unsigned_answers(true);
+
+    let (connected, replies) = join_through_relay(&mut server);
+
+    assert!(connected, "{replies}");
+    assert!(!replies.contains("a=identity"), "{replies}");
+}
+
+#[test]
+fn a_server_with_an_identity_signs_even_when_unsigned_answers_are_allowed() {
+    let mut server =
+        NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |_| {}).unwrap();
+    server.set_identity(server_identity());
+    server.allow_unsigned_answers(true);
+
+    let (connected, replies) = join_through_relay(&mut server);
+
+    assert!(connected, "{replies}");
+    assert!(replies.contains("a=identity"), "{replies}");
+}
+
 fn join_outcome(identity: Option<ServerIdentity>) -> (bool, Vec<NetherHttpClientEvent>) {
     let mut server =
         NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |_| {}).unwrap();
+    server.set_identity(server_identity());
     server.set_server_data(ServerData::new("Test Server".into(), "World".into()));
     let server_url = format!("http://{}", server.local_addr().unwrap());
 
@@ -159,6 +271,7 @@ fn a_signed_client_is_visible_to_the_server_as_a_player_on_a_host() {
     let identity = ServerIdentity::generate("client", std::time::SystemTime::now()).unwrap();
     let mut server =
         NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |_| {}).unwrap();
+    server.set_identity(server_identity());
     let address = server.local_addr().unwrap();
     let mut client = NetherHttpClient::new();
     client.set_identity(identity);
@@ -259,7 +372,45 @@ mod raw {
     }
 
     #[test]
-    fn pipelined_requests_are_all_answered() {
+    fn a_connection_is_closed_after_its_one_request_is_answered() {
+        let (mut server, addr) = bind(|_| {});
+        let mut stream = connect(addr);
+        stream
+            .write_all(b"GET /v1/join HTTP/1.1\r\nhost: x\r\n\r\n")
+            .unwrap();
+
+        let reply = collect(&mut server, &mut stream, Duration::from_millis(500));
+
+        assert!(reply.text.starts_with("HTTP/1.1 200"), "{}", reply.text);
+        assert!(
+            reply
+                .text
+                .to_ascii_lowercase()
+                .contains("connection: close"),
+            "{}",
+            reply.text
+        );
+        assert!(reply.closed);
+    }
+
+    #[test]
+    fn a_second_request_on_the_same_connection_gets_no_response() {
+        let (mut server, addr) = bind(|_| {});
+        let mut stream = connect(addr);
+        let request = b"GET /v1/join HTTP/1.1\r\nhost: x\r\n\r\n";
+        stream.write_all(request).unwrap();
+        let first = collect(&mut server, &mut stream, Duration::from_millis(500));
+        assert!(first.closed, "{}", first.text);
+
+        let _ = stream.write_all(request);
+        let second = collect(&mut server, &mut stream, Duration::from_millis(300));
+
+        assert!(second.text.is_empty(), "{}", second.text);
+        assert!(second.closed);
+    }
+
+    #[test]
+    fn a_pipelined_request_is_not_answered() {
         let (mut server, addr) = bind(|_| {});
         let mut stream = connect(addr);
         let request = "GET /v1/join HTTP/1.1\r\nhost: x\r\n\r\n";
@@ -271,14 +422,15 @@ mod raw {
 
         assert_eq!(
             reply.text.matches("HTTP/1.1 200").count(),
-            2,
+            1,
             "{}",
             reply.text
         );
+        assert!(reply.closed);
     }
 
     #[test]
-    fn expect_continue_is_answered_before_the_body_arrives() {
+    fn an_expect_header_gets_no_interim_response() {
         let (mut server, addr) = bind(|_| {});
         let mut stream = connect(addr);
         stream
@@ -288,11 +440,7 @@ mod raw {
             .unwrap();
 
         let interim = collect(&mut server, &mut stream, Duration::from_millis(300));
-        assert!(
-            interim.text.starts_with("HTTP/1.1 100 Continue\r\n\r\n"),
-            "{}",
-            interim.text
-        );
+        assert!(interim.text.is_empty(), "{}", interim.text);
 
         stream.write_all(b"hello").unwrap();
         let last = collect(&mut server, &mut stream, Duration::from_millis(500));
@@ -302,16 +450,19 @@ mod raw {
     }
 
     #[test]
-    fn chunked_post_does_not_poison_the_next_pipelined_request() {
+    fn a_chunked_post_is_answered_with_411_and_closed() {
         let (mut server, addr) = bind(|_| {});
         let mut stream = connect(addr);
-        let post = "POST /v1/join HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
-        let get = "GET /v1/join HTTP/1.1\r\nhost: x\r\n\r\n";
-        stream.write_all(format!("{post}{get}").as_bytes()).unwrap();
+        stream
+            .write_all(
+                b"POST /v1/join HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+            )
+            .unwrap();
 
         let reply = collect(&mut server, &mut stream, Duration::from_millis(500));
 
-        assert!(reply.text.contains("HTTP/1.1 200"), "{}", reply.text);
+        assert!(reply.text.starts_with("HTTP/1.1 411"), "{}", reply.text);
+        assert!(reply.closed);
     }
 
     #[test]
@@ -364,24 +515,6 @@ mod raw {
         let reply = collect(&mut server, &mut stream, Duration::from_millis(800));
 
         assert!(reply.closed);
-    }
-
-    #[test]
-    fn active_connection_outlives_the_idle_timeout() {
-        let (mut server, addr) = bind(|_| {});
-        server.set_idle_timeout(Duration::from_millis(300));
-        let mut stream = connect(addr);
-        let request = b"GET /v1/join HTTP/1.1\r\nhost: x\r\n\r\n";
-
-        let mut answered = 0;
-        for _ in 0..4 {
-            stream.write_all(request).unwrap();
-            let reply = collect(&mut server, &mut stream, Duration::from_millis(150));
-            answered += reply.text.matches("HTTP/1.1 200").count();
-            assert!(!reply.closed);
-        }
-
-        assert_eq!(answered, 4);
     }
 
     #[test]

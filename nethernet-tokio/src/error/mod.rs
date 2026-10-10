@@ -30,6 +30,11 @@ pub enum NetherError {
     #[error("Identity error: {0}")]
     Identity(#[from] IdentityError),
 
+    /// A server over HTTP signaling was asked to run without an identity to sign its
+    /// answers with
+    #[error("HTTP signaling requires a server identity")]
+    IdentityRequired,
+
     /// An offer was not admitted or could not be answered
     #[error("Admission error: {0}")]
     Admission(#[from] AdmissionError),

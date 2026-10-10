@@ -171,21 +171,17 @@ fn drive_join(state: JoinState) -> JoinStep {
             Ok(Inbound::Closed) | Err(_) => JoinStep::Failed,
             Ok(Inbound::Idle) => JoinStep::Pending(JoinState::Receiving(stream)),
             Ok(Inbound::Received) => match http_wire::ResponseReader::parse(&stream.inbound) {
-                Ok(http_wire::Parsed::Complete(response, _)) => {
+                Ok(http_wire::Parsed::Complete(response)) => {
                     let (parts, body) = response.into_parts();
                     match http_wire::TextBody::decode(body) {
                         Ok(body) => JoinStep::Done(parts.status.as_u16(), body),
                         Err(_) => JoinStep::Failed,
                     }
                 }
-                Ok(http_wire::Parsed::Partial { .. })
-                    if stream.inbound.len() > http_wire::MAX_BODY =>
-                {
+                Ok(http_wire::Parsed::Partial) if stream.inbound.len() > http_wire::MAX_BODY => {
                     JoinStep::Failed
                 }
-                Ok(http_wire::Parsed::Partial { .. }) => {
-                    JoinStep::Pending(JoinState::Receiving(stream))
-                }
+                Ok(http_wire::Parsed::Partial) => JoinStep::Pending(JoinState::Receiving(stream)),
                 Err(_) => JoinStep::Failed,
             },
         },

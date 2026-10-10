@@ -33,6 +33,10 @@ fn self_signed_pair() -> (Arc<ServerConfig>, Arc<ClientConfig>) {
     (Arc::new(server), Arc::new(client))
 }
 
+fn server_identity() -> ServerIdentity {
+    ServerIdentity::generate("server", std::time::SystemTime::now()).unwrap()
+}
+
 fn serve(tls: Arc<ServerConfig>) -> (NetherHttpServer, SocketAddr) {
     serve_with(tls, |_| {})
 }
@@ -43,6 +47,7 @@ fn serve_with(
 ) -> (NetherHttpServer, SocketAddr) {
     let mut server =
         NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), conf).unwrap();
+    server.set_identity(server_identity());
     server.set_server_data(ServerData::new("Test Server".into(), "World".into()));
     server.set_tls(tls);
     let addr = server.local_addr().unwrap();
@@ -106,21 +111,17 @@ fn a_tls_client_gets_the_join_answer_over_a_handshake() {
 }
 
 #[test]
-fn a_tls_server_answers_pipelined_requests_and_stays_open() {
+fn a_tls_server_answers_one_request_and_closes() {
     let (server_config, client_config) = self_signed_pair();
     let (mut server, addr) = serve(server_config);
 
-    let reply = tls_get(
-        &mut server,
-        addr,
-        client_config,
-        "",
-        &format!("{JOIN_REQUEST}{JOIN_REQUEST}"),
-        2,
-    )
-    .unwrap();
+    let reply = tls_get(&mut server, addr, client_config, "", JOIN_REQUEST, 1).unwrap();
 
     assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    assert!(
+        reply.to_ascii_lowercase().contains("connection: close"),
+        "{reply}"
+    );
 }
 
 fn join_server(tls: Arc<ServerConfig>) -> (NetherHttpServer, u16) {
@@ -128,6 +129,7 @@ fn join_server(tls: Arc<ServerConfig>) -> (NetherHttpServer, u16) {
         config.token_trust = None;
     })
     .unwrap();
+    server.set_identity(server_identity());
     server.set_server_data(ServerData::new("Test Server".into(), "World".into()));
     server.set_tls(tls);
     let port = server.local_addr().unwrap().port();

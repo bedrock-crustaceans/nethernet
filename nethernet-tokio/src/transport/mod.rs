@@ -52,12 +52,23 @@ pub struct ConnectionConfig {
 
     /// The identity answers are signed with, or [`None`] to answer without one.
     ///
+    /// A server over HTTP signaling must have one by default: `NetherServer::bind_with`
+    /// fails with `NetherError::IdentityRequired` otherwise, unless
+    /// [`allow_unsigned_answers`](Self::allow_unsigned_answers) opts out. Over LAN
+    /// discovery it stays optional.
+    ///
     /// A real Minecraft client refuses every connection whose answer lacks an
-    /// `a=identity` assertion, over HTTP signaling or otherwise - this is required, not
-    /// optional, for interop (see the NetherNet HTTP signaling guide, section 5.2). A
-    /// client pins the key of a server, so it should be kept between restarts rather
-    /// than generated on each start.
+    /// `a=identity` assertion, over HTTP signaling or otherwise (see the NetherNet HTTP
+    /// signaling guide, section 5.2). A client pins the key of a server, so it should be
+    /// kept between restarts rather than generated on each start.
     pub identity: Option<Arc<ServerIdentity>>,
+
+    /// Whether a server over HTTP signaling may run without an identity.
+    ///
+    /// Vanilla Minecraft clients refuse unsigned answers (NetherNet HTTP signaling guide,
+    /// section 5.2), so enable this only for a server that serves non-vanilla clients.
+    /// It does nothing when [`identity`](Self::identity) is set: answers are signed then.
+    pub allow_unsigned_answers: bool,
 
     /// Who is trusted to have signed the token of an offer, or [`None`] to accept offers
     /// without validating the identity they carry.
@@ -79,6 +90,7 @@ impl Default for ConnectionConfig {
             cancel_token: CancellationToken::new(),
             attempts: 3,
             identity: None,
+            allow_unsigned_answers: false,
             token_trust: None,
             infer_peer_candidates: true,
         }
@@ -91,6 +103,7 @@ impl fmt::Debug for ConnectionConfig {
             .field("timeouts", &self.timeouts)
             .field("attempts", &self.attempts)
             .field("identity", &self.identity.is_some())
+            .field("allow_unsigned_answers", &self.allow_unsigned_answers)
             .field("token_trust", &self.token_trust.is_some())
             .field("infer_peer_candidates", &self.infer_peer_candidates)
             .finish()

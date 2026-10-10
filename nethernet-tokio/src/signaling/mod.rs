@@ -121,6 +121,18 @@ impl ServerSignaling {
         }
     }
 
+    /// Whether every answer must carry an identity assertion.
+    ///
+    /// The HTTP signaling guide requires `a=identity` in every answer (section 5.2) and a
+    /// client refuses the connection without it. LAN discovery is not covered by the
+    /// guide, so an identity stays optional there.
+    pub fn requires_identity(&self) -> bool {
+        match self {
+            Self::Lan(_) => false,
+            Self::Http(_) => true,
+        }
+    }
+
     /// Sets the server data advertised to clients from a RakNet pong response.
     pub fn set_pong_data(&self, data: &[u8]) {
         match self {
