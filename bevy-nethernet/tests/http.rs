@@ -137,6 +137,71 @@ mod raw {
     }
 
     #[test]
+    fn expect_continue_is_answered_before_the_body_arrives() {
+        let (mut server, addr) = bind(|_| {});
+        let mut stream = connect(addr);
+        stream
+            .write_all(
+                b"POST /v1/join HTTP/1.1\r\nhost: x\r\nexpect: 100-continue\r\ncontent-length: 5\r\n\r\n",
+            )
+            .unwrap();
+
+        let interim = collect(&mut server, &mut stream, Duration::from_millis(300));
+        assert!(
+            interim.text.starts_with("HTTP/1.1 100 Continue\r\n\r\n"),
+            "{}",
+            interim.text
+        );
+
+        stream.write_all(b"hello").unwrap();
+        let last = collect(&mut server, &mut stream, Duration::from_millis(500));
+
+        assert!(last.text.starts_with("HTTP/1.1 "), "{}", last.text);
+        assert!(!last.text.starts_with("HTTP/1.1 100"), "{}", last.text);
+    }
+
+    #[test]
+    fn chunked_post_does_not_poison_the_next_pipelined_request() {
+        let (mut server, addr) = bind(|_| {});
+        let mut stream = connect(addr);
+        let post = "POST /v1/join HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        let get = "GET /v1/join HTTP/1.1\r\nhost: x\r\n\r\n";
+        stream.write_all(format!("{post}{get}").as_bytes()).unwrap();
+
+        let reply = collect(&mut server, &mut stream, Duration::from_millis(500));
+
+        assert!(reply.text.contains("HTTP/1.1 200"), "{}", reply.text);
+    }
+
+    #[test]
+    fn oversize_body_is_answered_with_413() {
+        let (mut server, addr) = bind(|_| {});
+        let mut stream = connect(addr);
+        stream
+            .write_all(b"POST /v1/join HTTP/1.1\r\nhost: x\r\ncontent-length: 2000000\r\n\r\n")
+            .unwrap();
+
+        let reply = collect(&mut server, &mut stream, Duration::from_millis(500));
+
+        assert!(reply.text.starts_with("HTTP/1.1 413"), "{}", reply.text);
+    }
+
+    #[test]
+    fn content_length_with_transfer_encoding_is_answered_with_400() {
+        let (mut server, addr) = bind(|_| {});
+        let mut stream = connect(addr);
+        stream
+            .write_all(
+                b"GET /v1/join HTTP/1.1\r\nhost: x\r\ncontent-length: 5\r\ntransfer-encoding: chunked\r\n\r\nhello",
+            )
+            .unwrap();
+
+        let reply = collect(&mut server, &mut stream, Duration::from_millis(500));
+
+        assert!(reply.text.starts_with("HTTP/1.1 400"), "{}", reply.text);
+    }
+
+    #[test]
     fn idle_connection_is_closed() {
         let (mut server, addr) = bind(|_| {});
         server.set_idle_timeout(Duration::from_millis(200));

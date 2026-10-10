@@ -4,29 +4,120 @@ use nethernet::signaling::http::join;
 const MAX_HEADERS: usize = 100;
 pub(crate) const MAX_BODY: usize = 1 << 20;
 
-fn content_length(headers: &[httparse::Header]) -> Result<usize, ()> {
-    let Some(header) = headers
-        .iter()
-        .find(|h| h.name.eq_ignore_ascii_case("content-length"))
-    else {
-        return Ok(0);
-    };
-    std::str::from_utf8(header.value)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .filter(|&n| n <= MAX_BODY)
-        .ok_or(())
+#[derive(Debug, PartialEq, Eq)]
+enum BodyFraming {
+    Length(usize),
+    Chunked,
 }
+
+impl BodyFraming {
+    fn of(headers: &[httparse::Header]) -> Result<Self, RequestError> {
+        let length = headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("content-length"));
+        let encoding = headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("transfer-encoding"));
+        match (length, encoding) {
+            (Some(_), Some(_)) => Err(RequestError::Malformed),
+            (None, Some(encoding))
+                if encoding.value.trim_ascii().eq_ignore_ascii_case(b"chunked") =>
+            {
+                Ok(Self::Chunked)
+            }
+            (None, Some(_)) => Err(RequestError::Malformed),
+            (Some(length), None) => {
+                let length: usize = std::str::from_utf8(length.value)
+                    .ok()
+                    .and_then(|v| v.trim().parse().ok())
+                    .ok_or(RequestError::Malformed)?;
+                if length > MAX_BODY {
+                    return Err(RequestError::TooLarge);
+                }
+                Ok(Self::Length(length))
+            }
+            (None, None) => Ok(Self::Length(0)),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ChunkedBody {
+    Complete { body: Vec<u8>, consumed: usize },
+    Incomplete,
+}
+
+impl ChunkedBody {
+    pub(crate) fn decode(buf: &[u8]) -> Result<Self, RequestError> {
+        let mut body = Vec::new();
+        let mut at = 0;
+        loop {
+            let (line_len, size) = match httparse::parse_chunk_size(&buf[at..]) {
+                Ok(httparse::Status::Complete(parsed)) => parsed,
+                Ok(httparse::Status::Partial) => return Ok(Self::Incomplete),
+                Err(_) => return Err(RequestError::Malformed),
+            };
+            at += line_len;
+            if size == 0 {
+                return Ok(match Self::trailer_len(&buf[at..]) {
+                    Some(trailer_len) => Self::Complete {
+                        body,
+                        consumed: at + trailer_len,
+                    },
+                    None => Self::Incomplete,
+                });
+            }
+            let size = usize::try_from(size).map_err(|_| RequestError::TooLarge)?;
+            if size > MAX_BODY - body.len() {
+                return Err(RequestError::TooLarge);
+            }
+            let Some(chunk_end) = at.checked_add(size + 2).filter(|&end| end <= buf.len()) else {
+                return Ok(Self::Incomplete);
+            };
+            if &buf[chunk_end - 2..chunk_end] != b"\r\n" {
+                return Err(RequestError::Malformed);
+            }
+            body.extend_from_slice(&buf[at..chunk_end - 2]);
+            at = chunk_end;
+        }
+    }
+
+    fn trailer_len(rest: &[u8]) -> Option<usize> {
+        if rest.starts_with(b"\r\n") {
+            return Some(2);
+        }
+        rest.windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|at| at + 4)
+    }
+}
+
+pub(crate) const CONTINUE_RESPONSE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RequestError {
     TooManyHeaders,
     Malformed,
+    TooLarge,
+}
+
+fn expects_continue(headers: &[httparse::Header]) -> bool {
+    headers.iter().any(|h| {
+        h.name.eq_ignore_ascii_case("expect")
+            && h.value.trim_ascii().eq_ignore_ascii_case(b"100-continue")
+    })
+}
+
+#[derive(Debug)]
+pub(crate) enum Parsed {
+    Complete(Box<Request<String>>, usize),
+    Partial { expects_continue: bool },
 }
 
 /// Parses a complete HTTP/1.x request out of the front of `buf`, once one is fully
-/// buffered. `Ok(None)` means more bytes are needed.
-pub(crate) fn parse_request(buf: &[u8]) -> Result<Option<(Request<String>, usize)>, RequestError> {
+/// buffered. `Partial` means more bytes are needed, and says whether the client is
+/// waiting for a `100 Continue` before it sends the body.
+pub(crate) fn parse_request(buf: &[u8]) -> Result<Parsed, RequestError> {
     let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
     let mut parsed = httparse::Request::new(&mut headers);
     let status = parsed.parse(buf).map_err(|e| match e {
@@ -34,14 +125,31 @@ pub(crate) fn parse_request(buf: &[u8]) -> Result<Option<(Request<String>, usize
         _ => RequestError::Malformed,
     })?;
     let httparse::Status::Complete(header_len) = status else {
-        return Ok(None);
+        return Ok(Parsed::Partial {
+            expects_continue: false,
+        });
     };
 
-    let body_len = content_length(parsed.headers).map_err(|_| RequestError::Malformed)?;
-    let total = header_len + body_len;
-    if buf.len() < total {
-        return Ok(None);
-    }
+    let framing = BodyFraming::of(parsed.headers)?;
+    let (body, total) = match framing {
+        BodyFraming::Length(length) => {
+            let total = header_len + length;
+            if buf.len() < total {
+                return Ok(Parsed::Partial {
+                    expects_continue: expects_continue(parsed.headers),
+                });
+            }
+            (buf[header_len..total].to_vec(), total)
+        }
+        BodyFraming::Chunked => match ChunkedBody::decode(&buf[header_len..])? {
+            ChunkedBody::Complete { body, consumed } => (body, header_len + consumed),
+            ChunkedBody::Incomplete => {
+                return Ok(Parsed::Partial {
+                    expects_continue: expects_continue(parsed.headers),
+                });
+            }
+        },
+    };
 
     let mut builder = Request::builder()
         .method(parsed.method.ok_or(RequestError::Malformed)?)
@@ -50,11 +158,10 @@ pub(crate) fn parse_request(buf: &[u8]) -> Result<Option<(Request<String>, usize
         builder = builder.header(header.name, header.value);
     }
 
-    let body =
-        String::from_utf8(buf[header_len..total].to_vec()).map_err(|_| RequestError::Malformed)?;
+    let body = String::from_utf8(body).map_err(|_| RequestError::Malformed)?;
     let request = builder.body(body).map_err(|_| RequestError::Malformed)?;
 
-    Ok(Some((request, total)))
+    Ok(Parsed::Complete(Box::new(request), total))
 }
 
 /// Parses a complete HTTP/1.x response out of the front of `buf`, once one is fully
@@ -66,7 +173,9 @@ pub(crate) fn parse_response(buf: &[u8]) -> Result<Option<(u16, String)>, ()> {
         return Ok(None);
     };
 
-    let body_len = content_length(parsed.headers)?;
+    let BodyFraming::Length(body_len) = BodyFraming::of(parsed.headers).map_err(|_| ())? else {
+        return Err(());
+    };
     let total = header_len + body_len;
     if buf.len() < total {
         return Ok(None);
@@ -123,4 +232,21 @@ pub(crate) fn encode_post(host: &str, path: &str, content_type: &str, body: &str
     out.extend_from_slice(b"\r\n");
     out.extend_from_slice(body.as_bytes());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_chunked_body_is_decoded() {
+        let wire = b"POST /v1/join HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+
+        let Ok(Parsed::Complete(request, consumed)) = parse_request(wire) else {
+            panic!("the request was not parsed as complete");
+        };
+
+        assert_eq!(request.body(), "hello world");
+        assert_eq!(consumed, wire.len());
+    }
 }

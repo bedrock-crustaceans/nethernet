@@ -67,6 +67,7 @@ struct TcpConn {
     write_buf: Vec<u8>,
     written: usize,
     close_after_write: bool,
+    continued: bool,
     last_active: Instant,
 }
 
@@ -262,6 +263,7 @@ impl NetherHttpServer {
                     write_buf: Vec::new(),
                     written: 0,
                     close_after_write: false,
+                    continued: false,
                     last_active: now,
                 },
             );
@@ -326,21 +328,31 @@ impl NetherHttpServer {
 
             loop {
                 match http_wire::parse_request(&conn.read_buf) {
-                    Ok(Some((request, consumed))) => {
+                    Ok(http_wire::Parsed::Complete(request, consumed)) => {
                         conn.read_buf.drain(..consumed);
+                        conn.continued = false;
                         tracing::debug!(
                             "http request {} {} with {} headers",
                             request.method(),
                             request.uri(),
                             request.headers().len()
                         );
-                        requests.push((id, request));
+                        requests.push((id, *request));
                     }
-                    Ok(None) if conn.read_buf.len() > http_wire::MAX_BODY => {
-                        closed.push(id);
+                    Ok(http_wire::Parsed::Partial { .. })
+                        if conn.read_buf.len() > http_wire::MAX_BODY =>
+                    {
+                        conn.refuse(StatusCode::PAYLOAD_TOO_LARGE);
                         break;
                     }
-                    Ok(None) => break,
+                    Ok(http_wire::Parsed::Partial { expects_continue }) => {
+                        if expects_continue && !conn.continued {
+                            conn.continued = true;
+                            conn.write_buf
+                                .extend_from_slice(http_wire::CONTINUE_RESPONSE);
+                        }
+                        break;
+                    }
                     Err(error) => {
                         tracing::debug!("refusing an unreadable http request: {error:?}");
                         conn.refuse(match error {
@@ -348,6 +360,7 @@ impl NetherHttpServer {
                                 StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
                             }
                             http_wire::RequestError::Malformed => StatusCode::BAD_REQUEST,
+                            http_wire::RequestError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
                         });
                         break;
                     }
