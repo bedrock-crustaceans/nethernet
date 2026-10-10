@@ -5,6 +5,7 @@
 //! description, candidates are embedded in it instead of being signaled separately.
 
 use crate::error::{NetherError, Result};
+use crate::protocol::packet::discovery::ServerData;
 use crate::protocol::{Signal, SignalType};
 use futures::Stream;
 use nethernet::signaling::http::join;
@@ -75,6 +76,38 @@ impl HttpSignaling {
 
         url.join(&join::join_path(&self.network_id))
             .map_err(|e| NetherError::Other(format!("build join URL: {}", e)))
+    }
+
+    /// Returns the URL the capability check of the remote network is read from.
+    fn status_url(&self, network_id: &str) -> Result<Url> {
+        let mut url = self.join_url(network_id)?;
+        url.set_path(join::join_path("").trim_end_matches('/'));
+        Ok(url)
+    }
+
+    /// Reads the data the remote network advertises on its status endpoint.
+    pub async fn server_data(&self, network_id: &str) -> Result<ServerData> {
+        let response = self
+            .client
+            .get(self.status_url(network_id)?)
+            .header(USER_AGENT, join::CLIENT_USER_AGENT)
+            .send()
+            .await
+            .map_err(|e| NetherError::Other(format!("request server data: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(NetherError::Other(format!(
+                "server data request answered {}",
+                status
+            )));
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| NetherError::Other(format!("read server data: {}", e)))?;
+        Ok(ServerData::from_json(&body)?)
     }
 
     /// Sends the offer to the endpoint of the remote network and returns its answer.
@@ -166,6 +199,16 @@ mod tests {
         assert_eq!(
             signaling.join_url("https://example.com:19132").unwrap(),
             Url::parse("https://example.com:19132/v1/join/1234").unwrap()
+        );
+    }
+
+    #[test]
+    fn status_url_has_no_network_id() {
+        let signaling = HttpSignaling::new("1234".to_string()).unwrap();
+
+        assert_eq!(
+            signaling.status_url("http://example.com:19132").unwrap(),
+            Url::parse("http://example.com:19132/v1/join").unwrap()
         );
     }
 

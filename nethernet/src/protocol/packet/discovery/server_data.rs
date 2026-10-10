@@ -48,7 +48,7 @@ impl ServerDataVersion {
 }
 
 /// ServerData defines the binary structure representing worlds in Minecraft: Bedrock Edition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerData {
     /// Name of the server (typically the player name of the owner)
     pub server_name: String,
@@ -102,6 +102,33 @@ impl ServerData {
             self.max_player_count,
             self.game_type
         )
+    }
+
+    /// Reads the JSON the `GET /v1/join` capability-check endpoint answers with, the
+    /// counterpart of [`ServerData::to_json`]. Fields the JSON does not carry keep the
+    /// defaults of [`ServerData::new`].
+    pub fn from_json(json: &str) -> Result<Self> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Status {
+            name: String,
+            protocol: u32,
+            version: String,
+            level: String,
+            players: i32,
+            max_players: i32,
+            game_type: u8,
+        }
+
+        let status: Status = serde_json::from_str(json)
+            .map_err(|e| ProtocolError::Other(format!("invalid server data JSON: {}", e)))?;
+        let mut data = Self::new(status.name, status.level);
+        data.protocol_version = status.protocol;
+        data.game_version = status.version;
+        data.player_count = status.players;
+        data.max_player_count = status.max_players;
+        data.game_type = status.game_type;
+        Ok(data)
     }
 
     /// Constructs a ServerData for the given server and level names using sensible defaults.
@@ -388,6 +415,25 @@ fn game_type(mode: &str) -> u8 {
 mod tests {
     use super::*;
     use crate::protocol::codec::write_bytes_u8;
+
+    #[test]
+    fn json_status_reads_back_into_the_same_server_data() {
+        let mut original = ServerData::new("Name \"Quoted\"".to_string(), "World".to_string());
+        original.protocol_version = 2177;
+        original.game_version = "1.26.50".to_string();
+        original.player_count = 3;
+        original.max_player_count = 10;
+        original.game_type = 1;
+
+        let read = ServerData::from_json(&original.to_json()).unwrap();
+
+        assert_eq!(read, original);
+    }
+
+    #[test]
+    fn json_status_missing_a_field_is_rejected() {
+        assert!(ServerData::from_json("{\"name\":\"x\"}").is_err());
+    }
 
     #[test]
     fn test_server_data_roundtrip() {
