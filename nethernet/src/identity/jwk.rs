@@ -2,9 +2,10 @@
 use crate::identity::error::{IdentityError, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rsa::pkcs1v15::Pkcs1v15Sign;
-use rsa::sha2::{Digest, Sha256};
-use rsa::{BigUint, RsaPublicKey};
+use rsa::pkcs1v15::{Signature, VerifyingKey};
+use rsa::sha2::Sha256;
+use rsa::signature::Verifier;
+use rsa::{BoxedUint, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -58,17 +59,16 @@ impl Jwk {
             return Err(IdentityError::Untrusted("incomplete RSA key".to_string()));
         };
 
-        let modulus = BigUint::from_bytes_be(&decode(n)?);
-        let exponent = BigUint::from_bytes_be(&decode(e)?);
+        let modulus = BoxedUint::from_be_slice_vartime(&decode(n)?);
+        let exponent = BoxedUint::from_be_slice_vartime(&decode(e)?);
         let key = RsaPublicKey::new(modulus, exponent)
             .map_err(|e| IdentityError::Untrusted(format!("invalid RSA key: {}", e)))?;
+        let signature = Signature::try_from(signature)
+            .map_err(|_| IdentityError::Untrusted("signature mismatch".to_string()))?;
 
-        key.verify(
-            Pkcs1v15Sign::new::<Sha256>(),
-            &Sha256::digest(signing_input),
-            signature,
-        )
-        .map_err(|_| IdentityError::Untrusted("signature mismatch".to_string()))
+        VerifyingKey::<Sha256>::new(key)
+            .verify(signing_input, &signature)
+            .map_err(|_| IdentityError::Untrusted("signature mismatch".to_string()))
     }
 }
 
