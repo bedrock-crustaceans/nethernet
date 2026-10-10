@@ -2,16 +2,17 @@ use crate::connection::{ConnectionEvent, SessionPool};
 use crate::socket::{bind_discovery_socket, bind_shared_socket, send_discovery};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
-use nethernet::connection::{Connection, IceMode};
+use nethernet::connection::IceMode;
 use nethernet::prelude::{
-    LanSignaler, LanSignalerConfig, LanSignalerInput, LanSignalerOutput, Sans, ServerData,
+    Answered, LanSignaler, LanSignalerConfig, LanSignalerInput, LanSignalerOutput, OfferPolicy,
+    Sans, ServerData, ServerIdentity, TokenTrust,
 };
 use nethernet::protocol::{Signal, SignalType};
-use nethernet::session::{Channel, Session};
+use nethernet::session::Channel;
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 const MAX_DATAGRAMS_PER_TICK: usize = 1024;
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -70,6 +71,9 @@ pub struct NetherServer {
     socket: UdpSocket,
     pool: SessionPool<NetherSessionId>,
     session_local_addr: SocketAddr,
+    identity: Option<ServerIdentity>,
+    token_trust: Option<TokenTrust>,
+    infer_peer_candidates: bool,
     sessions: HashMap<NetherSessionId, SessionEntry>,
     received: VecDeque<(NetherSessionId, Box<[u8]>)>,
     received_unreliable: VecDeque<(NetherSessionId, Box<[u8]>)>,
@@ -94,12 +98,31 @@ impl NetherServer {
             socket,
             pool: SessionPool::new(session_socket),
             session_local_addr,
+            identity: None,
+            token_trust: None,
+            infer_peer_candidates: true,
             sessions: HashMap::new(),
             received: VecDeque::new(),
             received_unreliable: VecDeque::new(),
             events: VecDeque::new(),
             buf: vec![0u8; 2048].into_boxed_slice(),
         })
+    }
+
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
+    pub fn set_identity(&mut self, identity: ServerIdentity) {
+        self.identity = Some(identity);
+    }
+
+    pub fn set_token_trust(&mut self, token_trust: Option<TokenTrust>) {
+        self.token_trust = token_trust;
+    }
+
+    pub fn set_infer_peer_candidates(&mut self, infer: bool) {
+        self.infer_peer_candidates = infer;
     }
 
     pub fn set_server_data(&mut self, data: ServerData) {
@@ -253,23 +276,36 @@ impl NetherServer {
             return;
         }
 
-        let Ok((remote_description, remote_candidates)) = Connection::parse_offer(&offer) else {
-            return;
-        };
-        let Ok((session, description)) = Session::new(self.session_local_addr, false, now) else {
-            return;
-        };
-        let local_ufrag = description.ice.ufrag.clone();
-        let Ok((connection, signals)) = Connection::accept(
-            session,
-            description,
-            &offer,
-            remote_description,
-            remote_candidates,
-            IceMode::Trickle,
-            now,
-        ) else {
-            return;
+        let signaled_from = offer
+            .network_id
+            .parse()
+            .ok()
+            .and_then(|network_id| self.signaler.address(network_id));
+        let mut policy = OfferPolicy::new(IceMode::Trickle)
+            .with_inferred_peer_candidates(self.infer_peer_candidates);
+        if let Some(identity) = &self.identity {
+            policy = policy.with_identity(identity);
+        }
+        if let Some(trust) = &self.token_trust {
+            policy = policy.with_token_trust(trust);
+        }
+
+        let answered = policy
+            .admit(&offer, signaled_from, SystemTime::now())
+            .and_then(|admitted| admitted.answer(self.session_local_addr, now));
+        let Answered {
+            connection,
+            signals,
+            local_ufrag,
+            ..
+        } = match answered {
+            Ok(answered) => answered,
+            Err(e) => {
+                tracing::debug!("Refusing offer from {}: {}", offer.network_id, e);
+                let signal = Signal::error(offer.connection_id, e.code(), offer.network_id);
+                let _ = self.signaler.handle(LanSignalerInput::Signal(signal, now));
+                return;
+            }
         };
 
         for signal in signals {

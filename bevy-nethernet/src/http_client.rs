@@ -6,6 +6,7 @@ use bevy_ecs::prelude::*;
 use bevy_platform::cell::SyncCell;
 use nethernet::connection::{Connection, ConnectionInput, IceMode};
 use nethernet::error::ProtocolError;
+use nethernet::prelude::ServerIdentity;
 use nethernet::protocol::Signal;
 use nethernet::sans::Sans;
 use nethernet::session::{Channel, Session};
@@ -147,6 +148,7 @@ pub struct NetherHttpClient {
     connected: bool,
     connecting_since: Option<Instant>,
     ready: bool,
+    identity: Option<ServerIdentity>,
     events: VecDeque<NetherHttpClientEvent>,
     received: VecDeque<Box<[u8]>>,
     received_unreliable: VecDeque<Box<[u8]>>,
@@ -155,6 +157,10 @@ pub struct NetherHttpClient {
 impl NetherHttpClient {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_identity(&mut self, identity: ServerIdentity) {
+        self.identity = Some(identity);
     }
 
     pub fn is_connected(&self) -> bool {
@@ -195,11 +201,18 @@ impl NetherHttpClient {
             .next()
             .expect("Connection::connect always returns an offer first");
 
+        let offer_data = match &self.identity {
+            Some(identity) => identity
+                .augment(&offer.data)
+                .map_err(std::io::Error::other)?,
+            None => offer.data,
+        };
+
         let request = http_wire::encode_post(
             host,
             &join::join_path(&local_network_id),
             join::CONTENT_TYPE,
-            &offer.data,
+            &offer_data,
         );
 
         let socket = connect(addr)?;

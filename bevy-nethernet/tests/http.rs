@@ -49,6 +49,74 @@ fn client_connects_to_server_over_http_and_exchanges_data() {
     }));
 }
 
+#[test]
+fn client_connects_with_candidate_inference_disabled() {
+    let mut server = NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |config| {
+        config.token_trust = None;
+    })
+    .unwrap();
+    server.set_infer_peer_candidates(false);
+    let server_url = format!("http://{}", server.local_addr().unwrap());
+
+    let mut client = NetherHttpClient::new();
+    client.connect("5678".to_string(), server_url).unwrap();
+
+    assert!(spin(Instant::now() + Duration::from_secs(10), || {
+        server.update();
+        client.update();
+        client.is_connected() && server.sessions().next().is_some()
+    }));
+}
+
+fn join_outcome(identity: Option<ServerIdentity>) -> (bool, Vec<NetherHttpClientEvent>) {
+    let mut server =
+        NetherHttpServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), |_| {}).unwrap();
+    server.set_server_data(ServerData::new("Test Server".into(), "World".into()));
+    let server_url = format!("http://{}", server.local_addr().unwrap());
+
+    let mut client = NetherHttpClient::new();
+    if let Some(identity) = identity {
+        client.set_identity(identity);
+    }
+    client.connect("5678".to_string(), server_url).unwrap();
+
+    let mut events = Vec::new();
+    let joined = spin(Instant::now() + Duration::from_secs(5), || {
+        server.update();
+        client.update();
+        while let Some(event) = client.next_event() {
+            events.push(event);
+        }
+        let failed = events
+            .iter()
+            .any(|e| matches!(e, NetherHttpClientEvent::ConnectFailed));
+        failed || (client.is_connected() && server.sessions().next().is_some())
+    });
+    (joined && client.is_connected(), events)
+}
+
+#[test]
+fn a_signed_client_joins_a_validating_server() {
+    let identity = ServerIdentity::generate("client", std::time::SystemTime::now()).unwrap();
+
+    let (connected, events) = join_outcome(Some(identity));
+
+    assert!(connected, "signed client did not connect: {events:?}");
+}
+
+#[test]
+fn an_unsigned_client_is_refused_by_a_validating_server() {
+    let (connected, events) = join_outcome(None);
+
+    assert!(!connected);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, NetherHttpClientEvent::ConnectFailed)),
+        "{events:?}"
+    );
+}
+
 mod raw {
     use super::*;
     use std::io::{ErrorKind, Read, Write};

@@ -4,6 +4,7 @@
 //! so it performs no IO of its own and can be embedded in any runtime. The
 //! `nethernet-tokio` crate drives these state machines on top of Tokio.
 
+pub mod admission;
 pub mod connection;
 pub mod error;
 pub mod identity;
@@ -14,6 +15,7 @@ pub mod signaling;
 pub mod util;
 
 pub mod prelude {
+    pub use crate::admission::{AdmissionError, Admitted, Answered, OfferPolicy};
     pub use crate::error::{ProtocolError, SignalErrorCode};
     pub use crate::identity::{
         Identity, PlayerInfo, ServerIdentity, TokenTrust,

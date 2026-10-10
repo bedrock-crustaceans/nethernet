@@ -86,7 +86,8 @@ Answers are signed with the identity in `ConnectionConfig::identity`, which
 `nethernet_tokio::util::identity::from_pem_or_create` loads from a PEM and creates on first
 use. Clients pin that key, so it should be kept between restarts, and **every answer must
 carry one** - a client refuses the connection otherwise, whether signaling ran over HTTPS
-or plaintext HTTP. Offers are validated against `HttpSignalerConfig::token_trust`, which
+or plaintext HTTP. Offers over HTTP are validated against `HttpSignalerConfig::token_trust`
+alone, and `ConnectionConfig::token_trust` applies only to offers over LAN discovery. It
 defaults to accepting any self-signed token while still binding it to the certificate the
 peer presents. `nethernet_tokio::util::jwks::Jwks::minecraft` fetches the keys needed to
 require a token issued by the Minecraft authorization service instead.

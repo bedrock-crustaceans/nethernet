@@ -33,6 +33,9 @@ pub struct HttpSignalerConfig {
     /// Who is trusted to have signed the token of an offer, or [`None`] to accept offers
     /// that carry no identity at all.
     ///
+    /// This is the only place offers over HTTP are validated: a refused offer is answered
+    /// with 401, and the transport does not validate it again.
+    ///
     /// [`TokenTrust::Minecraft`] is what a retail client presents, and it needs the keys
     /// of the authorization service, which the caller fetches and refreshes.
     pub token_trust: Option<TokenTrust>,

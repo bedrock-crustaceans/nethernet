@@ -1,3 +1,4 @@
+use nethernet::admission::AdmissionError;
 use nethernet::error::ProtocolError;
 use nethernet::identity::error::IdentityError;
 use std::io;
@@ -27,6 +28,10 @@ pub enum NetherError {
     /// The identity of a description did not hold up
     #[error("Identity error: {0}")]
     Identity(#[from] IdentityError),
+
+    /// An offer was not admitted or could not be answered
+    #[error("Admission error: {0}")]
+    Admission(#[from] AdmissionError),
 
     /// Signaling error
     #[error("Signaling error: {0}")]

@@ -5,18 +5,17 @@ use crate::socket::bind_shared_socket;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use http::{Response, StatusCode};
-use nethernet::connection::{Connection, IceMode};
+use nethernet::admission::{Answered, OfferPolicy};
+use nethernet::connection::IceMode;
 use nethernet::prelude::{
     HttpSignaler, HttpSignalerConfig, HttpSignalerInput, HttpSignalerOutput, Offer, RejectReason,
     Sans, ServerData, ServerIdentity,
 };
-use nethernet::protocol::Signal;
-use nethernet::protocol::webrtc::Description;
-use nethernet::session::{Channel, Session};
+use nethernet::session::Channel;
 use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const MAX_ACCEPTS_PER_TICK: usize = 64;
 const READ_CHUNK: usize = 4096;
@@ -96,6 +95,7 @@ pub struct NetherHttpServer {
     pool: SessionPool<NetherSessionId>,
     session_local_addr: SocketAddr,
     identity: Option<ServerIdentity>,
+    infer_peer_candidates: bool,
     idle_timeout: Duration,
     next_conn_id: u64,
     connections: HashMap<u64, TcpConn>,
@@ -124,6 +124,7 @@ impl NetherHttpServer {
             pool: SessionPool::new(session_socket),
             session_local_addr,
             identity: None,
+            infer_peer_candidates: true,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             next_conn_id: 0,
             connections: HashMap::new(),
@@ -144,6 +145,10 @@ impl NetherHttpServer {
 
     pub fn set_identity(&mut self, identity: ServerIdentity) {
         self.identity = Some(identity);
+    }
+
+    pub fn set_infer_peer_candidates(&mut self, infer: bool) {
+        self.infer_peer_candidates = infer;
     }
 
     pub fn set_server_data(&mut self, data: ServerData) {
@@ -407,20 +412,32 @@ impl NetherHttpServer {
     }
 
     fn handle_offer(&mut self, offer: Offer, now: Instant) {
-        let accepted = accept_offer(&offer, self.session_local_addr, now).and_then(
-            |(sdp, connection, ufrag)| match &self.identity {
-                Some(identity) => identity
-                    .augment(&sdp)
-                    .map(|sdp| (sdp, connection, ufrag))
-                    .map_err(|_| RejectReason::Unavailable),
-                None => Ok((sdp, connection, ufrag)),
-            },
-        );
-        match accepted {
-            Ok((answer_sdp, connection, local_ufrag)) => {
+        let mut policy = OfferPolicy::new(IceMode::Full)
+            .with_inferred_peer_candidates(self.infer_peer_candidates);
+        if let Some(identity) = &self.identity {
+            policy = policy.with_identity(identity);
+        }
+
+        let answered = policy
+            .admit(&offer.signal(), offer.client_address, SystemTime::now())
+            .and_then(|admitted| admitted.answer(self.session_local_addr, now));
+        match answered {
+            Ok(Answered {
+                connection,
+                signals,
+                local_ufrag,
+                ..
+            }) => {
+                let Some(answer) = signals.into_iter().next() else {
+                    let _ = self.signaler.handle(HttpSignalerInput::Reject {
+                        connection_id: offer.connection_id,
+                        reason: RejectReason::Unavailable,
+                    });
+                    return;
+                };
                 let _ = self.signaler.handle(HttpSignalerInput::Answer {
                     connection_id: offer.connection_id,
-                    sdp: answer_sdp,
+                    sdp: answer.data,
                 });
                 let id = NetherSessionId {
                     network_id: offer.network_id,
@@ -435,10 +452,11 @@ impl NetherHttpServer {
                     },
                 );
             }
-            Err(reason) => {
+            Err(e) => {
+                tracing::debug!("Refusing offer from {}: {}", offer.network_id, e);
                 let _ = self.signaler.handle(HttpSignalerInput::Reject {
                     connection_id: offer.connection_id,
-                    reason,
+                    reason: RejectReason::from(e.code()),
                 });
             }
         }
@@ -474,39 +492,4 @@ impl NetherHttpServer {
             self.disconnect(&id);
         }
     }
-}
-
-fn accept_offer(
-    offer: &Offer,
-    session_local_addr: SocketAddr,
-    now: Instant,
-) -> Result<(String, Connection, String), RejectReason> {
-    let (remote_description, remote_candidates) =
-        Description::parse(&offer.sdp).map_err(|_| RejectReason::Unavailable)?;
-    let (session, description) =
-        Session::new(session_local_addr, false, now).map_err(|_| RejectReason::Unavailable)?;
-    let local_ufrag = description.ice.ufrag.clone();
-
-    let offer_signal = Signal::offer(
-        offer.connection_id,
-        offer.sdp.clone(),
-        offer.network_id.clone(),
-    );
-    let (connection, signals) = Connection::accept(
-        session,
-        description,
-        &offer_signal,
-        remote_description,
-        remote_candidates,
-        IceMode::Full,
-        now,
-    )
-    .map_err(|_| RejectReason::Unavailable)?;
-
-    let answer = signals
-        .into_iter()
-        .next()
-        .ok_or(RejectReason::Unavailable)?;
-
-    Ok((answer.data, connection, local_ufrag))
 }

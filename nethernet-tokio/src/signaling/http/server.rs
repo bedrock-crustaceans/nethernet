@@ -317,6 +317,7 @@ impl HttpSignalingServer {
                             waiting.remove(&connection);
                         }
                         HttpSignalerOutput::Offer(offer) => {
+                            let offered = offer.signal();
                             if let Some(address) = offer.client_address {
                                 addresses.insert(offer.connection_id, address);
                             }
@@ -324,11 +325,7 @@ impl HttpSignalingServer {
                                 players.insert(offer.connection_id, Arc::from(*player));
                             }
 
-                            let _ = signal_tx.send(Signal::offer(
-                                offer.connection_id,
-                                offer.sdp,
-                                offer.network_id,
-                            ));
+                            let _ = signal_tx.send(offered);
                         }
                         HttpSignalerOutput::Wait(wait) => {
                             wake = Instant::now() + wait.min(MAX_IDLE);

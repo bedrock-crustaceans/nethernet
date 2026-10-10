@@ -1,15 +1,21 @@
 //! End-to-end negotiation over LAN discovery.
 
+use nethernet::prelude::TokenTrust;
 use nethernet_tokio::signaling::lan::{LanConfig, LanSignaling};
-use nethernet_tokio::{AcceptedSession, NetherClient, NetherServer, ServerData};
+use nethernet_tokio::{AcceptedSession, ConnectionConfig, NetherClient, NetherServer, ServerData};
 use std::net::SocketAddr;
 use std::time::Duration;
 
 const PORT: u16 = 7571;
+const TRUST_PORT: u16 = 7572;
 
 fn config() -> LanConfig {
+    config_on(PORT)
+}
+
+fn config_on(port: u16) -> LanConfig {
     LanConfig {
-        discovery_port: PORT,
+        discovery_port: port,
         broadcast_interval: Duration::from_millis(200),
         ..Default::default()
     }
@@ -75,4 +81,47 @@ async fn lan_roundtrip() {
 
     assert_eq!(stream.remote_addr().await.network_id, "1234");
     stream.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connection_trust_rejects_unsigned_lan_offers() {
+    let server_signaling = LanSignaling::with_config(
+        4321,
+        format!("0.0.0.0:{TRUST_PORT}")
+            .parse::<SocketAddr>()
+            .unwrap(),
+        config_on(TRUST_PORT),
+    )
+    .await
+    .unwrap();
+    server_signaling.set_server_data(ServerData::new("test".into(), "world".into()));
+
+    let connection_config = ConnectionConfig {
+        token_trust: Some(TokenTrust::Any),
+        ..Default::default()
+    };
+    let mut listener = NetherServer::bind_with(server_signaling, connection_config)
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = listener.accept().await;
+    });
+
+    let client_signaling =
+        LanSignaling::with_config(8765, "0.0.0.0:0".parse().unwrap(), config_on(TRUST_PORT))
+            .await
+            .unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let connected = tokio::time::timeout(
+        Duration::from_secs(20),
+        NetherClient::connect(client_signaling, "4321".to_string()),
+    )
+    .await
+    .expect("negotiation timed out");
+
+    assert!(
+        connected.is_err(),
+        "an unsigned LAN offer should be refused"
+    );
 }

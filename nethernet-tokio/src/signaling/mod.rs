@@ -99,6 +99,18 @@ impl ServerSignaling {
         }
     }
 
+    /// Whether the signaling validates the identity of an offer before it reaches the
+    /// transport, so the transport must not validate it again.
+    ///
+    /// HTTP signaling does, against `HttpSignalerConfig::token_trust`; LAN discovery does
+    /// not.
+    pub fn validates_offers(&self) -> bool {
+        match self {
+            Self::Lan(_) => false,
+            Self::Http(_) => true,
+        }
+    }
+
     /// Sets the server data advertised to clients from a RakNet pong response.
     pub fn set_pong_data(&self, data: &[u8]) {
         match self {

@@ -1,6 +1,7 @@
 //! Outputs of the HTTP endpoint state machine.
 
 use crate::identity::PlayerInfo;
+use crate::protocol::Signal;
 use http::Response;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -26,6 +27,17 @@ pub struct Offer {
 
     /// The validated identity of the peer, or [`None`] when identities are not validated.
     pub player: Option<Box<PlayerInfo>>,
+}
+
+impl Offer {
+    /// The offer as the signal the connection is answered from.
+    pub fn signal(&self) -> Signal {
+        Signal::offer(
+            self.connection_id,
+            self.sdp.clone(),
+            self.network_id.clone(),
+        )
+    }
 }
 
 #[derive(Debug, Clone)]

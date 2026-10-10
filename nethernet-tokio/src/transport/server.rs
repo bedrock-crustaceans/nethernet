@@ -5,11 +5,8 @@ use crate::session::{AcceptedSession, Command, Session};
 use crate::signaling::ServerSignaling;
 use crate::transport::{ConnectionConfig, local_bind_addr};
 use futures::{Stream, StreamExt};
-use nethernet::connection::{Connection as SansConnection, ConnectionInput, IceMode};
-use nethernet::identity::{PlayerInfo, validate_sdp};
-use nethernet::sans::Sans;
-use nethernet::session::Session as SansSession;
-use nethernet::util::candidate;
+use nethernet::admission::OfferPolicy;
+use nethernet::connection::IceMode;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -172,14 +169,6 @@ impl NetherServer {
         dispatchers: &mut SignalDispatchers,
         config: ConnectionConfig,
     ) -> std::result::Result<(), (Option<SignalErrorCode>, NetherError)> {
-        let (remote_description, remote_candidates) = SansConnection::parse_offer(&signal)
-            .map_err(|e| {
-                (
-                    Some(SignalErrorCode::FailedToSetRemoteDescription),
-                    e.into(),
-                )
-            })?;
-
         let remote_address = signaling
             .remote_address(&Addr::new(signal.network_id.clone(), signal.connection_id))
             .await;
@@ -188,25 +177,29 @@ impl NetherServer {
         let network_id = signal.network_id.clone();
         let key = (network_id.clone(), connection_id);
 
-        let (signal_tx, signal_rx) = mpsc::unbounded_channel();
-        dispatchers.insert(key.clone(), signal_tx);
-        // A peer that cannot prove who it is has an offer anyone could have replayed
         let signaled_player = signaling
             .player(&Addr::new(network_id.clone(), connection_id))
             .await;
-        let player = match &config.token_trust {
-            Some(trust) => match validate_sdp(&signal.data, trust, SystemTime::now()) {
-                Ok(claims) => Some(Arc::new(PlayerInfo::new(
-                    claims,
-                    network_id.clone(),
-                    remote_address,
-                ))),
-                Err(e) => {
-                    return Err((Some(SignalErrorCode::NotLoggedIn), NetherError::Identity(e)));
-                }
-            },
-            None => signaled_player,
+
+        let ice_mode = if signaling.disable_trickle_ice() {
+            IceMode::Full
+        } else {
+            IceMode::Trickle
         };
+        let mut policy =
+            OfferPolicy::new(ice_mode).with_inferred_peer_candidates(config.infer_peer_candidates);
+        if let Some(identity) = &config.identity {
+            policy = policy.with_identity(identity);
+        }
+        if !signaling.validates_offers()
+            && let Some(trust) = &config.token_trust
+        {
+            policy = policy.with_token_trust(trust);
+        }
+
+        let admitted = policy
+            .admit(&signal, remote_address, SystemTime::now())
+            .map_err(|e| (Some(e.code()), NetherError::from(e)))?;
 
         let socket = Arc::new(UdpSocket::bind(local_bind_addr()).await.map_err(|e| {
             (
@@ -221,69 +214,17 @@ impl NetherServer {
             )
         })?;
 
-        let (session, description) =
-            SansSession::new(bound_addr, false, Instant::now()).map_err(|e| {
-                (
-                    Some(SignalErrorCode::FailedToCreatePeerConnection),
-                    NetherError::from(e),
-                )
-            })?;
+        let answered = admitted
+            .answer(bound_addr, Instant::now())
+            .map_err(|e| (Some(e.code()), NetherError::from(e)))?;
+        let player = answered.player.map(Arc::new).or(signaled_player);
+        let connection = answered.connection;
 
-        // Non-trickle connections carry every local candidate in the answer itself
-        let ice_mode = if signaling.disable_trickle_ice() {
-            IceMode::Full
-        } else {
-            IceMode::Trickle
-        };
-
-        let (mut connection, signals) = SansConnection::accept(
-            session,
-            description,
-            &signal,
-            remote_description,
-            remote_candidates,
-            ice_mode,
-            Instant::now(),
-        )
-        .map_err(|e| (Some(SignalErrorCode::FailedToCreateAnswer), e.into()))?;
-
-        let mut signals_out = signals.into_iter();
-        let answer = signals_out
-            .next()
-            .expect("Connection::accept always returns an answer signal first");
-
-        // Clients pin the key an answer is signed with, so one that is not signed prompts
-        // the player on every join
-        let answer_data = match &config.identity {
-            Some(identity) => identity.augment(&answer.data).map_err(|e| {
-                (
-                    Some(SignalErrorCode::FailedToCreateAnswer),
-                    NetherError::Identity(e),
-                )
-            })?,
-            None => answer.data,
-        };
-
-        signaling
-            .signal(Signal::answer(
-                connection_id,
-                answer_data,
-                network_id.clone(),
-            ))
-            .await
-            .map_err(|e| (None, e))?;
-        for trickled in signals_out {
-            signaling.signal(trickled).await.map_err(|e| (None, e))?;
+        for line in &answered.inferred {
+            tracing::debug!("Inferred candidate for the peer: {}", line);
         }
-
-        if config.infer_peer_candidates && !candidate::has_routable_host_candidate(&signal.data) {
-            for line in candidate::inferred_peer_candidates(&signal.data, remote_address) {
-                tracing::debug!("Inferred candidate for the peer: {}", line);
-                let signal = Signal::candidate(connection_id, line, network_id.clone());
-                if let Err(e) = connection.handle(ConnectionInput::Signal(signal, Instant::now())) {
-                    tracing::warn!("Failed to add inferred candidate: {}", e);
-                }
-            }
+        for outgoing in answered.signals {
+            signaling.signal(outgoing).await.map_err(|e| (None, e))?;
         }
 
         let local = Addr::new(signaling.network_id(), connection_id);
@@ -296,6 +237,8 @@ impl NetherServer {
             session.set_player(player).await;
         }
 
+        let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+        dispatchers.insert(key, signal_tx);
         spawn_late_signal_forwarder(signal_rx, session.signal_sender());
 
         let incoming_tx = incoming_tx.clone();

@@ -106,6 +106,47 @@ async fn an_offer_without_an_identity_is_turned_away() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn connection_trust_does_not_revalidate_http_offers() {
+    let config = HttpServerConfig {
+        signaler: HttpSignalerConfig {
+            answer_timeout: Duration::from_secs(5),
+            token_trust: None,
+            ..Default::default()
+        },
+        ..server_config()
+    };
+    let signaling = HttpSignalingServer::bind("127.0.0.1:0".parse().unwrap(), config)
+        .await
+        .unwrap();
+    let url = format!("http://{}", signaling.local_addr());
+    let connection_config = ConnectionConfig {
+        token_trust: Some(TokenTrust::Any),
+        ..Default::default()
+    };
+    let mut listener = NetherServer::bind_with(signaling, connection_config)
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _accepted = listener.accept().await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+
+    let signaling = HttpSignaling::new(NETWORK_ID.to_string()).unwrap();
+    let connected = tokio::time::timeout(
+        Duration::from_secs(20),
+        NetherClient::connect_with(signaling, url, ConnectionConfig::default()),
+    )
+    .await
+    .expect("negotiation timed out");
+
+    assert!(
+        connected.is_ok(),
+        "the signaler is the only place HTTP offers are validated: {:?}",
+        connected.err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_status_endpoint_advertises_the_server_data() {
     let (url, _listener) = serve(server_config()).await;
 

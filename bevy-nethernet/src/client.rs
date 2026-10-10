@@ -5,6 +5,7 @@ use bevy_ecs::prelude::*;
 use nethernet::connection::{Connection, IceMode};
 use nethernet::prelude::{
     LanSignaler, LanSignalerConfig, LanSignalerInput, LanSignalerOutput, Sans, ServerData,
+    ServerIdentity,
 };
 use nethernet::protocol::constants::LAN_DISCOVERY_PORT;
 use nethernet::protocol::{Signal, SignalType};
@@ -62,6 +63,7 @@ pub struct NetherClient {
     connected: bool,
     connecting_since: Option<Instant>,
     ready: bool,
+    identity: Option<ServerIdentity>,
     received: VecDeque<Box<[u8]>>,
     received_unreliable: VecDeque<Box<[u8]>>,
     events: VecDeque<NetherClientEvent>,
@@ -96,6 +98,7 @@ impl NetherClient {
             connected: false,
             connecting_since: None,
             ready: false,
+            identity: None,
             received: VecDeque::new(),
             received_unreliable: VecDeque::new(),
             events: VecDeque::new(),
@@ -105,6 +108,10 @@ impl NetherClient {
 
     pub fn discovered(&self) -> &HashMap<u64, ServerData> {
         self.signaler.discovered()
+    }
+
+    pub fn set_identity(&mut self, identity: ServerIdentity) {
+        self.identity = Some(identity);
     }
 
     pub fn is_connected(&self) -> bool {
@@ -126,7 +133,12 @@ impl NetherClient {
         );
 
         let now = Instant::now();
-        for signal in signals {
+        for mut signal in signals {
+            if let (Some(identity), SignalType::Offer) = (&self.identity, signal.signal_type) {
+                signal.data = identity
+                    .augment(&signal.data)
+                    .map_err(std::io::Error::other)?;
+            }
             let _ = self.signaler.handle(LanSignalerInput::Signal(signal, now));
         }
 

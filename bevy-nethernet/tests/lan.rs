@@ -63,3 +63,182 @@ fn client_connects_to_server_and_exchanges_data() {
         client.recv().is_some()
     }));
 }
+
+#[test]
+fn a_signed_client_connects_to_a_validating_server() {
+    const SIGNED_PORT: u16 = 7582;
+    let mut server = NetherServer::new(
+        1234,
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, SIGNED_PORT)),
+        |config| config.broadcast_interval = Duration::from_millis(50),
+    )
+    .unwrap();
+    server.set_server_data(ServerData::new("Test Server".into(), "World".into()));
+    server.set_token_trust(Some(nethernet::prelude::TokenTrust::Any));
+
+    let mut client = NetherClient::new(5678, |config| {
+        config.broadcast_address = Some(SocketAddr::from((Ipv4Addr::BROADCAST, SIGNED_PORT)));
+        config.broadcast_interval = Duration::from_millis(50);
+    })
+    .unwrap();
+    client.set_identity(ServerIdentity::generate("client", std::time::SystemTime::now()).unwrap());
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    assert!(spin(deadline, || {
+        server.update();
+        client.update();
+        client.discovered().contains_key(&1234)
+    }));
+
+    client.connect(1234).unwrap();
+
+    assert!(spin(deadline, || {
+        server.update();
+        client.update();
+        client.is_connected() && server.sessions().next().is_some()
+    }));
+}
+
+mod admission {
+    use super::*;
+    use nethernet::connection::{Connection, IceMode};
+    use nethernet::prelude::{
+        Identity, LanSignaler, LanSignalerInput, LanSignalerOutput, Sans, Signal, SignalErrorCode,
+        SignalType, TokenTrust,
+    };
+    use nethernet::session::Session;
+    use std::net::UdpSocket;
+
+    const SERVER_NETWORK: u64 = 1234;
+    const PEER_NETWORK: u64 = 5678;
+    const CONNECTION_ID: u64 = 42;
+
+    fn loopback_server() -> NetherServer {
+        let mut server = NetherServer::new(
+            SERVER_NETWORK,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            |_| {},
+        )
+        .unwrap();
+        server.set_server_data(ServerData::new("Test Server".into(), "World".into()));
+        server
+    }
+
+    struct OfferingPeer {
+        socket: UdpSocket,
+        signaler: LanSignaler,
+    }
+
+    impl OfferingPeer {
+        fn aimed_at(server: &mut NetherServer) -> Self {
+            let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            socket.set_nonblocking(true).unwrap();
+            let config = LanSignalerConfig {
+                broadcast_address: Some(server.local_addr().unwrap()),
+                ..Default::default()
+            };
+            let mut peer = Self {
+                socket,
+                signaler: LanSignaler::new(PEER_NETWORK, config),
+            };
+            let discovered = spin(Instant::now() + Duration::from_secs(5), || {
+                peer.pump(server);
+                peer.signaler.address(SERVER_NETWORK).is_some()
+            });
+            assert!(discovered, "the server never answered discovery");
+            peer
+        }
+
+        fn pump(&mut self, server: &mut NetherServer) -> Vec<Signal> {
+            let _ = self
+                .signaler
+                .handle(LanSignalerInput::Update(Instant::now()));
+            let mut signals = Vec::new();
+            while let Some(output) = self.signaler.poll() {
+                if let LanSignalerOutput::Datagram(buf, addr) = output {
+                    self.socket.send_to(&buf, addr).unwrap();
+                }
+            }
+            server.update();
+            let mut buf = [0u8; 2048];
+            while let Ok((len, from)) = self.socket.recv_from(&mut buf) {
+                let _ = self.signaler.handle(LanSignalerInput::Datagram(
+                    buf[..len].into(),
+                    from,
+                    Instant::now(),
+                ));
+            }
+            while let Some(output) = self.signaler.poll() {
+                if let LanSignalerOutput::Signal(signal) = output {
+                    signals.push(signal);
+                }
+            }
+            signals
+        }
+
+        fn offer(&mut self) {
+            let (session, description) =
+                Session::new(self.socket.local_addr().unwrap(), true, Instant::now()).unwrap();
+            let (_, signals) = Connection::connect(
+                session,
+                description,
+                CONNECTION_ID,
+                SERVER_NETWORK.to_string(),
+                IceMode::Trickle,
+            );
+            for signal in signals {
+                self.signaler
+                    .handle(LanSignalerInput::Signal(signal, Instant::now()))
+                    .unwrap();
+            }
+        }
+
+        fn await_signal(&mut self, server: &mut NetherServer, kind: SignalType) -> Option<Signal> {
+            let mut found = None;
+            spin(Instant::now() + Duration::from_secs(5), || {
+                found = self
+                    .pump(server)
+                    .into_iter()
+                    .find(|signal| signal.signal_type == kind);
+                found.is_some()
+            });
+            found
+        }
+    }
+
+    #[test]
+    fn an_answer_is_signed() {
+        let mut server = loopback_server();
+        server.set_identity(
+            ServerIdentity::generate("server", std::time::SystemTime::now()).unwrap(),
+        );
+        let mut peer = OfferingPeer::aimed_at(&mut server);
+
+        peer.offer();
+        let answer = peer
+            .await_signal(&mut server, SignalType::Answer)
+            .expect("the offer was never answered");
+
+        assert!(
+            Identity::from_sdp(&answer.data).is_ok(),
+            "the answer carries no identity"
+        );
+    }
+
+    #[test]
+    fn an_unsigned_offer_is_refused_under_trust() {
+        let mut server = loopback_server();
+        server.set_token_trust(Some(TokenTrust::Any));
+        let mut peer = OfferingPeer::aimed_at(&mut server);
+
+        peer.offer();
+        let refusal = peer
+            .await_signal(&mut server, SignalType::Error)
+            .expect("the offer was not refused");
+
+        assert_eq!(
+            refusal.data,
+            (SignalErrorCode::NotLoggedIn as u32).to_string()
+        );
+    }
+}

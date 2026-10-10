@@ -61,6 +61,10 @@ pub struct ConnectionConfig {
 
     /// Who is trusted to have signed the token of an offer, or [`None`] to accept offers
     /// without validating the identity they carry.
+    ///
+    /// It applies only to offers arriving over signaling that does not validate them
+    /// itself, which is LAN discovery. Offers over HTTP are validated by the signaler
+    /// alone, through `HttpSignalerConfig::token_trust`, and this is ignored for them.
     pub token_trust: Option<TokenTrust>,
 
     /// Whether the address a peer signaled from is checked when its offer holds nothing
