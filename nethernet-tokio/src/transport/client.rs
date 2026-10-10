@@ -1,7 +1,7 @@
 use crate::addr::Addr;
 use crate::error::{NetherError, Result, SignalErrorCode};
 use crate::protocol::{Signal, SignalType};
-use crate::session::{Command, Session, SessionReceiver};
+use crate::session::{AcceptedSession, Command, Session, SessionReceiver};
 use crate::signaling::ClientSignaling;
 use crate::transport::{ConnectionConfig, local_bind_addr};
 use bytes::Bytes;
@@ -362,6 +362,15 @@ impl NetherClient {
     /// The current round-trip-time estimate, once the data channels are open.
     pub async fn rtt(&self) -> Option<std::time::Duration> {
         self.session.rtt().await
+    }
+
+    /// Splits the stream into its session and the receivers of its two data channels.
+    pub fn into_accepted(self) -> AcceptedSession {
+        AcceptedSession {
+            session: self.session,
+            reliable: self.reader.into_inner().receiver,
+            unreliable: self.unreliable,
+        }
     }
 
     /// Access the underlying session.
