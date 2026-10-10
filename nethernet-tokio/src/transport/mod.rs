@@ -2,13 +2,13 @@ pub mod client;
 pub mod server;
 
 pub use client::NetherClient;
+pub use nethernet::connection::Timeouts;
 pub use server::NetherServer;
 
 use nethernet::identity::{ServerIdentity, TokenTrust};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Picks the local address a per-connection UDP socket binds to.
 ///
@@ -94,30 +94,5 @@ impl fmt::Debug for ConnectionConfig {
             .field("token_trust", &self.token_trust.is_some())
             .field("infer_peer_candidates", &self.infer_peer_candidates)
             .finish()
-    }
-}
-
-/// Timeouts applied while negotiating and establishing a connection.
-#[derive(Debug, Clone, Copy)]
-pub struct Timeouts {
-    /// Time to wait for the answer of the remote connection. Only used while dialing.
-    pub negotiation: Duration,
-
-    /// Time to wait for the transport (ICE/DTLS) to start. Added to `channel` for the
-    /// total post-negotiation budget, since there's no separate signal to time the two
-    /// phases apart.
-    pub start: Duration,
-
-    /// Time to wait for the data channels to open, once transports have started.
-    pub channel: Duration,
-}
-
-impl Default for Timeouts {
-    fn default() -> Self {
-        Self {
-            negotiation: Duration::from_secs(15),
-            start: Duration::from_secs(5),
-            channel: Duration::from_secs(5),
-        }
     }
 }

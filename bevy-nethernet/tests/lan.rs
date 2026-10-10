@@ -307,3 +307,108 @@ mod admission {
         );
     }
 }
+
+#[test]
+fn a_dial_that_is_never_answered_disconnects_after_the_negotiation_timeout() {
+    let mut client = NetherClient::new(5678, |config| config.broadcast_address = None).unwrap();
+    client.set_timeouts(nethernet::connection::Timeouts {
+        negotiation: Duration::from_millis(200),
+        ..Default::default()
+    });
+    client.connect(1234).unwrap();
+
+    let mut disconnected = false;
+    spin(Instant::now() + Duration::from_secs(2), || {
+        client.update();
+        while let Some(event) = client.next_event() {
+            disconnected |= matches!(event, NetherClientEvent::Disconnected);
+        }
+        disconnected
+    });
+    assert!(
+        disconnected,
+        "no Disconnected within the negotiation timeout"
+    );
+}
+
+mod retry {
+    use super::*;
+    use nethernet::prelude::{
+        LanSignaler, LanSignalerInput, LanSignalerOutput, Sans, ServerData, SignalType,
+    };
+    use std::collections::HashSet;
+    use std::net::UdpSocket;
+
+    const PEER_NETWORK: u64 = 1234;
+
+    fn offered_connection_ids(attempts: u32) -> usize {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let peer_addr = socket.local_addr().unwrap();
+        let mut peer = LanSignaler::new(PEER_NETWORK, LanSignalerConfig::default());
+        peer.handle(LanSignalerInput::SetServerData(Box::new(ServerData::new(
+            "Silent".into(),
+            "World".into(),
+        ))))
+        .unwrap();
+
+        let mut client = NetherClient::new(5678, |config| {
+            config.broadcast_address = Some(peer_addr);
+        })
+        .unwrap();
+        client.set_timeouts(nethernet::connection::Timeouts {
+            negotiation: Duration::from_millis(200),
+            ..Default::default()
+        });
+        client.set_attempts(attempts);
+
+        let mut offered = HashSet::new();
+        let mut dialed = false;
+        let mut disconnected = false;
+        spin(Instant::now() + Duration::from_secs(3), || {
+            client.update();
+            let mut buf = [0u8; 2048];
+            while let Ok((len, from)) = socket.recv_from(&mut buf) {
+                let _ = peer.handle(LanSignalerInput::Datagram(
+                    buf[..len].into(),
+                    from,
+                    Instant::now(),
+                ));
+            }
+            let _ = peer.handle(LanSignalerInput::Update(Instant::now()));
+            while let Some(output) = peer.poll() {
+                match output {
+                    LanSignalerOutput::Datagram(buf, addr) => {
+                        socket.send_to(&buf, addr).unwrap();
+                    }
+                    LanSignalerOutput::Signal(signal)
+                        if signal.signal_type == SignalType::Offer =>
+                    {
+                        offered.insert(signal.connection_id);
+                    }
+                    _ => {}
+                }
+            }
+            if !dialed && client.discovered().contains_key(&PEER_NETWORK) {
+                client.connect(PEER_NETWORK).unwrap();
+                dialed = true;
+            }
+            while let Some(event) = client.next_event() {
+                disconnected |= matches!(event, NetherClientEvent::Disconnected);
+            }
+            disconnected
+        });
+        assert!(disconnected, "no Disconnected after the last attempt");
+        offered.len()
+    }
+
+    #[test]
+    fn a_dial_that_times_out_offers_again_under_a_new_connection_id() {
+        assert_eq!(offered_connection_ids(3), 3);
+    }
+
+    #[test]
+    fn a_single_attempt_offers_exactly_once() {
+        assert_eq!(offered_connection_ids(1), 1);
+    }
+}

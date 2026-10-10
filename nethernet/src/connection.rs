@@ -287,6 +287,38 @@ impl Sans for Connection {
     }
 }
 
+/// Timeouts applied while negotiating and establishing a connection.
+#[derive(Debug, Clone, Copy)]
+pub struct Timeouts {
+    /// Time to wait for the answer of the remote connection. Only used while dialing.
+    pub negotiation: Duration,
+
+    /// Time to wait for the transport (ICE/DTLS) to start. Added to `channel` for the
+    /// total post-negotiation budget, since there's no separate signal to time the two
+    /// phases apart.
+    pub start: Duration,
+
+    /// Time to wait for the data channels to open, once transports have started.
+    pub channel: Duration,
+}
+
+impl Timeouts {
+    /// Total time allowed between negotiation finishing and the connection being usable.
+    pub fn establish(&self) -> Duration {
+        self.start + self.channel
+    }
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            negotiation: Duration::from_secs(15),
+            start: Duration::from_secs(5),
+            channel: Duration::from_secs(5),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +326,11 @@ mod tests {
     use crate::session::SessionEvent;
     use std::net::Ipv4Addr;
     use std::time::Duration;
+
+    #[test]
+    fn default_timeouts_establish_within_ten_seconds() {
+        assert_eq!(Timeouts::default().establish(), Duration::from_secs(10));
+    }
 
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)

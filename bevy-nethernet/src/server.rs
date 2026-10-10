@@ -2,7 +2,7 @@ use crate::connection::{ConnectionEvent, SessionPool};
 use crate::socket::{bind_discovery_socket, bind_shared_socket, send_discovery};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
-use nethernet::connection::IceMode;
+use nethernet::connection::{IceMode, Timeouts};
 use nethernet::prelude::{
     Answered, LanSignaler, LanSignalerConfig, LanSignalerInput, LanSignalerOutput, OfferPolicy,
     PlayerInfo, Sans, ServerData, ServerIdentity, TokenTrust,
@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 const MAX_DATAGRAMS_PER_TICK: usize = 1024;
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 pub struct NetherServerPlugin;
 
@@ -78,6 +77,7 @@ pub struct NetherServer {
     identity: Option<ServerIdentity>,
     token_trust: Option<TokenTrust>,
     infer_peer_candidates: bool,
+    timeouts: Timeouts,
     sessions: HashMap<NetherSessionId, SessionEntry>,
     received: VecDeque<(NetherSessionId, Box<[u8]>)>,
     received_unreliable: VecDeque<(NetherSessionId, Box<[u8]>)>,
@@ -105,6 +105,7 @@ impl NetherServer {
             identity: None,
             token_trust: None,
             infer_peer_candidates: true,
+            timeouts: Timeouts::default(),
             sessions: HashMap::new(),
             received: VecDeque::new(),
             received_unreliable: VecDeque::new(),
@@ -123,6 +124,10 @@ impl NetherServer {
 
     pub fn set_token_trust(&mut self, token_trust: Option<TokenTrust>) {
         self.token_trust = token_trust;
+    }
+
+    pub fn set_timeouts(&mut self, timeouts: Timeouts) {
+        self.timeouts = timeouts;
     }
 
     pub fn set_infer_peer_candidates(&mut self, infer: bool) {
@@ -265,8 +270,9 @@ impl NetherServer {
             self.disconnect(&id);
         }
 
+        let establish = self.timeouts.establish();
         self.sessions.retain(|_, entry| {
-            entry.ready || now.saturating_duration_since(entry.created) < CONNECT_TIMEOUT
+            entry.ready || now.saturating_duration_since(entry.created) < establish
         });
     }
 

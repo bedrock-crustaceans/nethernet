@@ -16,6 +16,7 @@ pub mod util;
 
 pub mod prelude {
     pub use crate::admission::{AdmissionError, Admitted, Answered, OfferPolicy};
+    pub use crate::connection::Timeouts;
     pub use crate::error::{ProtocolError, SignalErrorCode};
     pub use crate::identity::{
         Identity, PlayerInfo, ServerIdentity, TokenTrust,

@@ -254,7 +254,7 @@ impl NetherServer {
             let cancel_token = config.cancel_token.clone();
             let result = tokio::select! {
                 _ = cancel_token.cancelled() => Err((None, NetherError::ConnectionClosed)),
-                result = wait_ready(ready_rx, config.timeouts.start + config.timeouts.channel) => result,
+                result = wait_ready(ready_rx, config.timeouts.establish()) => result,
             };
 
             match result {

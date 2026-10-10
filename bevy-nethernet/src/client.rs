@@ -2,7 +2,7 @@ use crate::connection::{ConnectionEvent, SessionPool};
 use crate::socket::bind_shared_socket;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
-use nethernet::connection::{Connection, IceMode};
+use nethernet::connection::{Connection, IceMode, Timeouts};
 use nethernet::prelude::{
     LanSignaler, LanSignalerConfig, LanSignalerInput, LanSignalerOutput, Sans, ServerData,
     ServerIdentity,
@@ -16,7 +16,7 @@ use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 const MAX_DATAGRAMS_PER_TICK: usize = 1024;
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const DEFAULT_ATTEMPTS: u32 = 3;
 
 pub struct NetherClientPlugin;
 
@@ -61,7 +61,12 @@ pub struct NetherClient {
     pool: SessionPool<()>,
     session_local_addr: SocketAddr,
     connected: bool,
-    connecting_since: Option<Instant>,
+    connecting_deadline: Option<Instant>,
+    answered: bool,
+    timeouts: Timeouts,
+    attempts: u32,
+    attempts_left: u32,
+    target: u64,
     ready: bool,
     remote_addr: Option<SocketAddr>,
     rtt: Option<Duration>,
@@ -98,7 +103,12 @@ impl NetherClient {
             pool: SessionPool::new(session_socket),
             session_local_addr,
             connected: false,
-            connecting_since: None,
+            connecting_deadline: None,
+            answered: false,
+            timeouts: Timeouts::default(),
+            attempts: DEFAULT_ATTEMPTS,
+            attempts_left: 0,
+            target: 0,
             ready: false,
             remote_addr: None,
             rtt: None,
@@ -118,6 +128,14 @@ impl NetherClient {
         self.identity = Some(identity);
     }
 
+    pub fn set_timeouts(&mut self, timeouts: Timeouts) {
+        self.timeouts = timeouts;
+    }
+
+    pub fn set_attempts(&mut self, attempts: u32) {
+        self.attempts = attempts;
+    }
+
     pub fn is_connected(&self) -> bool {
         self.ready
     }
@@ -131,6 +149,13 @@ impl NetherClient {
     }
 
     pub fn connect(&mut self, target_network_id: u64) -> std::io::Result<()> {
+        self.target = target_network_id;
+        self.attempts_left = self.attempts.max(1);
+        self.begin_attempt()
+    }
+
+    fn begin_attempt(&mut self) -> std::io::Result<()> {
+        self.attempts_left = self.attempts_left.saturating_sub(1);
         let (session, description) = Session::new(self.session_local_addr, true, Instant::now())
             .map_err(std::io::Error::other)?;
         let local_ufrag = description.ice.ufrag.clone();
@@ -140,7 +165,7 @@ impl NetherClient {
             session,
             description,
             connection_id,
-            target_network_id.to_string(),
+            self.target.to_string(),
             IceMode::Trickle,
         );
 
@@ -159,7 +184,8 @@ impl NetherClient {
         }
         self.pool.add((), connection, local_ufrag);
         self.connected = true;
-        self.connecting_since = Some(now);
+        self.connecting_deadline = Some(now + self.timeouts.negotiation);
+        self.answered = false;
         self.ready = false;
         self.remote_addr = None;
         self.rtt = None;
@@ -167,7 +193,7 @@ impl NetherClient {
     }
 
     pub fn disconnect(&mut self) {
-        self.connecting_since = None;
+        self.connecting_deadline = None;
         if self.connected {
             self.pool.remove(());
             self.connected = false;
@@ -241,7 +267,7 @@ impl NetherClient {
                 LanSignalerOutput::ServerDiscovered(id, data) => self
                     .events
                     .push_back(NetherClientEvent::ServerDiscovered(id, data)),
-                LanSignalerOutput::Signal(signal) => self.handle_signal(signal),
+                LanSignalerOutput::Signal(signal) => self.handle_signal(signal, now),
                 LanSignalerOutput::Wait(_) => {}
             }
         }
@@ -258,7 +284,7 @@ impl NetherClient {
                 ConnectionEvent::Ready(addr) if !self.ready => {
                     self.ready = true;
                     self.remote_addr = addr;
-                    self.connecting_since = None;
+                    self.connecting_deadline = None;
                     self.events.push_back(NetherClientEvent::Connected);
                 }
                 ConnectionEvent::Ready(_) => {}
@@ -268,26 +294,36 @@ impl NetherClient {
                     self.received_unreliable.push_back(data)
                 }
                 ConnectionEvent::Failed => {
-                    self.connecting_since = None;
+                    self.connecting_deadline = None;
                     self.connected = false;
                     self.events.push_back(NetherClientEvent::Disconnected);
                 }
             }
         }
 
-        if let Some(since) = self.connecting_since
-            && now.saturating_duration_since(since) >= CONNECT_TIMEOUT
+        if let Some(deadline) = self.connecting_deadline
+            && now >= deadline
         {
-            self.connecting_since = None;
+            if !self.answered && self.attempts_left > 0 && self.begin_attempt().is_ok() {
+                return;
+            }
+            self.connecting_deadline = None;
             self.pool.remove(());
             self.connected = false;
             self.events.push_back(NetherClientEvent::Disconnected);
         }
     }
 
-    fn handle_signal(&mut self, signal: Signal) {
+    fn handle_signal(&mut self, signal: Signal, now: Instant) {
         if signal.signal_type == SignalType::Offer || !self.connected {
             return;
+        }
+        if signal.signal_type == SignalType::Answer
+            && !self.answered
+            && self.connecting_deadline.is_some()
+        {
+            self.answered = true;
+            self.connecting_deadline = Some(now + self.timeouts.establish());
         }
         self.pool.signal((), &signal);
     }

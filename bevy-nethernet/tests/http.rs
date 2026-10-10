@@ -443,3 +443,65 @@ mod raw {
         assert!(reply.closed);
     }
 }
+
+#[test]
+fn a_join_that_is_never_answered_fails_after_the_negotiation_timeout() {
+    let silent_server = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let server_url = format!("http://{}", silent_server.local_addr().unwrap());
+
+    let mut client = NetherHttpClient::new();
+    client.set_timeouts(nethernet::connection::Timeouts {
+        negotiation: Duration::from_millis(200),
+        ..Default::default()
+    });
+    client.connect("5678".to_string(), server_url).unwrap();
+
+    let mut failed = false;
+    spin(Instant::now() + Duration::from_secs(2), || {
+        client.update();
+        while let Some(event) = client.next_event() {
+            failed |= matches!(event, NetherHttpClientEvent::ConnectFailed);
+        }
+        failed
+    });
+    assert!(failed, "no ConnectFailed within the negotiation timeout");
+}
+
+fn accepts_before_failure(attempts: u32) -> usize {
+    let silent_server = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    silent_server.set_nonblocking(true).unwrap();
+    let server_url = format!("http://{}", silent_server.local_addr().unwrap());
+
+    let mut client = NetherHttpClient::new();
+    client.set_timeouts(nethernet::connection::Timeouts {
+        negotiation: Duration::from_millis(200),
+        ..Default::default()
+    });
+    client.set_attempts(attempts);
+    client.connect("5678".to_string(), server_url).unwrap();
+
+    let mut accepted = Vec::new();
+    let mut failed = false;
+    spin(Instant::now() + Duration::from_secs(3), || {
+        client.update();
+        while let Ok((stream, _)) = silent_server.accept() {
+            accepted.push(stream);
+        }
+        while let Some(event) = client.next_event() {
+            failed |= matches!(event, NetherHttpClientEvent::ConnectFailed);
+        }
+        failed
+    });
+    assert!(failed, "no ConnectFailed after the last attempt");
+    accepted.len()
+}
+
+#[test]
+fn a_join_that_times_out_is_retried_on_a_fresh_connection_until_attempts_run_out() {
+    assert_eq!(accepts_before_failure(3), 3);
+}
+
+#[test]
+fn a_single_attempt_joins_exactly_once() {
+    assert_eq!(accepts_before_failure(1), 1);
+}

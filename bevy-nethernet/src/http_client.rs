@@ -5,7 +5,7 @@ use crate::tcp_wire::{Inbound, Wire, WireError};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use bevy_platform::cell::SyncCell;
-use nethernet::connection::{Connection, ConnectionInput, IceMode};
+use nethernet::connection::{Connection, ConnectionInput, IceMode, Timeouts};
 use nethernet::error::ProtocolError;
 use nethernet::prelude::ServerIdentity;
 use nethernet::protocol::Signal;
@@ -19,8 +19,6 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 #[cfg(feature = "tls")]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct NetherHttpClientPlugin;
 
@@ -203,12 +201,19 @@ struct Join {
     server_url: String,
 }
 
-#[derive(Resource, Default)]
+const DEFAULT_ATTEMPTS: u32 = 3;
+
+#[derive(Resource)]
 pub struct NetherHttpClient {
     join: Option<Join>,
     pool: Option<SessionPool<()>>,
     connected: bool,
-    connecting_since: Option<Instant>,
+    connecting_deadline: Option<Instant>,
+    timeouts: Timeouts,
+    attempts: u32,
+    attempts_left: u32,
+    local_network_id: String,
+    server_url: String,
     ready: bool,
     remote_addr: Option<SocketAddr>,
     rtt: Option<Duration>,
@@ -220,6 +225,31 @@ pub struct NetherHttpClient {
     received_unreliable: VecDeque<Box<[u8]>>,
 }
 
+impl Default for NetherHttpClient {
+    fn default() -> Self {
+        Self {
+            join: None,
+            pool: None,
+            connected: false,
+            connecting_deadline: None,
+            timeouts: Timeouts::default(),
+            attempts: DEFAULT_ATTEMPTS,
+            attempts_left: 0,
+            local_network_id: String::new(),
+            server_url: String::new(),
+            ready: false,
+            remote_addr: None,
+            rtt: None,
+            identity: None,
+            #[cfg(feature = "tls")]
+            tls_config: None,
+            events: VecDeque::new(),
+            received: VecDeque::new(),
+            received_unreliable: VecDeque::new(),
+        }
+    }
+}
+
 impl NetherHttpClient {
     pub fn new() -> Self {
         Self::default()
@@ -227,6 +257,14 @@ impl NetherHttpClient {
 
     pub fn set_identity(&mut self, identity: ServerIdentity) {
         self.identity = Some(identity);
+    }
+
+    pub fn set_timeouts(&mut self, timeouts: Timeouts) {
+        self.timeouts = timeouts;
+    }
+
+    pub fn set_attempts(&mut self, attempts: u32) {
+        self.attempts = attempts;
     }
 
     #[cfg(feature = "tls")]
@@ -257,6 +295,15 @@ impl NetherHttpClient {
         self.remote_addr = None;
         self.rtt = None;
 
+        self.local_network_id = local_network_id;
+        self.server_url = server_url;
+        self.attempts_left = self.attempts.max(1);
+        self.begin_join()
+    }
+
+    fn begin_join(&mut self) -> std::io::Result<()> {
+        self.attempts_left = self.attempts_left.saturating_sub(1);
+        let server_url = self.server_url.clone();
         let target = JoinTarget::parse(&server_url)?;
         let addr = (target.host.as_str(), target.port)
             .to_socket_addrs()?
@@ -290,7 +337,7 @@ impl NetherHttpClient {
 
         let request = http_wire::encode_post(
             &target.authority,
-            &join::join_path(&local_network_id),
+            &join::join_path(&self.local_network_id),
             join::CONTENT_TYPE,
             &offer_data,
         );
@@ -308,7 +355,7 @@ impl NetherHttpClient {
             session_socket,
             server_url,
         });
-        self.connecting_since = Some(Instant::now());
+        self.connecting_deadline = Some(Instant::now() + self.timeouts.negotiation);
         Ok(())
     }
 
@@ -346,7 +393,7 @@ impl NetherHttpClient {
         self.join = None;
         self.pool = None;
         self.connected = false;
-        self.connecting_since = None;
+        self.connecting_deadline = None;
         if self.ready {
             self.ready = false;
             self.remote_addr = None;
@@ -419,19 +466,20 @@ impl NetherHttpClient {
                             pool.add((), connection, local_ufrag);
                             self.pool = Some(pool);
                             self.connected = true;
+                            self.connecting_deadline = Some(now + self.timeouts.establish());
                         } else {
-                            self.connecting_since = None;
+                            self.connecting_deadline = None;
                             self.events.push_back(NetherHttpClientEvent::ConnectFailed);
                         }
                     }
                     Err(e) => {
                         tracing::debug!("join failed: {e}");
-                        self.connecting_since = None;
+                        self.connecting_deadline = None;
                         self.events.push_back(NetherHttpClientEvent::ConnectFailed);
                     }
                 },
                 JoinStep::Failed => {
-                    self.connecting_since = None;
+                    self.connecting_deadline = None;
                     self.events.push_back(NetherHttpClientEvent::ConnectFailed);
                 }
             }
@@ -446,7 +494,7 @@ impl NetherHttpClient {
                     ConnectionEvent::Ready(addr) if !self.ready => {
                         self.ready = true;
                         self.remote_addr = addr;
-                        self.connecting_since = None;
+                        self.connecting_deadline = None;
                         self.events.push_back(NetherHttpClientEvent::Connected);
                     }
                     ConnectionEvent::Ready(_) => {}
@@ -462,7 +510,7 @@ impl NetherHttpClient {
                         self.join = None;
                         self.pool = None;
                         self.connected = false;
-                        self.connecting_since = None;
+                        self.connecting_deadline = None;
                         self.ready = false;
                         self.remote_addr = None;
                         self.rtt = None;
@@ -476,14 +524,17 @@ impl NetherHttpClient {
             }
         }
 
-        if let Some(since) = self.connecting_since
-            && now.saturating_duration_since(since) >= CONNECT_TIMEOUT
+        if let Some(deadline) = self.connecting_deadline
+            && now >= deadline
         {
+            if self.pool.is_none() && self.attempts_left > 0 && self.begin_join().is_ok() {
+                return;
+            }
             let was_ready = self.ready;
             self.join = None;
             self.pool = None;
             self.connected = false;
-            self.connecting_since = None;
+            self.connecting_deadline = None;
             self.ready = false;
             self.remote_addr = None;
             self.rtt = None;

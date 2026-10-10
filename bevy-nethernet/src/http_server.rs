@@ -7,7 +7,7 @@ use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use http::{Response, StatusCode};
 use nethernet::admission::{Answered, OfferPolicy};
-use nethernet::connection::IceMode;
+use nethernet::connection::{IceMode, Timeouts};
 use nethernet::prelude::{
     HttpSignaler, HttpSignalerConfig, HttpSignalerInput, HttpSignalerOutput, Offer, PlayerInfo,
     RejectReason, Sans, ServerData, ServerIdentity,
@@ -22,7 +22,6 @@ use std::time::{Duration, Instant, SystemTime};
 
 const MAX_ACCEPTS_PER_TICK: usize = 64;
 const MAX_PROXY_HEADER: usize = 232;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct NetherHttpServerPlugin;
@@ -131,6 +130,7 @@ pub struct NetherHttpServer {
     session_local_addr: SocketAddr,
     identity: Option<ServerIdentity>,
     infer_peer_candidates: bool,
+    timeouts: Timeouts,
     idle_timeout: Duration,
     #[cfg(feature = "tls")]
     tls: Option<Arc<rustls::ServerConfig>>,
@@ -163,6 +163,7 @@ impl NetherHttpServer {
             session_local_addr,
             identity: None,
             infer_peer_candidates: true,
+            timeouts: Timeouts::default(),
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             #[cfg(feature = "tls")]
             tls: None,
@@ -190,6 +191,10 @@ impl NetherHttpServer {
     #[cfg(feature = "tls")]
     pub fn set_tls(&mut self, tls: Arc<rustls::ServerConfig>) {
         self.tls = Some(tls);
+    }
+
+    pub fn set_timeouts(&mut self, timeouts: Timeouts) {
+        self.timeouts = timeouts;
     }
 
     pub fn set_infer_peer_candidates(&mut self, infer: bool) {
@@ -301,8 +306,9 @@ impl NetherHttpServer {
             self.connections.remove(&id);
             let _ = self.signaler.handle(HttpSignalerInput::Closed(id));
         }
+        let establish = self.timeouts.establish();
         self.sessions.retain(|_, entry| {
-            entry.ready || now.saturating_duration_since(entry.created) < CONNECT_TIMEOUT
+            entry.ready || now.saturating_duration_since(entry.created) < establish
         });
     }
 
