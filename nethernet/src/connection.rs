@@ -254,10 +254,11 @@ impl Default for Timeouts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::webrtc::identity;
+    use crate::identity::{self, Identity, ServerIdentity, TokenTrust};
     use crate::session::SessionEvent;
     use std::net::Ipv4Addr;
     use std::time::Duration;
+    use std::time::SystemTime;
 
     #[test]
     fn default_timeouts_establish_within_ten_seconds() {
@@ -395,31 +396,24 @@ mod tests {
             .unwrap();
     }
 
-    fn decode_cpk(claims: &serde_json::Value) -> Vec<u8> {
-        use base64::Engine;
-        base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(claims["cpk"].as_str().unwrap())
-            .unwrap()
+    fn signed_by(domain: &str, description: &mut Description) -> ServerIdentity {
+        let server = ServerIdentity::generate(domain, SystemTime::now()).unwrap();
+        description.identity = Some(
+            server
+                .identity_for_fingerprints(std::slice::from_ref(&description.fingerprint))
+                .unwrap(),
+        );
+        server
     }
 
     #[test]
     fn identity_assertions_flow_and_verify_in_both_directions() {
         let now = Instant::now();
-        let (offerer_keypair, _) = identity::generate_keypair().unwrap();
-        let (answerer_keypair, _) = identity::generate_keypair().unwrap();
+        let wall_clock = SystemTime::now();
 
         let (offer_session, mut offer_description) = Session::new(addr(40220), true, now).unwrap();
-        let offerer_token =
-            identity::build_server_token(&offerer_keypair, serde_json::Map::new(), None).unwrap();
-        offer_description.identity = Some(
-            identity::build_identity(
-                "offerer.example",
-                &offerer_token,
-                &[offer_description.fingerprint.clone()],
-                &offerer_keypair,
-            )
-            .unwrap(),
-        );
+        let offerer_identity = signed_by("offerer.example", &mut offer_description);
+        let offerer_envelope = offer_description.identity.clone().unwrap();
 
         let (mut offerer, offer_signals) = Connection::connect(
             offer_session,
@@ -430,33 +424,28 @@ mod tests {
         );
         let offer = offer_signals.into_iter().next().unwrap();
 
+        let claims = identity::validate_sdp(&offer.data, &TokenTrust::Any, wall_clock).unwrap();
+        assert_eq!(
+            claims.client_public_key().unwrap(),
+            *offerer_identity.verifying_key()
+        );
+        assert_eq!(
+            Identity::from_sdp(&offer.data).unwrap().idp.domain,
+            "offerer.example"
+        );
+
         let (remote_description, remote_candidates) = Connection::parse_offer(&offer).unwrap();
-        let parsed =
-            identity::parse_identity(remote_description.identity.as_ref().unwrap()).unwrap();
-        assert_eq!(parsed.idp.domain, "offerer.example");
-        let offerer_decoded = identity::verify_self_signed(&parsed.token).unwrap();
-        parsed
-            .verify_fingerprints(
-                &decode_cpk(&offerer_decoded.claims),
-                std::slice::from_ref(&remote_description.fingerprint),
-            )
-            .unwrap();
+        assert_eq!(
+            remote_description.identity.as_deref(),
+            Some(offerer_envelope.as_str())
+        );
 
         let (answer_session, mut answer_description) =
             Session::new(addr(40221), false, now).unwrap();
-        let answerer_token =
-            identity::build_server_token(&answerer_keypair, serde_json::Map::new(), None).unwrap();
-        answer_description.identity = Some(
-            identity::build_identity(
-                "answerer.example",
-                &answerer_token,
-                &[answer_description.fingerprint.clone()],
-                &answerer_keypair,
-            )
-            .unwrap(),
-        );
+        let answerer_identity = signed_by("answerer.example", &mut answer_description);
+        let answerer_envelope = answer_description.identity.clone().unwrap();
 
-        let (_answerer, answer_signals) = Connection::accept(
+        let (answerer, answer_signals) = Connection::accept(
             answer_session,
             answer_description,
             &offer,
@@ -467,20 +456,17 @@ mod tests {
         )
         .unwrap();
         let answer = answer_signals.into_iter().next().unwrap();
+        assert_eq!(answerer.remote_identity(), Some(offerer_envelope.as_str()));
+
+        let claims = identity::validate_sdp(&answer.data, &TokenTrust::Any, wall_clock).unwrap();
+        assert_eq!(
+            claims.client_public_key().unwrap(),
+            *answerer_identity.verifying_key()
+        );
 
         offerer
             .handle(ConnectionInput::Signal(answer.clone(), now))
             .unwrap();
-
-        let (answer_description, _) = Description::parse(&answer.data).unwrap();
-        let parsed = identity::parse_identity(offerer.remote_identity().unwrap()).unwrap();
-        assert_eq!(parsed.idp.domain, "answerer.example");
-        let answerer_decoded = identity::verify_self_signed(&parsed.token).unwrap();
-        parsed
-            .verify_fingerprints(
-                &decode_cpk(&answerer_decoded.claims),
-                &[answer_description.fingerprint],
-            )
-            .unwrap();
+        assert_eq!(offerer.remote_identity(), Some(answerer_envelope.as_str()));
     }
 }

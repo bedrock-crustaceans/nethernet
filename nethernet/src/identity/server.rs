@@ -1,11 +1,11 @@
 //! The server's own identity: a P-384 key and a self-signed token that sign answers.
 use crate::identity::error::{IdentityError, Result};
-use crate::identity::{Assertion, Identity, Idp, canonical_fingerprint_json};
+use crate::identity::jws::Jws;
+use crate::identity::{Assertion, Identity, Idp, fingerprint_payload, sdp_fingerprints};
 use base64::Engine;
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::STANDARD;
 use p384::SecretKey;
-use p384::ecdsa::signature::Signer;
-use p384::ecdsa::{Signature, SigningKey, VerifyingKey};
+use p384::ecdsa::{SigningKey, VerifyingKey};
 use p384::elliptic_curve::Generate;
 use p384::pkcs8::{EncodePublicKey, LineEnding};
 use serde_json::json;
@@ -77,7 +77,7 @@ impl ServerIdentity {
             claims["exp"] = json!(seconds(now + lifetime));
         }
 
-        let token = sign(&signing, &claims.to_string())?;
+        let token = Jws::sign(&signing, &claims.to_string())?;
 
         Ok(Self {
             signing,
@@ -109,16 +109,13 @@ impl ServerIdentity {
 
     /// The base64 identity value signing the fingerprints of `answer`.
     pub fn identity_value(&self, answer: &str) -> Result<String> {
-        let fingerprints = canonical_fingerprint_json(answer)?;
-        let signed = sign(&self.signing, &fingerprints)?;
+        let fingerprints = sdp_fingerprints(answer)?;
+        self.identity_for_fingerprints(&fingerprints)
+    }
 
-        let mut parts = signed.split('.');
-        let (Some(header), Some(_), Some(signature)) = (parts.next(), parts.next(), parts.next())
-        else {
-            return Err(IdentityError::Signing(
-                "the signature is not a compact serialization".to_string(),
-            ));
-        };
+    /// The base64 identity value signing the given `(algorithm, digest)` pairs.
+    pub fn identity_for_fingerprints(&self, fingerprints: &[(String, String)]) -> Result<String> {
+        let payload = fingerprint_payload(fingerprints);
 
         Identity {
             idp: Idp {
@@ -127,7 +124,7 @@ impl ServerIdentity {
             },
             assertion: Assertion {
                 token: self.token.clone(),
-                fingerprints: format!("{}..{}", header, signature),
+                fingerprints: Jws::sign_detached(&self.signing, &payload)?,
             },
         }
         .to_base64()
@@ -162,22 +159,6 @@ impl ServerIdentity {
     }
 }
 
-fn sign(key: &SigningKey, payload: &str) -> Result<String> {
-    let header = URL_SAFE_NO_PAD.encode("{\"alg\":\"ES384\"}");
-    let payload = URL_SAFE_NO_PAD.encode(payload);
-    let signing_input = format!("{}.{}", header, payload);
-
-    let signature: Signature = key
-        .try_sign(signing_input.as_bytes())
-        .map_err(|e| IdentityError::Signing(e.to_string()))?;
-
-    Ok(format!(
-        "{}.{}",
-        signing_input,
-        URL_SAFE_NO_PAD.encode(signature.to_bytes())
-    ))
-}
-
 fn seconds(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -189,6 +170,7 @@ mod tests {
     use super::*;
     use crate::identity::jwt::Jws;
     use crate::identity::{TokenTrust, validate_sdp};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use serde_json::json;
 
     const ANSWER: &str = "v=0\r\n\
@@ -209,6 +191,20 @@ mod tests {
 
         assert!(lines[index + 1].starts_with("m="));
         assert_eq!(lines.len(), 5);
+    }
+
+    #[test]
+    fn signing_a_fingerprint_list_matches_signing_the_answer_that_carries_it() {
+        let identity = fixture_identity();
+        let fingerprints = vec![(
+            "sha-256".to_string(),
+            "4A:AD:B9:B1:3F:82:18:3B:54:02:12:DF:3E:5D:49:6B:19:E5:7C:AB".to_string(),
+        )];
+
+        assert_eq!(
+            identity.identity_for_fingerprints(&fingerprints).unwrap(),
+            identity.identity_value(FIXTURE_ANSWER).unwrap()
+        );
     }
 
     #[test]

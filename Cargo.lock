@@ -1737,7 +1737,6 @@ dependencies = [
  "ipnet",
  "p384",
  "rand 0.10.3",
- "ring",
  "rsa",
  "rtc",
  "serde",

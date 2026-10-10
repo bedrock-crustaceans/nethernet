@@ -1,95 +1,14 @@
-//! Compact JWS parsing and token claims.
+//! Token claims.
 use crate::identity::error::{IdentityError, Result};
+pub use crate::identity::jws::{Header, Jws};
 use base64::Engine;
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use p384::ecdsa::signature::Verifier;
-use p384::ecdsa::{Signature, VerifyingKey};
+use base64::engine::general_purpose::STANDARD;
+use p384::ecdsa::VerifyingKey;
 use p384::pkcs8::DecodePublicKey;
-use serde::Deserialize;
 use serde_json::Value;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const LEEWAY: Duration = Duration::from_secs(60);
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Header {
-    #[serde(default)]
-    pub alg: String,
-
-    #[serde(default)]
-    pub kid: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Jws {
-    pub header: Header,
-    pub signing_input: String,
-    pub payload: Vec<u8>,
-    pub signature: Vec<u8>,
-}
-
-impl Jws {
-    pub fn parse(compact: &str) -> Result<Self> {
-        let mut parts = compact.split('.');
-        let (Some(header), Some(payload), Some(signature), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
-            return Err(IdentityError::Malformed(
-                "expected three parts in the compact serialization".to_string(),
-            ));
-        };
-
-        Ok(Self {
-            header: serde_json::from_slice(&decode(header)?)
-                .map_err(|e| IdentityError::Malformed(format!("invalid header: {}", e)))?,
-            signing_input: format!("{}.{}", header, payload),
-            payload: decode(payload)?,
-            signature: decode(signature)?,
-        })
-    }
-
-    /// Parses a `header..signature` JWS, taking the payload from the second argument.
-    pub fn parse_detached(compact: &str, payload: &str) -> Result<Self> {
-        let mut parts = compact.split('.');
-        let (Some(header), Some(""), Some(signature), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
-            return Err(IdentityError::Malformed(
-                "expected a detached compact serialization".to_string(),
-            ));
-        };
-
-        let encoded = URL_SAFE_NO_PAD.encode(payload);
-        Ok(Self {
-            header: serde_json::from_slice(&decode(header)?)
-                .map_err(|e| IdentityError::Malformed(format!("invalid header: {}", e)))?,
-            signing_input: format!("{}.{}", header, encoded),
-            payload: payload.as_bytes().to_vec(),
-            signature: decode(signature)?,
-        })
-    }
-
-    pub fn verify_es384(&self, key: &VerifyingKey) -> Result<()> {
-        if self.header.alg != "ES384" {
-            return Err(IdentityError::Malformed(format!(
-                "expected ES384, got {}",
-                self.header.alg
-            )));
-        }
-
-        let signature = Signature::from_slice(&self.signature)
-            .map_err(|e| IdentityError::Malformed(format!("invalid signature: {}", e)))?;
-
-        key.verify(self.signing_input.as_bytes(), &signature)
-            .map_err(|_| IdentityError::FingerprintMismatch)
-    }
-
-    pub fn claims(&self) -> Result<Claims> {
-        serde_json::from_slice(&self.payload)
-            .map(Claims::new)
-            .map_err(|e| IdentityError::Malformed(format!("invalid claims: {}", e)))
-    }
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct Claims {
@@ -165,12 +84,6 @@ impl Claims {
             )),
         }
     }
-}
-
-fn decode(value: &str) -> Result<Vec<u8>> {
-    URL_SAFE_NO_PAD
-        .decode(value)
-        .map_err(|e| IdentityError::Malformed(format!("invalid base64url: {}", e)))
 }
 
 #[cfg(test)]
