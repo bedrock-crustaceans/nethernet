@@ -218,4 +218,78 @@ mod tests {
         assert!(Jws::parse("one.two").is_err());
         assert!(Jws::parse_detached("one.two.three", "{}").is_err());
     }
+
+    #[test]
+    fn a_token_is_accepted_up_to_sixty_seconds_past_its_expiry() {
+        let claims = claims(json!({"exp": 1000}));
+
+        assert!(
+            claims
+                .check_expiry(UNIX_EPOCH + Duration::from_secs(1060))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_token_is_refused_sixty_one_seconds_past_its_expiry() {
+        let claims = claims(json!({"exp": 1000}));
+
+        let error = claims
+            .check_expiry(UNIX_EPOCH + Duration::from_secs(1061))
+            .unwrap_err();
+
+        assert!(matches!(error, IdentityError::Untrusted(_)));
+    }
+
+    #[test]
+    fn a_token_without_an_expiry_is_untrusted() {
+        let error = claims(json!({})).check_expiry(UNIX_EPOCH).unwrap_err();
+
+        assert!(matches!(error, IdentityError::Untrusted(_)));
+    }
+
+    #[test]
+    fn a_claim_set_without_a_cpk_has_no_client_public_key() {
+        let error = claims(json!({"exp": 1000}))
+            .client_public_key()
+            .unwrap_err();
+
+        assert!(matches!(error, IdentityError::ClientPublicKey(_)));
+    }
+
+    #[test]
+    fn a_p256_cpk_is_not_a_client_public_key() {
+        let p256 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEtn+9sKRdn6eczaU797AJwdk2VIjMDgYtLt9T+j92M4M0iFDyYPp5OkOVORuYpZSO1HNH94EzVi5bmaHqKbZdUw==";
+
+        let error = claims(json!({"cpk": p256}))
+            .client_public_key()
+            .unwrap_err();
+
+        assert!(matches!(error, IdentityError::ClientPublicKey(_)));
+    }
+
+    #[test]
+    fn a_cpk_that_is_not_base64_is_not_a_client_public_key() {
+        let error = claims(json!({"cpk": "***"}))
+            .client_public_key()
+            .unwrap_err();
+
+        assert!(matches!(error, IdentityError::ClientPublicKey(_)));
+    }
+
+    #[test]
+    fn a_detached_serialization_with_a_payload_is_malformed() {
+        let error = Jws::parse_detached("e30.e30.AA", "{}").unwrap_err();
+
+        assert!(matches!(error, IdentityError::Malformed(_)));
+    }
+
+    #[test]
+    fn a_detached_serialization_takes_its_payload_from_the_argument() {
+        let jws = Jws::parse_detached("eyJhbGciOiJFUzM4NCJ9..AA", "{}").unwrap();
+
+        assert_eq!(jws.header.alg, "ES384");
+        assert_eq!(jws.signing_input, "eyJhbGciOiJFUzM4NCJ9.e30");
+        assert_eq!(jws.payload, b"{}");
+    }
 }

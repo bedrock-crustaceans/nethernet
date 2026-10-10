@@ -4,6 +4,9 @@ pub mod jwk;
 pub mod jwt;
 pub mod server;
 
+#[cfg(test)]
+mod token_trust_tests;
+
 use crate::identity::error::{IdentityError, Result};
 use crate::identity::jwk::JwkSet;
 use crate::identity::jwt::{Claims, Jws};
@@ -389,5 +392,157 @@ mod tests {
             player.verify_login_key(other.verifying_key()).unwrap_err(),
             IdentityError::KeyMismatch
         ));
+    }
+
+    const GUIDE_DIGEST: &str = "4A:AD:B9:B1:3F:82:18:3B:54:02:12:DF:3E:5D:49:6B:19:E5:7C:AB";
+
+    const GUIDE_FINGERPRINT_JSON: &str = "{\"fingerprint\":[{\"algorithm\":\"sha-256\",\"digest\":\"4A:AD:B9:B1:3F:82:18:3B:54:02:12:DF:3E:5D:49:6B:19:E5:7C:AB\"}]}";
+
+    const VANILLA_ENVELOPE: &str = "eyJpZHAiOnsiZG9tYWluIjoiYXV0aD4+Pj8uZXhhbXBsZSIsInByb3RvY29sIjoiZGVmYXVsdCJ9LCJhc3NlcnRpb24iOiJ7XCJ0b2tlblwiOlwiYWEuYmIuY2NcIixcImZpbmdlcnByaW50c1wiOlwiaGguLnNzXCJ9In0=";
+
+    const VANILLA_ENVELOPE_URL_SAFE: &str = "eyJpZHAiOnsiZG9tYWluIjoiYXV0aD4-Pj8uZXhhbXBsZSIsInByb3RvY29sIjoiZGVmYXVsdCJ9LCJhc3NlcnRpb24iOiJ7XCJ0b2tlblwiOlwiYWEuYmIuY2NcIixcImZpbmdlcnByaW50c1wiOlwiaGguLnNzXCJ9In0=";
+
+    const VANILLA_ENVELOPE_UNPADDED: &str = "eyJpZHAiOnsiZG9tYWluIjoiYXV0aD4+Pj8uZXhhbXBsZSIsInByb3RvY29sIjoiZGVmYXVsdCJ9LCJhc3NlcnRpb24iOiJ7XCJ0b2tlblwiOlwiYWEuYmIuY2NcIixcImZpbmdlcnByaW50c1wiOlwiaGguLnNzXCJ9In0";
+
+    #[test]
+    fn the_guide_fingerprint_canonicalizes_to_the_documented_json() {
+        let sdp = format!("a=fingerprint:sha-256 {}\r\n", GUIDE_DIGEST);
+
+        assert_eq!(
+            canonical_fingerprint_json(&sdp).unwrap(),
+            GUIDE_FINGERPRINT_JSON
+        );
+    }
+
+    #[test]
+    fn lf_only_line_endings_canonicalize_like_crlf() {
+        let crlf = "a=fingerprint:sha-256 AB:CD\r\na=fingerprint:sha-1 EF\r\n";
+        let lf = "a=fingerprint:sha-256 AB:CD\na=fingerprint:sha-1 EF\n";
+
+        assert_eq!(
+            canonical_fingerprint_json(lf).unwrap(),
+            canonical_fingerprint_json(crlf).unwrap()
+        );
+    }
+
+    #[test]
+    fn trailing_whitespace_on_a_fingerprint_line_is_trimmed() {
+        let sdp = "a=fingerprint:sha-256 AB:CD \t \r\n";
+
+        assert_eq!(
+            canonical_fingerprint_json(sdp).unwrap(),
+            "{\"fingerprint\":[{\"algorithm\":\"sha-256\",\"digest\":\"AB:CD\"}]}"
+        );
+    }
+
+    #[test]
+    fn extra_spaces_between_algorithm_and_digest_stay_in_the_digest() {
+        let sdp = "a=fingerprint:sha-256   AB:CD\r\n";
+
+        assert_eq!(
+            canonical_fingerprint_json(sdp).unwrap(),
+            "{\"fingerprint\":[{\"algorithm\":\"sha-256\",\"digest\":\"  AB:CD\"}]}"
+        );
+    }
+
+    #[test]
+    fn fingerprint_lines_are_read_only_at_the_start_of_a_line() {
+        let sdp = "m=application\r\na=fingerprint:sha-256 AB:CD\r\nb=a=fingerprint:sha-1 EF\r\n";
+
+        assert_eq!(
+            canonical_fingerprint_json(sdp).unwrap(),
+            "{\"fingerprint\":[{\"algorithm\":\"sha-256\",\"digest\":\"AB:CD\"}]}"
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_line_without_a_space_is_malformed() {
+        let error = canonical_fingerprint_json("a=fingerprint:sha-256\r\n").unwrap_err();
+
+        assert!(matches!(error, IdentityError::Malformed(_)));
+    }
+
+    #[test]
+    fn an_empty_fingerprint_line_is_malformed() {
+        let error = canonical_fingerprint_json("a=fingerprint:\r\n").unwrap_err();
+
+        assert!(matches!(error, IdentityError::Malformed(_)));
+    }
+
+    #[test]
+    fn an_encoded_identity_starts_with_the_idp_domain_prefix() {
+        let identity = Identity {
+            idp: Idp {
+                domain: "example.com".to_string(),
+                protocol: "default".to_string(),
+            },
+            assertion: Assertion::default(),
+        };
+
+        assert!(
+            identity
+                .to_base64()
+                .unwrap()
+                .starts_with("eyJpZHAiOnsiZG9tYWluIjoi")
+        );
+    }
+
+    #[test]
+    fn a_vanilla_envelope_decodes_to_its_idp_and_assertion() {
+        let identity = Identity::from_base64(VANILLA_ENVELOPE).unwrap();
+
+        assert_eq!(identity.idp.domain, "auth>>>?.example");
+        assert_eq!(identity.idp.protocol, "default");
+        assert_eq!(identity.assertion.token, "aa.bb.cc");
+        assert_eq!(identity.assertion.fingerprints, "hh..ss");
+    }
+
+    #[test]
+    fn a_vanilla_envelope_re_encodes_to_the_same_value() {
+        let identity = Identity::from_base64(VANILLA_ENVELOPE).unwrap();
+
+        assert_eq!(identity.to_base64().unwrap(), VANILLA_ENVELOPE);
+    }
+
+    #[test]
+    fn an_envelope_is_read_through_surrounding_whitespace() {
+        let padded = format!("  {}\r\n", VANILLA_ENVELOPE);
+
+        assert!(Identity::from_base64(&padded).is_ok());
+    }
+
+    #[test]
+    fn a_url_safe_envelope_is_refused() {
+        let error = Identity::from_base64(VANILLA_ENVELOPE_URL_SAFE).unwrap_err();
+
+        assert!(matches!(error, IdentityError::Malformed(_)));
+    }
+
+    #[test]
+    fn an_unpadded_envelope_is_refused() {
+        let error = Identity::from_base64(VANILLA_ENVELOPE_UNPADDED).unwrap_err();
+
+        assert!(matches!(error, IdentityError::Malformed(_)));
+    }
+
+    #[test]
+    fn an_envelope_whose_assertion_is_not_json_is_malformed() {
+        let envelope = STANDARD.encode("{\"idp\":{},\"assertion\":\"not json\"}");
+
+        let error = Identity::from_base64(&envelope).unwrap_err();
+
+        assert!(matches!(error, IdentityError::Malformed(_)));
+    }
+
+    #[test]
+    fn an_identity_is_read_from_the_first_identity_line_of_an_lf_only_description() {
+        let sdp = format!(
+            "v=0\na=identity:{}\na=identity:garbage\nm=application 9\n",
+            VANILLA_ENVELOPE
+        );
+
+        let identity = Identity::from_sdp(&sdp).unwrap();
+
+        assert_eq!(identity.assertion.token, "aa.bb.cc");
     }
 }
