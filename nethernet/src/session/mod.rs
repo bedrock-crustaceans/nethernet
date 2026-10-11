@@ -424,7 +424,10 @@ impl Sans for Session {
             SessionInput::RemoteCandidate(candidate, now) => {
                 self.add_remote_candidate(candidate, now)
             }
-            SessionInput::Send(channel, data, now) => self.send(channel, data, now),
+            SessionInput::Send(channel, data, now) => {
+                self.send(channel, data, now)?;
+                self.pump(now)
+            }
             SessionInput::Timeout(now) => self.handle_timeout(now),
         }
     }
@@ -555,8 +558,7 @@ mod tests {
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
     }
 
-    #[test]
-    fn full_handshake_and_bidirectional_data_exchange() {
+    fn connected_pair() -> (Session, Session, Instant) {
         let mut now = Instant::now();
 
         let (mut offerer, offer) = Session::new(addr(40100), true, now).unwrap();
@@ -644,6 +646,32 @@ mod tests {
         assert!(answerer_ready, "answerer never became ready");
         assert_eq!(offerer.remote_addr(), Some(addr(40101)));
         assert_eq!(answerer.remote_addr(), Some(addr(40100)));
+
+        while offerer.poll().is_some() {}
+        while answerer.poll().is_some() {}
+        (offerer, answerer, now)
+    }
+
+    #[test]
+    fn a_send_is_written_without_waiting_for_a_timeout() {
+        let (mut offerer, _answerer, now) = connected_pair();
+
+        offerer
+            .handle(SessionInput::Send(
+                Channel::Reliable,
+                Bytes::from_static(b"now"),
+                now,
+            ))
+            .unwrap();
+
+        let sent = std::iter::from_fn(|| offerer.poll())
+            .any(|output| matches!(output, SessionOutput::Send(..)));
+        assert!(sent, "the send stayed buffered until the next timeout");
+    }
+
+    #[test]
+    fn full_handshake_and_bidirectional_data_exchange() {
+        let (mut offerer, mut answerer, mut now) = connected_pair();
 
         offerer
             .handle(SessionInput::Send(
