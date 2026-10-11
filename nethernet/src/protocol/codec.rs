@@ -12,11 +12,21 @@ pub trait NetherCodec: Sized {
     fn size_hint(&self) -> usize;
 }
 
+fn read_len_bytes<R: Read>(reader: &mut R, len: usize) -> Result<Vec<u8>> {
+    if len > MAX_BYTES {
+        return Err(ProtocolError::MessageSizeExceeded(len));
+    }
+    let mut buf = Vec::new();
+    reader.take(len as u64).read_to_end(&mut buf)?;
+    if buf.len() < len {
+        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+    }
+    Ok(buf)
+}
+
 pub fn read_bytes_u8<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
     let len = reader.read_u8()? as usize;
-    let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf)?;
-    Ok(buf)
+    read_len_bytes(reader, len)
 }
 
 /// Fails when the data is longer than 255 bytes.
@@ -35,15 +45,7 @@ pub fn write_bytes_u8<W: Write>(writer: &mut W, data: &[u8]) -> Result<()> {
 /// Refuses a length prefix above `MAX_BYTES`.
 pub fn read_bytes_u32<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
     let len = reader.read_u32::<LittleEndian>()? as usize;
-    if len > MAX_BYTES {
-        return Err(ProtocolError::Other(format!(
-            "byte array length {} exceeds maximum allowed {}",
-            len, MAX_BYTES
-        )));
-    }
-    let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf)?;
-    Ok(buf)
+    read_len_bytes(reader, len)
 }
 
 pub fn write_bytes_u32<W: Write>(writer: &mut W, data: &[u8]) -> Result<()> {
@@ -93,12 +95,10 @@ pub fn write_varint32<W: Write>(writer: &mut W, value: i32) -> Result<()> {
     write_varuint32(writer, ((value << 1) ^ (value >> 31)) as u32)
 }
 
-/// The varuint length prefix is not capped, unlike the u32 reader.
+/// Refuses a length prefix above `MAX_BYTES`.
 pub fn read_bytes_varuint<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
     let len = read_varuint32(reader)? as usize;
-    let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf)?;
-    Ok(buf)
+    read_len_bytes(reader, len)
 }
 
 pub fn write_bytes_varuint<W: Write>(writer: &mut W, data: &[u8]) -> Result<()> {

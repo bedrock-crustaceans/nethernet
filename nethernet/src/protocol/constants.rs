@@ -10,7 +10,7 @@ pub const ID_MESSAGE_PACKET: u16 = 2;
 pub const MAX_MESSAGE_SIZE: usize = 10000;
 
 /// Cap on any u32-length-prefixed field read or written by the codec.
-pub const MAX_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_BYTES: usize = 65535;
 
 pub const HEADER_SIZE: usize = 18;
 
