@@ -21,6 +21,10 @@ use std::time::{Duration, Instant};
 const PING: &str = "Ping";
 
 /// Sans-io LAN signaler that answers discovery requests, tracks peer addresses and retransmits signals.
+///
+/// Discovery packets are unauthenticated (the key is public), so a network id
+/// stays pinned to the address it was last heard from until that address goes
+/// quiet for `address_timeout`. A host that claims an id first still wins it.
 pub struct LanSignaler {
     network_id: u64,
     config: LanSignalerConfig,
@@ -127,6 +131,19 @@ impl LanSignaler {
         };
 
         if sender == self.network_id {
+            return Ok(());
+        }
+
+        if let Some(entry) = self.addresses.get(&sender)
+            && entry.addr != addr
+            && now.saturating_duration_since(entry.last_seen) < self.config.address_timeout
+        {
+            tracing::debug!(
+                "ignoring {} claiming network id {}, pinned to {}",
+                addr,
+                sender,
+                entry.addr
+            );
             return Ok(());
         }
 
@@ -517,6 +534,45 @@ mod tests {
     fn resent_by(client: &mut LanSignaler, at: Instant) -> usize {
         client.handle(LanSignalerInput::Update(at)).unwrap();
         datagrams(client).len()
+    }
+
+    fn offer_destination(client: &mut LanSignaler, now: Instant) -> SocketAddr {
+        client
+            .handle(LanSignalerInput::Signal(
+                Signal::offer(42, "sdp".to_string(), SERVER.to_string()),
+                now,
+            ))
+            .unwrap();
+        datagrams(client)[0].1
+    }
+
+    #[test]
+    fn a_spoofed_sender_cannot_move_a_fresh_address() {
+        let now = Instant::now();
+        let mut client = client_knowing_the_server(now);
+
+        let spoof = encode(&Packets::Request(RequestPacket), SERVER).unwrap();
+        client
+            .handle(LanSignalerInput::Datagram(spoof.into(), addr(9999), now))
+            .unwrap();
+        let _ = datagrams(&mut client);
+
+        assert_eq!(offer_destination(&mut client, now), addr(7551));
+    }
+
+    #[test]
+    fn a_stale_address_can_move() {
+        let now = Instant::now();
+        let mut client = client_knowing_the_server(now);
+        let later = now + LanSignalerConfig::default().address_timeout;
+
+        let moved = encode(&Packets::Request(RequestPacket), SERVER).unwrap();
+        client
+            .handle(LanSignalerInput::Datagram(moved.into(), addr(9999), later))
+            .unwrap();
+        let _ = datagrams(&mut client);
+
+        assert_eq!(offer_destination(&mut client, later), addr(9999));
     }
 
     #[test]
