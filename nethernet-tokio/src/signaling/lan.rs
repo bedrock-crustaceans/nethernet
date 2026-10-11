@@ -168,7 +168,6 @@ impl LanSignaling {
         tokio::spawn(async move {
             let mut buf = vec![0u8; BUFFER_SIZE];
             let mut wake = Instant::now();
-            let mut discovered: HashMap<u64, ServerData> = HashMap::new();
             let mut addresses: HashMap<u64, SocketAddr> = HashMap::new();
             let dual_stack = socket.local_addr().is_ok_and(|addr| addr.is_ipv6());
 
@@ -200,7 +199,7 @@ impl LanSignaling {
                             let _ = signaler.handle(LanSignalerInput::SetServerData(data));
                         }
                         Some(Command::Discovered(reply)) => {
-                            let _ = reply.send(discovered.clone());
+                            let _ = reply.send(signaler.discovered().clone());
                         }
                         Some(Command::Address(network_id, reply)) => {
                             let _ = reply.send(addresses.get(&network_id).copied());
@@ -224,9 +223,7 @@ impl LanSignaling {
                         LanSignalerOutput::Signal(signal) => {
                             let _ = signal_tx.send(signal);
                         }
-                        LanSignalerOutput::ServerDiscovered(network_id, data) => {
-                            discovered.insert(network_id, *data);
-                        }
+                        LanSignalerOutput::ServerDiscovered(..) => {}
                         LanSignalerOutput::Wait(wait) => {
                             wake = Instant::now() + wait.min(MAX_IDLE);
                         }

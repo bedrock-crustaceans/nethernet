@@ -22,6 +22,9 @@ pub struct LanSignalerConfig {
 
     /// Retransmissions after the first send; zero disables them.
     pub signal_retries: u32,
+
+    /// Most servers kept in the discovered map; responses from new servers beyond it are ignored.
+    pub max_discovered: usize,
 }
 
 impl Default for LanSignalerConfig {
@@ -33,6 +36,7 @@ impl Default for LanSignalerConfig {
             address_timeout: Duration::from_secs(15),
             signal_retry_interval: Duration::from_millis(500),
             signal_retries: 3,
+            max_discovered: 256,
         }
     }
 }

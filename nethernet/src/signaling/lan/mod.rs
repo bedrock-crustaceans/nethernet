@@ -141,6 +141,10 @@ impl LanSignaler {
         match packet {
             Packets::Request(_) => self.answer_request(addr)?,
             Packets::Response(response) => {
+                let full = self.discovered.len() >= self.config.max_discovered;
+                if full && !self.discovered.contains_key(&sender) {
+                    return Ok(());
+                }
                 if let Ok(data) = ServerData::decode(&response.application_data) {
                     self.discovered.insert(sender, data.clone());
                     self.output
@@ -294,6 +298,8 @@ impl LanSignaler {
         let timeout = self.config.address_timeout;
         self.addresses
             .retain(|_, entry| now.saturating_duration_since(entry.last_seen) < timeout);
+        let addresses = &self.addresses;
+        self.discovered.retain(|id, _| addresses.contains_key(id));
         self.last_cleanup = Some(now);
     }
 
@@ -562,5 +568,63 @@ mod tests {
             .unwrap();
 
         assert!(client.poll().is_none());
+    }
+
+    fn response_from(network_id: u64) -> Box<[u8]> {
+        let data = ServerData::new("Server".to_string(), "World".to_string());
+        let mut application_data = Vec::new();
+        data.serialize(&mut application_data).unwrap();
+        encode(
+            &Packets::Response(ResponsePacket::new(application_data)),
+            network_id,
+        )
+        .unwrap()
+        .into()
+    }
+
+    #[test]
+    fn discovered_servers_expire_with_their_address() {
+        let now = Instant::now();
+        let config = LanSignalerConfig::default();
+        let timeout = config.address_timeout;
+        let mut client = client(config);
+
+        client
+            .handle(LanSignalerInput::Datagram(
+                response_from(SERVER),
+                addr(7551),
+                now,
+            ))
+            .unwrap();
+        assert_eq!(client.discovered().len(), 1);
+
+        client
+            .handle(LanSignalerInput::Update(
+                now + timeout + Duration::from_secs(1),
+            ))
+            .unwrap();
+        assert!(client.discovered().is_empty());
+    }
+
+    #[test]
+    fn discovered_servers_stop_at_max_discovered() {
+        let now = Instant::now();
+        let mut client = client(LanSignalerConfig {
+            max_discovered: 2,
+            ..Default::default()
+        });
+
+        for network_id in 10..13 {
+            client
+                .handle(LanSignalerInput::Datagram(
+                    response_from(network_id),
+                    addr(7551),
+                    now,
+                ))
+                .unwrap();
+        }
+
+        assert_eq!(client.discovered().len(), 2);
+        assert!(!client.discovered().contains_key(&12));
     }
 }
