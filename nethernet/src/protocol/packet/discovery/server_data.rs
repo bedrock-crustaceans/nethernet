@@ -407,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v7_matches_go_nethernet_vector() {
+    fn test_v7_matches_the_known_encoding() {
         let vector: &[u8] = &[
             0x07, 0x06, b's', b'e', b'r', b'v', b'e', b'r', 0x8a, 0x22, 0x07, b'1', b'.', b'2',
             b'6', b'.', b'5', b'0', 0x05, b'w', b'o', b'r', b'l', b'd', 0x02, 0x10, 0x04, 0x00,
