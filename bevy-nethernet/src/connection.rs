@@ -62,6 +62,27 @@ where
         let _ = ack_rx.recv_blocking();
     }
 
+    #[cfg(test)]
+    pub(crate) fn detached() -> (Self, impl Fn() -> Vec<K>) {
+        let (command_tx, command_rx) = async_channel::unbounded();
+        let (_, event_rx) = async_channel::unbounded();
+        let removed = move || {
+            std::iter::from_fn(|| command_rx.try_recv().ok())
+                .filter_map(|command| match command {
+                    Command::Remove(id) => Some(id),
+                    _ => None,
+                })
+                .collect()
+        };
+        (
+            Self {
+                commands: command_tx,
+                events: event_rx,
+            },
+            removed,
+        )
+    }
+
     pub(crate) fn remove(&mut self, id: K) {
         let _ = self.commands.try_send(Command::Remove(id));
     }

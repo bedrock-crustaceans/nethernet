@@ -275,10 +275,12 @@ impl NetherServer {
             self.disconnect(&id);
         }
 
-        let establish = self.timeouts.establish();
-        self.sessions.retain(|_, entry| {
-            entry.ready || now.saturating_duration_since(entry.created) < establish
-        });
+        expire_unestablished(
+            &mut self.sessions,
+            &mut self.pool,
+            self.timeouts.establish(),
+            now,
+        );
     }
 
     fn handle_signal(&mut self, signal: Signal, now: Instant) {
@@ -353,5 +355,59 @@ impl NetherServer {
                 player: player.map(Arc::new),
             },
         );
+    }
+}
+
+fn expire_unestablished(
+    sessions: &mut HashMap<NetherSessionId, SessionEntry>,
+    pool: &mut SessionPool<NetherSessionId>,
+    establish: Duration,
+    now: Instant,
+) {
+    sessions.retain(|id, entry| {
+        let keep = entry.ready || now.saturating_duration_since(entry.created) < establish;
+        if !keep {
+            pool.remove(id.clone());
+        }
+        keep
+    });
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::*;
+
+    fn entry(ready: bool, created: Instant) -> SessionEntry {
+        SessionEntry {
+            ready,
+            created,
+            remote_addr: None,
+            rtt: None,
+            player: None,
+        }
+    }
+
+    fn id(connection_id: u64) -> NetherSessionId {
+        NetherSessionId {
+            network_id: "1".to_string(),
+            connection_id,
+        }
+    }
+
+    #[test]
+    fn unestablished_sessions_past_the_deadline_leave_the_pool() {
+        let now = Instant::now();
+        let establish = Duration::from_secs(5);
+        let (mut pool, removed) = SessionPool::detached();
+        let mut sessions = HashMap::new();
+        sessions.insert(id(1), entry(false, now - Duration::from_secs(10)));
+        sessions.insert(id(2), entry(true, now - Duration::from_secs(10)));
+        sessions.insert(id(3), entry(false, now));
+
+        expire_unestablished(&mut sessions, &mut pool, establish, now);
+
+        assert_eq!(removed(), vec![id(1)]);
+        assert!(!sessions.contains_key(&id(1)));
+        assert_eq!(sessions.len(), 2);
     }
 }
