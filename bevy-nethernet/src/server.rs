@@ -1,9 +1,11 @@
 //! LAN server: UDP discovery and signaling with sessions polled once per frame.
 use crate::connection::{ConnectionEvent, SessionPool};
+use crate::pending::{PendingLimits, admits_offer};
 use crate::socket::{bind_discovery_socket, bind_shared_socket, recv_discovery, send_discovery};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use nethernet::connection::{IceMode, Timeouts};
+use nethernet::error::SignalErrorCode;
 use nethernet::prelude::{
     Answered, LanSignaler, LanSignalerConfig, LanSignalerInput, LanSignalerOutput, OfferPolicy,
     PlayerInfo, Sans, ServerData, ServerIdentity, TokenTrust,
@@ -78,6 +80,7 @@ pub struct NetherServer {
     token_trust: Option<TokenTrust>,
     infer_peer_candidates: bool,
     timeouts: Timeouts,
+    pending_limits: PendingLimits,
     sessions: HashMap<NetherSessionId, SessionEntry>,
     received: VecDeque<(NetherSessionId, Box<[u8]>)>,
     received_unreliable: VecDeque<(NetherSessionId, Box<[u8]>)>,
@@ -107,6 +110,7 @@ impl NetherServer {
             token_trust: None,
             infer_peer_candidates: true,
             timeouts: Timeouts::default(),
+            pending_limits: PendingLimits::default(),
             sessions: HashMap::new(),
             received: VecDeque::new(),
             received_unreliable: VecDeque::new(),
@@ -135,6 +139,10 @@ impl NetherServer {
     /// Adds candidates from the signaling source address when an offer has no routable host candidate.
     pub fn set_infer_peer_candidates(&mut self, infer: bool) {
         self.infer_peer_candidates = infer;
+    }
+
+    pub fn set_pending_limits(&mut self, limits: PendingLimits) {
+        self.pending_limits = limits;
     }
 
     /// Replaces the data advertised to discovery requests.
@@ -298,6 +306,18 @@ impl NetherServer {
             connection_id: offer.connection_id,
         };
         if self.sessions.contains_key(&id) {
+            return;
+        }
+        let pending = self.sessions.iter().filter(|(_, entry)| !entry.ready);
+        let pending = pending.map(|(id, _)| id.network_id.as_str());
+        if !admits_offer(pending, &offer.network_id, self.pending_limits) {
+            tracing::debug!(
+                "Refusing offer from {}: pending offers exceed the limit",
+                offer.network_id
+            );
+            let code = SignalErrorCode::IncomingConnectionIgnored;
+            let signal = Signal::error(offer.connection_id, code, offer.network_id);
+            let _ = self.signaler.handle(LanSignalerInput::Signal(signal, now));
             return;
         }
 

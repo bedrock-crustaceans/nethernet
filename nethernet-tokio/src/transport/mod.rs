@@ -1,5 +1,6 @@
 //! Client and server connections over a signaling backend.
 pub mod client;
+mod pending;
 pub mod server;
 
 pub use client::NetherClient;
@@ -7,6 +8,7 @@ pub use nethernet::connection::Timeouts;
 pub use server::NetherServer;
 
 use nethernet::identity::{ServerIdentity, TokenTrust};
+use nethernet::protocol::constants::{DEFAULT_MAX_PENDING, DEFAULT_MAX_PENDING_PER_NETWORK_ID};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -45,6 +47,12 @@ pub struct ConnectionConfig {
 
     /// Adds candidates from the signaling source address when an offer has no routable host candidate.
     pub infer_peer_candidates: bool,
+
+    /// Offers answered but not yet established; more are refused with IncomingConnectionIgnored.
+    pub max_pending: usize,
+
+    /// The same cap for offers from one network id.
+    pub max_pending_per_network_id: usize,
 }
 
 impl Default for ConnectionConfig {
@@ -57,6 +65,8 @@ impl Default for ConnectionConfig {
             allow_unsigned_answers: false,
             token_trust: None,
             infer_peer_candidates: true,
+            max_pending: DEFAULT_MAX_PENDING,
+            max_pending_per_network_id: DEFAULT_MAX_PENDING_PER_NETWORK_ID,
         }
     }
 }
@@ -70,6 +80,11 @@ impl fmt::Debug for ConnectionConfig {
             .field("allow_unsigned_answers", &self.allow_unsigned_answers)
             .field("token_trust", &self.token_trust.is_some())
             .field("infer_peer_candidates", &self.infer_peer_candidates)
+            .field("max_pending", &self.max_pending)
+            .field(
+                "max_pending_per_network_id",
+                &self.max_pending_per_network_id,
+            )
             .finish()
     }
 }

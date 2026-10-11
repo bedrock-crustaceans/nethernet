@@ -30,3 +30,9 @@ pub const RELIABLE_CHANNEL: &str = "ReliableDataChannel";
 pub const UNRELIABLE_CHANNEL: &str = "UnreliableDataChannel";
 
 pub const DEFAULT_PACKET_CHANNEL_CAPACITY: usize = 1024;
+
+/// Offers a server answers before any of them establishes.
+pub const DEFAULT_MAX_PENDING: usize = 64;
+
+/// Unestablished offers a server answers from one network id.
+pub const DEFAULT_MAX_PENDING_PER_NETWORK_ID: usize = 4;

@@ -44,6 +44,9 @@ pub enum NetherError {
     #[error("Connection closed")]
     ConnectionClosed,
 
+    #[error("Pending offers from {0} exceed the limit")]
+    PendingCountExceeded(String),
+
     #[error("Data channel error: {0}")]
     DataChannel(String),
 

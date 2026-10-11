@@ -2,6 +2,7 @@
 use crate::connection::{ConnectionEvent, SessionPool};
 use crate::http_stream::{Drain, HttpStream, ServerTls, Shutdown};
 use crate::http_wire;
+use crate::pending::{PendingLimits, admits_offer};
 use crate::server::NetherSessionId;
 use crate::socket::bind_shared_socket;
 use crate::tcp_wire::Inbound;
@@ -102,6 +103,7 @@ pub struct NetherHttpServer {
     allow_unsigned_answers: bool,
     warned_unsigned_answers: bool,
     infer_peer_candidates: bool,
+    pending_limits: PendingLimits,
     timeouts: Timeouts,
     idle_timeout: Duration,
     tls: ServerTls,
@@ -137,6 +139,7 @@ impl NetherHttpServer {
             allow_unsigned_answers: false,
             warned_unsigned_answers: false,
             infer_peer_candidates: true,
+            pending_limits: PendingLimits::default(),
             timeouts: Timeouts::default(),
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             tls: ServerTls::default(),
@@ -176,6 +179,10 @@ impl NetherHttpServer {
 
     pub fn set_timeouts(&mut self, timeouts: Timeouts) {
         self.timeouts = timeouts;
+    }
+
+    pub fn set_pending_limits(&mut self, limits: PendingLimits) {
+        self.pending_limits = limits;
     }
 
     /// Adds candidates from the request's source address when an offer has no routable host candidate.
@@ -473,6 +480,20 @@ impl NetherHttpServer {
                 tracing::warn!("answering joins without an identity; vanilla clients refuse these");
             }
         }
+        let pending = self.sessions.iter().filter(|(_, entry)| !entry.ready);
+        let pending = pending.map(|(id, _)| id.network_id.as_str());
+        if !admits_offer(pending, &offer.network_id, self.pending_limits) {
+            tracing::debug!(
+                "Refusing offer from {}: pending offers exceed the limit",
+                offer.network_id
+            );
+            let _ = self.signaler.handle(HttpSignalerInput::Reject {
+                connection_id: offer.connection_id,
+                reason: RejectReason::Unavailable,
+            });
+            return;
+        }
+
         let mut policy = OfferPolicy::new(IceMode::Full)
             .with_inferred_peer_candidates(self.infer_peer_candidates);
         if let Some(identity) = &self.identity {

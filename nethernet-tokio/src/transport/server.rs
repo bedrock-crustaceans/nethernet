@@ -3,6 +3,7 @@ use crate::error::{NetherError, Result, SignalErrorCode};
 use crate::protocol::{Signal, SignalType};
 use crate::session::{AcceptedSession, Command, Session};
 use crate::signaling::ServerSignaling;
+use crate::transport::pending::PendingOffers;
 use crate::transport::{ConnectionConfig, local_bind_addr};
 use futures::{Stream, StreamExt};
 use nethernet::admission::OfferPolicy;
@@ -85,6 +86,7 @@ impl NetherServer {
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut dispatchers: SignalDispatchers = HashMap::new();
+            let pending = PendingOffers::default();
             let mut signals = signaling.signals();
 
             loop {
@@ -103,6 +105,7 @@ impl NetherServer {
                                             &signaling,
                                             &incoming_tx,
                                             &mut dispatchers,
+                                            &pending,
                                             config.clone(),
                                         )
                                         .await
@@ -133,6 +136,7 @@ impl NetherServer {
         signaling: &ServerSignaling,
         incoming_tx: &mpsc::UnboundedSender<AcceptedSession>,
         dispatchers: &mut SignalDispatchers,
+        pending: &PendingOffers,
         config: ConnectionConfig,
     ) -> Result<()> {
         let connection_id = signal.connection_id;
@@ -141,7 +145,7 @@ impl NetherServer {
         let cancel_token = config.cancel_token.clone();
         let result = tokio::select! {
             _ = cancel_token.cancelled() => Err((None, NetherError::ConnectionClosed)),
-            result = Self::answer_offer(signal, signaling, incoming_tx, dispatchers, config.clone()) => result,
+            result = Self::answer_offer(signal, signaling, incoming_tx, dispatchers, pending, config.clone()) => result,
         };
 
         match result {
@@ -160,8 +164,22 @@ impl NetherServer {
         signaling: &ServerSignaling,
         incoming_tx: &mpsc::UnboundedSender<AcceptedSession>,
         dispatchers: &mut SignalDispatchers,
+        pending: &PendingOffers,
         config: ConnectionConfig,
     ) -> std::result::Result<(), (Option<SignalErrorCode>, NetherError)> {
+        let slot = pending
+            .try_admit(
+                &signal.network_id,
+                config.max_pending,
+                config.max_pending_per_network_id,
+            )
+            .ok_or_else(|| {
+                (
+                    Some(SignalErrorCode::IncomingConnectionIgnored),
+                    NetherError::PendingCountExceeded(signal.network_id.clone()),
+                )
+            })?;
+
         let remote_address = signaling
             .remote_address(&Addr::new(signal.network_id.clone(), signal.connection_id))
             .await;
@@ -252,6 +270,7 @@ impl NetherServer {
                 _ = cancel_token.cancelled() => Err((None, NetherError::ConnectionClosed)),
                 result = wait_ready(ready_rx, config.timeouts.establish()) => result,
             };
+            drop(slot);
 
             match result {
                 Ok(()) => {

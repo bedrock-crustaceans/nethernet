@@ -2,6 +2,7 @@
 mod connection;
 mod http_stream;
 mod http_wire;
+mod pending;
 mod socket;
 mod tcp_wire;
 
@@ -19,6 +20,7 @@ pub mod prelude {
     pub use crate::http_server::{
         NetherHttpServer, NetherHttpServerEvent, NetherHttpServerPlugin, NetherHttpServerSet,
     };
+    pub use crate::pending::PendingLimits;
     pub use crate::server::{
         NetherServer, NetherServerEvent, NetherServerPlugin, NetherServerSet, NetherSessionId,
     };
