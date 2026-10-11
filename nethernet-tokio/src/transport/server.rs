@@ -97,6 +97,7 @@ impl NetherServer {
                             Some(signal) => {
                                 match signal.signal_type {
                                     SignalType::Offer => {
+                                        dispatchers.retain(|_, tx| !tx.is_closed());
                                         if let Err(e) = Self::handle_offer(
                                             signal,
                                             &signaling,
@@ -111,8 +112,10 @@ impl NetherServer {
                                     }
                                     SignalType::Answer | SignalType::Candidate | SignalType::Error => {
                                         let key = (signal.network_id.clone(), signal.connection_id);
-                                        if let Some(tx) = dispatchers.get(&key) {
-                                            let _ = tx.send(signal);
+                                        if let Some(tx) = dispatchers.get(&key)
+                                            && tx.send(signal).is_err()
+                                        {
+                                            dispatchers.remove(&key);
                                         }
                                     }
                                 }
@@ -236,7 +239,10 @@ impl NetherServer {
 
         let (signal_tx, signal_rx) = mpsc::unbounded_channel();
         dispatchers.insert(key, signal_tx);
-        spawn_late_signal_forwarder(signal_rx, session.signal_sender());
+        let closed = session.clone();
+        spawn_late_signal_forwarder(signal_rx, session.signal_sender(), async move {
+            closed.closed().await
+        });
 
         let incoming_tx = incoming_tx.clone();
         let signaling = signaling.clone();
@@ -257,6 +263,9 @@ impl NetherServer {
                 }
                 Err((code, e)) => {
                     tracing::debug!("Failed to establish incoming connection: {}", e);
+                    if let Err(e) = session.close().await {
+                        tracing::debug!("Failed to close the unestablished session: {}", e);
+                    }
                     if let Some(code) = code {
                         signal_error(&signaling, connection_id, network_id, code).await;
                     }
@@ -301,9 +310,18 @@ impl NetherServer {
 fn spawn_late_signal_forwarder(
     mut signals: mpsc::UnboundedReceiver<Signal>,
     command_tx: mpsc::UnboundedSender<Command>,
+    closed: impl Future<Output = ()> + Send + 'static,
 ) {
     tokio::spawn(async move {
-        while let Some(signal) = signals.recv().await {
+        tokio::pin!(closed);
+        loop {
+            let signal = tokio::select! {
+                _ = &mut closed => break,
+                signal = signals.recv() => match signal {
+                    Some(signal) => signal,
+                    None => break,
+                },
+            };
             if signal.signal_type != SignalType::Candidate {
                 continue;
             }
@@ -340,5 +358,29 @@ impl Stream for NetherServer {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.get_mut().incoming.poll_recv(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn forwarder_stops_when_its_session_closes() {
+        let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let session_closed = CancellationToken::new();
+        spawn_late_signal_forwarder(
+            signal_rx,
+            command_tx,
+            session_closed.clone().cancelled_owned(),
+        );
+
+        session_closed.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), signal_tx.closed())
+            .await
+            .expect("the forwarder should drop its receiver once the session closes");
     }
 }
