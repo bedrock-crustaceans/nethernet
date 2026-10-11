@@ -778,7 +778,7 @@ mod tests {
     fn an_offer_signed_by_the_wrong_issuer_is_refused() {
         let keys = crate::identity::jwk::JwkSet::default();
         let mut signaler = signaler(HttpSignalerConfig {
-            token_trust: Some(TokenTrust::Minecraft(keys)),
+            token_trust: Some(TokenTrust::Minecraft(keys.into())),
             ..Default::default()
         });
         connect(&mut signaler, 1, "127.0.0.1:1000");

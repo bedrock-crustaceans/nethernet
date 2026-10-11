@@ -16,7 +16,7 @@ pub mod prelude {
     pub use crate::identity::{
         Identity, PlayerInfo, ServerIdentity, TokenTrust,
         error::IdentityError,
-        jwk::{Jwk, JwkSet},
+        jwk::{Jwk, JwkSet, MinecraftKeys},
         jwt::Claims,
     };
     pub use crate::protocol::packet::discovery::{

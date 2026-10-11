@@ -1,7 +1,7 @@
 //! Authentication of the token in a received assertion.
 use crate::identity::envelope::{EMPTY_FINGERPRINTS, Identity, canonical_fingerprint_json};
 use crate::identity::error::{IdentityError, Result};
-use crate::identity::jwk::JwkSet;
+use crate::identity::jwk::MinecraftKeys;
 use crate::identity::jwt::{Claims, Jws};
 use crate::identity::{MINECRAFT_AUDIENCE, MINECRAFT_ISSUER};
 use std::time::SystemTime;
@@ -10,7 +10,7 @@ use std::time::SystemTime;
 #[derive(Debug, Clone)]
 pub enum TokenTrust {
     /// RS256 token signed by a key in the set, with the Minecraft issuer and audience.
-    Minecraft(JwkSet),
+    Minecraft(MinecraftKeys),
 
     /// Any well-formed unexpired token; signature, issuer and audience are not checked.
     Any,
@@ -34,8 +34,10 @@ impl TokenTrust {
             )));
         }
 
-        let candidates = keys.candidates(jws.header.kid.as_deref());
+        let keys_now = keys.snapshot();
+        let candidates = keys_now.candidates(jws.header.kid.as_deref());
         if candidates.is_empty() {
+            keys.mark_missed();
             return Err(IdentityError::Untrusted(
                 "the token names a key that is not published".to_string(),
             ));

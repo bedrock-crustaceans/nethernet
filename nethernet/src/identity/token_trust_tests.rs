@@ -1,5 +1,5 @@
 use super::*;
-use crate::identity::jwk::{Jwk, JwkSet};
+use crate::identity::jwk::{Jwk, JwkSet, MinecraftKeys};
 use crate::identity::{Assertion, Idp, PlayerInfo};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -51,15 +51,21 @@ fn key(json: &str) -> Jwk {
 }
 
 fn both_keys() -> TokenTrust {
-    TokenTrust::Minecraft(JwkSet {
-        keys: vec![key(KEY_ONE), key(KEY_TWO)],
-    })
+    TokenTrust::Minecraft(
+        JwkSet {
+            keys: vec![key(KEY_ONE), key(KEY_TWO)],
+        }
+        .into(),
+    )
 }
 
 fn first_key_only() -> TokenTrust {
-    TokenTrust::Minecraft(JwkSet {
-        keys: vec![key(KEY_ONE)],
-    })
+    TokenTrust::Minecraft(
+        JwkSet {
+            keys: vec![key(KEY_ONE)],
+        }
+        .into(),
+    )
 }
 
 fn identity(token: &str, fingerprints: &str) -> Identity {
@@ -118,6 +124,21 @@ fn player_info_carries_the_xuid_and_display_name_of_a_trusted_token() {
 }
 
 #[test]
+fn a_token_naming_an_unpublished_key_flags_the_shared_set_for_refresh() {
+    let keys = MinecraftKeys::default();
+    let trust = TokenTrust::Minecraft(keys.clone());
+
+    assert!(claims_of(VALID_TOKEN, &trust).is_err());
+    assert!(keys.take_missed());
+    assert!(!keys.take_missed());
+
+    keys.replace(JwkSet {
+        keys: vec![key(KEY_ONE)],
+    });
+    assert!(claims_of(VALID_TOKEN, &trust).is_ok());
+}
+
+#[test]
 fn a_token_without_a_kid_is_tried_against_every_key() {
     assert!(claims_of(NO_KID, &first_key_only()).is_ok());
     assert!(claims_of(NO_KID_SECOND_KEY, &both_keys()).is_ok());
@@ -141,9 +162,12 @@ fn a_token_naming_an_unpublished_kid_is_refused() {
 
 #[test]
 fn a_token_whose_kid_selects_only_another_key_is_refused() {
-    let trust = TokenTrust::Minecraft(JwkSet {
-        keys: vec![key(KEY_TWO)],
-    });
+    let trust = TokenTrust::Minecraft(
+        JwkSet {
+            keys: vec![key(KEY_TWO)],
+        }
+        .into(),
+    );
 
     assert_eq!(
         refusal(VALID_TOKEN, &trust),
@@ -260,7 +284,12 @@ fn an_offer_with_a_tampered_token_is_refused_before_its_fingerprints_are_checked
 fn an_offer_with_a_trusted_token_but_no_published_keys_is_refused() {
     let sdp = offer(VALID_TOKEN, FINGERPRINT_SIGNATURE, FINGERPRINT_LINE);
 
-    let error = validate_sdp(&sdp, &TokenTrust::Minecraft(JwkSet::default()), now()).unwrap_err();
+    let error = validate_sdp(
+        &sdp,
+        &TokenTrust::Minecraft(MinecraftKeys::default()),
+        now(),
+    )
+    .unwrap_err();
 
     assert!(matches!(error, IdentityError::Untrusted(_)));
 }

@@ -8,6 +8,8 @@ use rsa::sha2::Sha256;
 use rsa::signature::Verifier;
 use rsa::{BoxedUint, RsaPublicKey};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct JwkSet {
@@ -44,6 +46,51 @@ impl JwkSet {
 
     pub fn contains(&self, kid: &str) -> bool {
         self.keys.iter().any(|key| key.kid.as_deref() == Some(kid))
+    }
+}
+
+/// A key set shared by every clone, so a refresh reaches validators already running.
+///
+/// A lookup that finds no key for a token's `kid` flags the set; whoever refreshes
+/// it (the tokio `Jwks` handle, or the application) polls [`take_missed`](Self::take_missed).
+#[derive(Debug, Clone, Default)]
+pub struct MinecraftKeys {
+    keys: Arc<RwLock<JwkSet>>,
+    missed: Arc<AtomicBool>,
+}
+
+impl MinecraftKeys {
+    pub fn new(keys: JwkSet) -> Self {
+        Self {
+            keys: Arc::new(RwLock::new(keys)),
+            missed: Arc::default(),
+        }
+    }
+
+    pub fn snapshot(&self) -> JwkSet {
+        self.keys
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn replace(&self, keys: JwkSet) {
+        *self.keys.write().unwrap_or_else(PoisonError::into_inner) = keys;
+    }
+
+    /// Whether a token named an unpublished key since the last call.
+    pub fn take_missed(&self) -> bool {
+        self.missed.swap(false, Ordering::AcqRel)
+    }
+
+    pub(crate) fn mark_missed(&self) {
+        self.missed.store(true, Ordering::Release);
+    }
+}
+
+impl From<JwkSet> for MinecraftKeys {
+    fn from(keys: JwkSet) -> Self {
+        Self::new(keys)
     }
 }
 
