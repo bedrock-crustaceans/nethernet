@@ -1,6 +1,8 @@
 //! Data-channel message framing: segmentation and reassembly (guide section 6.1).
 use crate::error::{ProtocolError, Result};
 use crate::protocol::constants::MAX_MESSAGE_SIZE;
+
+const MAX_REASSEMBLED_SIZE: usize = 256 * MAX_MESSAGE_SIZE;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 /// One data-channel payload: a count of segments still to come, then the bytes.
@@ -66,8 +68,6 @@ impl Message {
                 segment.remaining_segments.checked_add(1).ok_or_else(|| {
                     ProtocolError::MessageParse("segment count out of range".to_string())
                 })?;
-            let estimated = self.expected_segments as usize * MAX_MESSAGE_SIZE;
-            self.data.reserve(estimated);
         }
 
         if self.expected_segments > 0 {
@@ -81,6 +81,13 @@ impl Message {
                 )));
             }
             self.expected_segments -= 1;
+        }
+
+        let size = self.data.len() + segment.data.len();
+        if size > MAX_REASSEMBLED_SIZE {
+            self.data = BytesMut::new();
+            self.expected_segments = 0;
+            return Err(ProtocolError::MessageSizeExceeded(size));
         }
 
         self.data.put(segment.data);
@@ -219,19 +226,25 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_efficient_allocation() {
-        let segment_data = Bytes::from(vec![0u8; 100]);
+    fn first_segment_does_not_reserve_from_the_peer_count() {
         let mut message = Message::new();
+        message
+            .add_segment(MessageSegment::new(254, Bytes::from_static(b"a")))
+            .unwrap();
+        assert!(message.data.capacity() < MAX_MESSAGE_SIZE);
+    }
 
-        let segment = MessageSegment::new(9, segment_data.clone());
-        message.add_segment(segment).unwrap();
-
-        let capacity = message.data.capacity();
-        assert!(capacity >= 1000, "Capacity {} too small", capacity);
-        assert!(
-            capacity <= 10 * MAX_MESSAGE_SIZE,
-            "Capacity {} too large (over-allocation)",
-            capacity
-        );
+    #[test]
+    fn reassembly_past_the_total_cap_is_refused() {
+        let mut message = Message::new();
+        let big = Bytes::from(vec![0u8; 1 << 20]);
+        let results: Vec<_> = (0..3u8)
+            .map(|i| message.add_segment(MessageSegment::new(254 - i, big.clone())))
+            .collect();
+        assert!(matches!(
+            results.last(),
+            Some(Err(ProtocolError::MessageSizeExceeded(_)))
+        ));
+        assert!(message.data.is_empty());
     }
 }
