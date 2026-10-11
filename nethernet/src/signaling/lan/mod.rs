@@ -4,11 +4,11 @@ pub mod error;
 pub mod input;
 pub mod output;
 
-use crate::protocol::Signal;
 use crate::protocol::codec::NetherCodec;
 use crate::protocol::packet::discovery::{
     MessagePacket, Packets, RequestPacket, ResponsePacket, ServerData, decode, encode,
 };
+use crate::protocol::{Signal, SignalType};
 use crate::sans::Sans;
 use config::LanSignalerConfig;
 use error::LanSignalerError;
@@ -200,11 +200,12 @@ impl LanSignaler {
         self.send_signal(&signal, target)?;
 
         if self.config.signal_retries > 0 {
+            let next_send = now + retry_interval(&self.config, &signal);
             self.pending.push(PendingSignal {
                 signal,
                 target,
                 attempts: 1,
-                next_send: now + self.config.signal_retry_interval,
+                next_send,
             });
         }
 
@@ -239,7 +240,7 @@ impl LanSignaler {
 
     fn retransmit(&mut self, now: Instant) -> Result<(), LanSignalerError> {
         let retries = self.config.signal_retries;
-        let interval = self.config.signal_retry_interval;
+        let config = &self.config;
 
         let mut due = Vec::new();
         self.pending.retain_mut(|pending| {
@@ -252,7 +253,7 @@ impl LanSignaler {
 
             due.push((pending.signal.clone(), pending.target));
             pending.attempts += 1;
-            pending.next_send = now + interval;
+            pending.next_send = now + retry_interval(config, &pending.signal);
             true
         });
 
@@ -321,6 +322,13 @@ impl LanSignaler {
         }
 
         wait
+    }
+}
+
+fn retry_interval(config: &LanSignalerConfig, signal: &Signal) -> Duration {
+    match signal.signal_type {
+        SignalType::Offer => config.offer_retry_interval,
+        _ => config.signal_retry_interval,
     }
 }
 
@@ -464,7 +472,7 @@ mod tests {
         let now = Instant::now();
         let config = LanSignalerConfig {
             signal_retries: 2,
-            signal_retry_interval: Duration::from_millis(100),
+            offer_retry_interval: Duration::from_millis(100),
             ..Default::default()
         };
         let mut client = client(config);
@@ -494,6 +502,55 @@ mod tests {
             .unwrap();
         assert!(datagrams(&mut client).is_empty());
         assert_eq!(client.pending_signals(), 0);
+    }
+
+    fn client_knowing_the_server(now: Instant) -> LanSignaler {
+        let mut client = client(LanSignalerConfig::default());
+        let request = encode(&Packets::Request(RequestPacket), SERVER).unwrap();
+        client
+            .handle(LanSignalerInput::Datagram(request.into(), addr(7551), now))
+            .unwrap();
+        let _ = datagrams(&mut client);
+        client
+    }
+
+    fn resent_by(client: &mut LanSignaler, at: Instant) -> usize {
+        client.handle(LanSignalerInput::Update(at)).unwrap();
+        datagrams(client).len()
+    }
+
+    #[test]
+    fn an_offer_is_first_resent_after_two_seconds() {
+        let now = Instant::now();
+        let mut client = client_knowing_the_server(now);
+
+        client
+            .handle(LanSignalerInput::Signal(
+                Signal::offer(42, "sdp".to_string(), SERVER.to_string()),
+                now,
+            ))
+            .unwrap();
+        assert_eq!(datagrams(&mut client).len(), 1);
+
+        assert_eq!(resent_by(&mut client, now + Duration::from_millis(500)), 0);
+        assert_eq!(resent_by(&mut client, now + Duration::from_millis(1999)), 0);
+        assert_eq!(resent_by(&mut client, now + Duration::from_secs(2)), 1);
+    }
+
+    #[test]
+    fn a_candidate_is_resent_at_the_signal_retry_interval() {
+        let now = Instant::now();
+        let mut client = client_knowing_the_server(now);
+
+        client
+            .handle(LanSignalerInput::Signal(
+                Signal::candidate(42, "candidate".to_string(), SERVER.to_string()),
+                now,
+            ))
+            .unwrap();
+        assert_eq!(datagrams(&mut client).len(), 1);
+
+        assert_eq!(resent_by(&mut client, now + Duration::from_millis(500)), 1);
     }
 
     #[test]
