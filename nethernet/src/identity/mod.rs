@@ -13,7 +13,7 @@ pub use envelope::{
 };
 pub use player::PlayerInfo;
 pub use server::ServerIdentity;
-pub use trust::{TokenTrust, validate_sdp};
+pub use trust::{TokenTrust, validate_sdp, verify_answer};
 
 /// Endpoint publishing the JWKS that signs Minecraft multiplayer tokens.
 pub const MINECRAFT_KEYS_URL: &str =

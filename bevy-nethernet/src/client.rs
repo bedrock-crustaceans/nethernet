@@ -4,9 +4,10 @@ use crate::socket::{bind_shared_socket, recv_discovery};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use nethernet::connection::{Connection, IceMode, Timeouts};
+use nethernet::identity::verify_answer;
 use nethernet::prelude::{
     LanSignaler, LanSignalerConfig, LanSignalerInput, LanSignalerOutput, Sans, ServerData,
-    ServerIdentity,
+    ServerIdentity, SignalErrorCode, TokenTrust,
 };
 use nethernet::protocol::constants::{LAN_DISCOVERY_PORT, MAX_DATAGRAM_SIZE};
 use nethernet::protocol::{Signal, SignalType};
@@ -71,6 +72,7 @@ pub struct NetherClient {
     remote_addr: Option<SocketAddr>,
     rtt: Option<Duration>,
     identity: Option<ServerIdentity>,
+    server_trust: Option<TokenTrust>,
     received: VecDeque<Box<[u8]>>,
     received_unreliable: VecDeque<Box<[u8]>>,
     events: VecDeque<NetherClientEvent>,
@@ -114,6 +116,7 @@ impl NetherClient {
             remote_addr: None,
             rtt: None,
             identity: None,
+            server_trust: None,
             received: VecDeque::new(),
             received_unreliable: VecDeque::new(),
             events: VecDeque::new(),
@@ -128,6 +131,12 @@ impl NetherClient {
     /// Signs outgoing offers with this identity.
     pub fn set_identity(&mut self, identity: ServerIdentity) {
         self.identity = Some(identity);
+    }
+
+    /// How the server's answer is authenticated; `None`, the default, accepts any answer.
+    /// When set, an answer without a valid identity ends the attempt with Disconnected.
+    pub fn set_server_trust(&mut self, trust: Option<TokenTrust>) {
+        self.server_trust = trust;
     }
 
     pub fn set_timeouts(&mut self, timeouts: Timeouts) {
@@ -313,6 +322,25 @@ impl NetherClient {
 
     fn handle_signal(&mut self, signal: Signal, now: Instant) {
         if signal.signal_type == SignalType::Offer || !self.connected {
+            return;
+        }
+        if signal.signal_type == SignalType::Answer
+            && let Err(e) =
+                verify_answer(&signal.data, self.server_trust.as_ref(), SystemTime::now())
+        {
+            tracing::debug!("refusing an answer with an invalid identity: {e}");
+            if !self.answered && self.connecting_deadline.is_some() {
+                let refusal = Signal::error(
+                    signal.connection_id,
+                    SignalErrorCode::FailedToSetRemoteDescription,
+                    self.target.to_string(),
+                );
+                let _ = self.signaler.handle(LanSignalerInput::Signal(refusal, now));
+                self.connecting_deadline = None;
+                self.pool.remove(());
+                self.connected = false;
+                self.events.push_back(NetherClientEvent::Disconnected);
+            }
             return;
         }
         if signal.signal_type == SignalType::Answer

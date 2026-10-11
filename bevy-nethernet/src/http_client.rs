@@ -9,6 +9,7 @@ use bevy_ecs::prelude::*;
 use bevy_platform::cell::SyncCell;
 use nethernet::connection::{Connection, ConnectionInput, IceMode, Timeouts};
 use nethernet::error::ProtocolError;
+use nethernet::identity::{TokenTrust, verify_answer};
 use nethernet::prelude::ServerData;
 use nethernet::prelude::ServerIdentity;
 use nethernet::protocol::Signal;
@@ -222,6 +223,7 @@ pub struct NetherHttpClient {
     remote_addr: Option<SocketAddr>,
     rtt: Option<Duration>,
     identity: Option<ServerIdentity>,
+    server_trust: Option<TokenTrust>,
     tls: ClientTls,
     events: VecDeque<NetherHttpClientEvent>,
     received: VecDeque<Box<[u8]>>,
@@ -245,6 +247,7 @@ impl Default for NetherHttpClient {
             remote_addr: None,
             rtt: None,
             identity: None,
+            server_trust: None,
             tls: ClientTls::default(),
             events: VecDeque::new(),
             received: VecDeque::new(),
@@ -260,6 +263,12 @@ impl NetherHttpClient {
 
     pub fn set_identity(&mut self, identity: ServerIdentity) {
         self.identity = Some(identity);
+    }
+
+    /// How the server's answer is authenticated; `None`, the default, accepts any answer.
+    /// When set, an answer without a valid identity ends the join with ConnectFailed.
+    pub fn set_server_trust(&mut self, trust: Option<TokenTrust>) {
+        self.server_trust = trust;
     }
 
     pub fn set_timeouts(&mut self, timeouts: Timeouts) {
@@ -454,8 +463,13 @@ impl NetherHttpClient {
                     join.state = state;
                     self.join = Some(join);
                 }
-                JoinStep::Done(code, body) => match join::validate_join_response(code, &body) {
-                    Ok(()) => {
+                JoinStep::Done(code, body) => match join::validate_join_response(code, &body)
+                    .map_err(|e| e.to_string())
+                    .and_then(|()| {
+                        verify_answer(&body, self.server_trust.as_ref(), SystemTime::now())
+                            .map_err(|e| format!("the answer's identity is invalid: {e}"))
+                    }) {
+                    Ok(_) => {
                         let Join {
                             connection,
                             local_ufrag,

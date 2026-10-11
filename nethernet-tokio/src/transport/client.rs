@@ -7,6 +7,7 @@ use crate::transport::{ConnectionConfig, local_bind_addr};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use nethernet::connection::{Connection as SansConnection, ConnectionInput, IceMode};
+use nethernet::identity::{TokenTrust, verify_answer};
 use nethernet::sans::Sans;
 use nethernet::session::Session as SansSession;
 use rand::Rng;
@@ -25,6 +26,21 @@ pub(crate) fn parse_error_code(data: &str) -> SignalErrorCode {
         SignalErrorCode::SignalingUnknownError,
         SignalErrorCode::from,
     )
+}
+
+fn check_answer(
+    answer: &Signal,
+    server_trust: Option<&TokenTrust>,
+    now: SystemTime,
+) -> std::result::Result<(), (Option<SignalErrorCode>, NetherError)> {
+    verify_answer(&answer.data, server_trust, now)
+        .map(|_| ())
+        .map_err(|e| {
+            (
+                Some(SignalErrorCode::FailedToSetRemoteDescription),
+                NetherError::Identity(e),
+            )
+        })
 }
 
 fn spawn_late_signal_forwarder<St>(
@@ -226,6 +242,7 @@ impl NetherClient {
 
             match signal.signal_type {
                 SignalType::Answer => {
+                    check_answer(&signal, config.server_trust.as_ref(), SystemTime::now())?;
                     connection
                         .handle(ConnectionInput::Signal(signal, Instant::now()))
                         .map_err(|e| {
@@ -435,5 +452,48 @@ impl AsyncWrite for NetherClient {
         } else {
             Poll::Ready(Ok(()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nethernet::identity::ServerIdentity;
+
+    const ANSWER: &str = "v=0\r\n\
+        m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+        a=fingerprint:sha-256 AB:CD\r\n";
+
+    fn answer(data: String) -> Signal {
+        Signal::answer(1, data, "server".to_string())
+    }
+
+    #[test]
+    fn without_a_server_trust_an_unsigned_answer_is_accepted() {
+        assert!(check_answer(&answer(ANSWER.to_string()), None, SystemTime::now()).is_ok());
+    }
+
+    #[test]
+    fn with_a_server_trust_an_unsigned_answer_fails_the_dial() {
+        let (code, error) = check_answer(
+            &answer(ANSWER.to_string()),
+            Some(&TokenTrust::Any),
+            SystemTime::now(),
+        )
+        .unwrap_err();
+
+        assert_eq!(code, Some(SignalErrorCode::FailedToSetRemoteDescription));
+        assert!(matches!(error, NetherError::Identity(_)));
+    }
+
+    #[test]
+    fn with_a_server_trust_a_signed_answer_is_accepted() {
+        let now = SystemTime::now();
+        let signed = ServerIdentity::generate("example.com", now)
+            .unwrap()
+            .augment(ANSWER, now)
+            .unwrap();
+
+        assert!(check_answer(&answer(signed), Some(&TokenTrust::Any), now).is_ok());
     }
 }

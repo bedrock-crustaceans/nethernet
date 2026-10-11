@@ -87,6 +87,15 @@ pub fn validate_sdp(sdp: &str, trust: &TokenTrust, now: SystemTime) -> Result<Cl
     Ok(claims)
 }
 
+/// Checks a received answer against `trust` when one is set; without one every answer is accepted.
+pub fn verify_answer(
+    sdp: &str,
+    trust: Option<&TokenTrust>,
+    now: SystemTime,
+) -> Result<Option<Claims>> {
+    trust.map(|trust| validate_sdp(sdp, trust, now)).transpose()
+}
+
 #[cfg(test)]
 #[path = "token_trust_tests.rs"]
 mod token_trust_tests;
@@ -150,6 +159,45 @@ mod tests {
         let answer = answer.replace("a=identity:\r\n", "");
 
         assert!(validate_sdp(&answer, &TokenTrust::Any, later).is_ok());
+    }
+
+    #[test]
+    fn without_a_trust_any_answer_is_accepted() {
+        assert!(matches!(verify_answer(&offer(""), None, NOW), Ok(None)));
+    }
+
+    #[test]
+    fn with_a_trust_an_answer_without_an_identity_is_refused() {
+        let answer = offer("").replace("a=identity:\r\n", "");
+
+        let error = verify_answer(&answer, Some(&TokenTrust::Any), NOW).unwrap_err();
+
+        assert!(matches!(error, IdentityError::Missing));
+    }
+
+    #[test]
+    fn with_a_trust_a_signed_answer_yields_its_claims() {
+        let server = ServerIdentity::generate("example.com", NOW).unwrap();
+        let answer = server.augment(&offer(""), NOW).unwrap();
+        let answer = answer.replace("a=identity:\r\n", "");
+
+        let claims = verify_answer(&answer, Some(&TokenTrust::Any), NOW)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(claims.issuer(), Some("example.com"));
+    }
+
+    #[test]
+    fn a_self_signed_answer_is_refused_under_minecraft_trust() {
+        let server = ServerIdentity::generate("example.com", NOW).unwrap();
+        let answer = server.augment(&offer(""), NOW).unwrap();
+        let answer = answer.replace("a=identity:\r\n", "");
+        let trust = TokenTrust::Minecraft(Default::default());
+
+        let error = verify_answer(&answer, Some(&trust), NOW).unwrap_err();
+
+        assert!(matches!(error, IdentityError::Untrusted(_)));
     }
 
     #[test]
