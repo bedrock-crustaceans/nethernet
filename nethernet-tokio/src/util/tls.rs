@@ -3,7 +3,16 @@ use crate::error::{NetherError, Result};
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
+
+static PROVIDER: Once = Once::new();
+
+/// Installs ring as the process-wide rustls provider unless one already is; reqwest needs one.
+pub(crate) fn ensure_crypto_provider() {
+    PROVIDER.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
 
 pub async fn from_pem(
     certificate_chain: impl AsRef<Path>,

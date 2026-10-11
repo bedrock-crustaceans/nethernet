@@ -2,17 +2,15 @@
 use crate::error::{NetherError, Result};
 use crate::protocol::packet::discovery::ServerData;
 use crate::protocol::{Signal, SignalType};
+use crate::util::tls::ensure_crypto_provider;
 use futures::Stream;
 use nethernet::signaling::http::join;
 use reqwest::Client;
 use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 use std::pin::Pin;
-use std::sync::Once;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use url::Url;
-
-static PROVIDER: Once = Once::new();
 
 /// Posts offers to /v1/join/{network_id} on the target URL and delivers the reply as an answer signal.
 pub struct HttpSignaling {
@@ -24,9 +22,7 @@ pub struct HttpSignaling {
 impl HttpSignaling {
     /// Builds a client with a 15 second request timeout.
     pub fn new(network_id: String) -> Result<Self> {
-        PROVIDER.call_once(|| {
-            let _ = rustls::crypto::ring::default_provider().install_default();
-        });
+        ensure_crypto_provider();
 
         let client = Client::builder()
             .timeout(Duration::from_secs(15))

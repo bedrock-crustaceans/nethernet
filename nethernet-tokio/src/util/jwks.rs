@@ -1,5 +1,6 @@
 //! Cached Minecraft token signing keys.
 use crate::error::{NetherError, Result};
+use crate::util::tls::ensure_crypto_provider;
 use nethernet::identity::{MINECRAFT_KEYS_URL, TokenTrust};
 use nethernet::prelude::JwkSet;
 use reqwest::Client;
@@ -7,6 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
 const MIN_INTERVAL: Duration = Duration::from_secs(60);
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 enum Command {
     Keys(oneshot::Sender<JwkSet>),
@@ -26,7 +28,7 @@ pub struct Jwks {
 impl Jwks {
     /// Fetches the keys from the Minecraft multiplayer endpoint.
     pub async fn minecraft() -> Result<Self> {
-        Self::fetch(MINECRAFT_KEYS_URL, Client::new()).await
+        Self::fetch(MINECRAFT_KEYS_URL, client(FETCH_TIMEOUT)?).await
     }
 
     pub async fn fetch(url: impl Into<String>, client: Client) -> Result<Self> {
@@ -121,5 +123,39 @@ impl Jwks {
             .send(Command::Store(Box::new(keys), Instant::now()));
 
         Ok(())
+    }
+}
+
+fn client(timeout: Duration) -> Result<Client> {
+    ensure_crypto_provider();
+    Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| NetherError::Other(format!("create HTTP client: {}", e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn a_key_server_that_never_answers_times_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/keys", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            Jwks::fetch(url, client(Duration::from_millis(200)).unwrap()),
+        )
+        .await;
+
+        assert!(matches!(result, Ok(Err(_))), "the fetch did not give up");
     }
 }
