@@ -3,6 +3,10 @@ use rtc::stun::attributes::ATTR_USERNAME;
 use rtc::stun::message::{Message, is_stun_message};
 use rtc::stun::textattrs::Username;
 
+pub fn is_stun(datagram: &[u8]) -> bool {
+    is_stun_message(datagram)
+}
+
 /// The local half of a binding request's `USERNAME` (`local:remote`), `None` for any other datagram.
 pub fn local_ufrag(datagram: &[u8]) -> Option<String> {
     if !is_stun_message(datagram) {
@@ -36,6 +40,13 @@ mod tests {
     fn the_local_half_of_the_username_is_returned() {
         let datagram = binding_request("abcd:wxyz");
         assert_eq!(local_ufrag(&datagram).as_deref(), Some("abcd"));
+    }
+
+    #[test]
+    fn only_stun_datagrams_are_classified_as_stun() {
+        assert!(is_stun(&binding_request("abcd:wxyz")));
+        assert!(!is_stun(b"not a stun message"));
+        assert!(!is_stun(&[]));
     }
 
     #[test]

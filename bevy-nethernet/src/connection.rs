@@ -4,7 +4,7 @@ use nethernet::protocol::Signal;
 use nethernet::sans::Sans;
 use nethernet::session::{Channel, SessionEvent, SessionOutput};
 use nethernet::util::stun;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
@@ -122,8 +122,7 @@ fn drive<K: Eq + Hash + Clone>(
 ) {
     let mut buf = vec![0u8; 65536];
     let mut entries: HashMap<K, Entry> = HashMap::new();
-    let mut by_addr: HashMap<SocketAddr, K> = HashMap::new();
-    let mut by_ufrag: HashMap<String, K> = HashMap::new();
+    let mut router: Router<K> = Router::default();
 
     loop {
         let now = Instant::now();
@@ -141,16 +140,13 @@ fn drive<K: Eq + Hash + Clone>(
 
         match socket.recv_from(&mut buf) {
             Ok((len, from)) => {
-                let id = by_addr.get(&from).cloned().or_else(|| {
-                    stun::local_ufrag(&buf[..len]).and_then(|ufrag| by_ufrag.get(&ufrag).cloned())
-                });
-                if let Some(id) = id
-                    && let Some(entry) = entries.get_mut(&id)
-                {
-                    let now = Instant::now();
-                    let input = ConnectionInput::Packet(buf[..len].into(), from, now);
-                    if let Err(e) = entry.connection.handle(input) {
-                        tracing::debug!("packet handling error: {e}");
+                for id in router.route(from, &buf[..len]) {
+                    if let Some(entry) = entries.get_mut(&id) {
+                        let now = Instant::now();
+                        let input = ConnectionInput::Packet(buf[..len].into(), from, now);
+                        if let Err(e) = entry.connection.handle(input) {
+                            tracing::debug!("packet handling error: {e}");
+                        }
                     }
                 }
             }
@@ -161,7 +157,7 @@ fn drive<K: Eq + Hash + Clone>(
         loop {
             match commands.try_recv() {
                 Ok(Command::Add(id, connection, local_ufrag, ack)) => {
-                    by_ufrag.insert(local_ufrag.clone(), id.clone());
+                    router.register_ufrag(local_ufrag.clone(), id.clone());
                     entries.insert(
                         id,
                         Entry {
@@ -177,10 +173,7 @@ fn drive<K: Eq + Hash + Clone>(
                 }
                 Ok(Command::Remove(id)) => {
                     if let Some(entry) = entries.remove(&id) {
-                        by_ufrag.remove(&entry.local_ufrag);
-                        if let Some(addr) = entry.remote_addr {
-                            release_addr(&mut by_addr, addr, &id);
-                        }
+                        router.release(&id, &entry.local_ufrag, entry.remote_addr);
                     }
                 }
                 Ok(Command::Signal(id, signal)) => {
@@ -216,12 +209,15 @@ fn drive<K: Eq + Hash + Clone>(
                 && let Some(addr) = entry.connection.remote_addr()
             {
                 entry.remote_addr = Some(addr);
-                claim_addr(&mut by_addr, addr, id);
+                router.claim_addr(addr, id);
             }
 
             while let Some(output) = entry.connection.poll() {
                 match output {
                     SessionOutput::Send(data, to) => {
+                        if entry.remote_addr.is_none() {
+                            router.note_sent(to, id);
+                        }
                         let _ = socket.send_to(&data, to);
                     }
                     SessionOutput::Event(SessionEvent::Ready) => {
@@ -260,10 +256,7 @@ fn drive<K: Eq + Hash + Clone>(
 
         for id in failed {
             if let Some(entry) = entries.remove(&id) {
-                by_ufrag.remove(&entry.local_ufrag);
-                if let Some(addr) = entry.remote_addr {
-                    by_addr.remove(&addr);
-                }
+                router.release(&id, &entry.local_ufrag, entry.remote_addr);
             }
             if events.try_send((id, ConnectionEvent::Failed)).is_err() {
                 return;
@@ -272,19 +265,75 @@ fn drive<K: Eq + Hash + Clone>(
     }
 }
 
-fn claim_addr<K: Clone>(by_addr: &mut HashMap<SocketAddr, K>, addr: SocketAddr, id: &K) {
-    by_addr.entry(addr).or_insert_with(|| id.clone());
+struct Router<K> {
+    by_addr: HashMap<SocketAddr, K>,
+    provisional: HashMap<SocketAddr, HashSet<K>>,
+    by_ufrag: HashMap<String, K>,
 }
 
-fn release_addr<K: Eq>(by_addr: &mut HashMap<SocketAddr, K>, addr: SocketAddr, id: &K) {
-    if by_addr.get(&addr) == Some(id) {
-        by_addr.remove(&addr);
+impl<K> Default for Router<K> {
+    fn default() -> Self {
+        Self {
+            by_addr: HashMap::new(),
+            provisional: HashMap::new(),
+            by_ufrag: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Eq + Hash + Clone> Router<K> {
+    fn route(&self, from: SocketAddr, datagram: &[u8]) -> Vec<K> {
+        if let Some(id) = self.by_addr.get(&from) {
+            return vec![id.clone()];
+        }
+        if !stun::is_stun(datagram) {
+            return Vec::new();
+        }
+        if let Some(ufrag) = stun::local_ufrag(datagram)
+            && let Some(id) = self.by_ufrag.get(&ufrag)
+        {
+            return vec![id.clone()];
+        }
+        self.provisional
+            .get(&from)
+            .map(|ids| ids.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn register_ufrag(&mut self, ufrag: String, id: K) {
+        self.by_ufrag.insert(ufrag, id);
+    }
+
+    fn claim_addr(&mut self, addr: SocketAddr, id: &K) {
+        self.by_addr.entry(addr).or_insert_with(|| id.clone());
+    }
+
+    fn note_sent(&mut self, addr: SocketAddr, id: &K) {
+        self.provisional.entry(addr).or_default().insert(id.clone());
+    }
+
+    fn release(&mut self, id: &K, ufrag: &str, addr: Option<SocketAddr>) {
+        self.by_ufrag.remove(ufrag);
+        if let Some(addr) = addr
+            && self.by_addr.get(&addr) == Some(id)
+        {
+            self.by_addr.remove(&addr);
+        }
+        self.provisional.retain(|_, ids| {
+            ids.remove(id);
+            !ids.is_empty()
+        });
     }
 }
 
 #[cfg(test)]
 mod routing_tests {
     use super::*;
+    use nethernet::connection::IceMode;
+    use nethernet::session::Session;
+    use std::collections::VecDeque;
+
+    type Outbox = VecDeque<(SocketAddr, SocketAddr, Vec<u8>)>;
 
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], port))
@@ -292,22 +341,186 @@ mod routing_tests {
 
     #[test]
     fn a_second_session_cannot_take_a_claimed_address() {
-        let mut by_addr = HashMap::new();
-        claim_addr(&mut by_addr, addr(1), &"victim");
-        claim_addr(&mut by_addr, addr(1), &"hostile");
+        let mut router = Router::default();
+        router.claim_addr(addr(1), &"victim");
+        router.claim_addr(addr(1), &"hostile");
 
-        assert_eq!(by_addr.get(&addr(1)), Some(&"victim"));
+        assert_eq!(router.route(addr(1), &[]), vec!["victim"]);
     }
 
     #[test]
     fn removing_a_session_leaves_another_sessions_address() {
-        let mut by_addr = HashMap::new();
-        claim_addr(&mut by_addr, addr(1), &"victim");
-        release_addr(&mut by_addr, addr(1), &"hostile");
+        let mut router = Router::default();
+        router.claim_addr(addr(1), &"victim");
+        router.release(&"hostile", "x", Some(addr(1)));
 
-        assert_eq!(by_addr.get(&addr(1)), Some(&"victim"));
+        assert_eq!(router.route(addr(1), &[]), vec!["victim"]);
 
-        release_addr(&mut by_addr, addr(1), &"victim");
-        assert!(by_addr.is_empty());
+        router.release(&"victim", "y", Some(addr(1)));
+        assert_eq!(router.route(addr(1), &[]), Vec::<&str>::new());
+    }
+
+    const BINDING_RESPONSE: [u8; 20] = [
+        0x01, 0x01, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ];
+
+    fn sorted(mut ids: Vec<&'static str>) -> Vec<&'static str> {
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn a_hostile_session_that_noted_an_address_first_does_not_hide_the_reply_from_the_victim() {
+        let mut router = Router::default();
+        router.note_sent(addr(1), &"hostile");
+        router.note_sent(addr(1), &"victim");
+
+        let routed = sorted(router.route(addr(1), &BINDING_RESPONSE));
+        assert_eq!(routed, vec!["hostile", "victim"]);
+    }
+
+    #[test]
+    fn a_non_stun_datagram_from_a_provisional_address_reaches_no_session() {
+        let mut router = Router::default();
+        router.note_sent(addr(1), &"first");
+        router.note_sent(addr(1), &"second");
+
+        assert!(router.route(addr(1), b"dtls or sctp bytes").is_empty());
+    }
+
+    #[test]
+    fn a_selected_session_receives_non_stun_from_its_selected_address() {
+        let mut router = Router::default();
+        router.note_sent(addr(1), &"hostile");
+        router.claim_addr(addr(1), &"victim");
+
+        assert_eq!(router.route(addr(1), b"dtls or sctp bytes"), vec!["victim"]);
+    }
+
+    #[test]
+    fn releasing_a_session_removes_only_its_own_provisional_membership() {
+        let mut router = Router::default();
+        router.note_sent(addr(1), &"first");
+        router.note_sent(addr(1), &"second");
+
+        router.release(&"second", "x", None);
+        assert_eq!(router.route(addr(1), &BINDING_RESPONSE), vec!["first"]);
+        router.release(&"first", "y", None);
+        assert!(router.route(addr(1), &BINDING_RESPONSE).is_empty());
+        assert!(router.provisional.is_empty());
+    }
+
+    struct Peer {
+        connection: Connection,
+        router: Router<u8>,
+        selected: bool,
+        ready: bool,
+        local: SocketAddr,
+    }
+
+    impl Peer {
+        fn new(connection: Connection, ufrag: String, local: SocketAddr) -> Self {
+            let mut router = Router::default();
+            router.register_ufrag(ufrag, 0);
+            Self {
+                connection,
+                router,
+                selected: false,
+                ready: false,
+                local,
+            }
+        }
+
+        fn pump(&mut self, now: Instant, outbox: &mut Outbox) {
+            self.connection
+                .handle(ConnectionInput::Timeout(now))
+                .unwrap();
+            if !self.selected
+                && let Some(selected) = self.connection.remote_addr()
+            {
+                self.selected = true;
+                self.router.claim_addr(selected, &0);
+            }
+            while let Some(output) = self.connection.poll() {
+                match output {
+                    SessionOutput::Send(data, to) => {
+                        if !self.selected {
+                            self.router.note_sent(to, &0);
+                        }
+                        outbox.push_back((self.local, to, data));
+                    }
+                    SessionOutput::Event(SessionEvent::Ready) => self.ready = true,
+                    _ => {}
+                }
+            }
+        }
+
+        fn receive(&mut self, from: SocketAddr, data: Vec<u8>, now: Instant) {
+            if !self.router.route(from, &data).is_empty() {
+                let _ = self
+                    .connection
+                    .handle(ConnectionInput::Packet(data.into(), from, now));
+            }
+        }
+    }
+
+    #[test]
+    fn two_sessions_become_ready_through_the_shared_socket_routing() {
+        let mut now = Instant::now();
+        let (client_session, client_description) = Session::new(addr(40200), true, now).unwrap();
+        let client_ufrag = client_description.ice.ufrag.clone();
+        let (client, offers) = Connection::connect(
+            client_session,
+            client_description,
+            7,
+            "net".to_string(),
+            IceMode::Full,
+        );
+        let offer = offers.into_iter().next().unwrap();
+
+        let (server_session, server_description) = Session::new(addr(40201), false, now).unwrap();
+        let server_ufrag = server_description.ice.ufrag.clone();
+        let (remote_description, remote_candidates) = Connection::parse_offer(&offer).unwrap();
+        let (server, answers) = Connection::accept(
+            server_session,
+            server_description,
+            &offer,
+            remote_description,
+            remote_candidates,
+            IceMode::Full,
+            now,
+        )
+        .unwrap();
+        let answer = answers.into_iter().next().unwrap();
+
+        let mut client = Peer::new(client, client_ufrag, addr(40200));
+        client
+            .connection
+            .handle(ConnectionInput::Signal(answer, now))
+            .unwrap();
+        let mut server = Peer::new(server, server_ufrag, addr(40201));
+
+        let mut outbox = Outbox::new();
+        for _ in 0..5000 {
+            client.pump(now, &mut outbox);
+            server.pump(now, &mut outbox);
+            let progressed = !outbox.is_empty();
+            while let Some((from, to, data)) = outbox.pop_front() {
+                if to == client.local {
+                    client.receive(from, data, now);
+                } else {
+                    server.receive(from, data, now);
+                }
+            }
+            if client.ready && server.ready {
+                break;
+            }
+            if !progressed {
+                now += Duration::from_millis(5);
+            }
+        }
+
+        assert!(client.ready, "client never became ready");
+        assert!(server.ready, "server never became ready");
     }
 }
