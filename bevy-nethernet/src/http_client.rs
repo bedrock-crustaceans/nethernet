@@ -363,8 +363,9 @@ impl NetherHttpClient {
         let (target, addr) = Self::resolve(&server_url)?;
 
         let (session_socket, local_addr) = bind_shared_socket()?;
-        let (session, description) =
+        let (mut session, description) =
             Session::new(local_addr, true, Instant::now()).map_err(std::io::Error::other)?;
+        session.set_establish_deadline(self.timeouts.establish());
         let local_ufrag = description.ice.ufrag.clone();
 
         let connection_id = rand::random::<u64>();

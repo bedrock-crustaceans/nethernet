@@ -222,6 +222,7 @@ impl NetherServer {
         };
         let mut policy =
             OfferPolicy::new(ice_mode).with_inferred_peer_candidates(config.infer_peer_candidates);
+        policy = policy.with_establish_deadline(config.timeouts.establish());
         if let Some(identity) = &config.identity {
             policy = policy.with_identity(identity);
         }

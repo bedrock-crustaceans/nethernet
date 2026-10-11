@@ -169,8 +169,10 @@ impl NetherClient {
 
     fn begin_attempt(&mut self) -> std::io::Result<()> {
         self.attempts_left = self.attempts_left.saturating_sub(1);
-        let (session, description) = Session::new(self.session_local_addr, true, Instant::now())
-            .map_err(std::io::Error::other)?;
+        let (mut session, description) =
+            Session::new(self.session_local_addr, true, Instant::now())
+                .map_err(std::io::Error::other)?;
+        session.set_establish_deadline(self.timeouts.establish());
         let local_ufrag = description.ice.ufrag.clone();
 
         let connection_id = rand::random::<u64>();

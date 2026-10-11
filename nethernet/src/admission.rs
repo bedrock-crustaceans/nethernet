@@ -10,7 +10,7 @@ use crate::session::Session;
 use crate::util::candidate;
 use rtc::ice::candidate::Candidate;
 use std::net::SocketAddr;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use thiserror::Error;
 
 /// Why an offer was refused; `code` gives the signaling error code to send back.
@@ -50,6 +50,7 @@ pub struct OfferPolicy<'a> {
     token_trust: Option<&'a TokenTrust>,
     infer_peer_candidates: bool,
     ice_mode: IceMode,
+    establish_deadline: Option<Duration>,
 }
 
 impl<'a> OfferPolicy<'a> {
@@ -59,7 +60,14 @@ impl<'a> OfferPolicy<'a> {
             token_trust: None,
             infer_peer_candidates: false,
             ice_mode,
+            establish_deadline: None,
         }
+    }
+
+    /// Time an answered session has to become ready before it fails; the session default applies when unset.
+    pub fn with_establish_deadline(mut self, within: Duration) -> Self {
+        self.establish_deadline = Some(within);
+        self
     }
 
     pub fn with_identity(mut self, identity: &'a ServerIdentity) -> Self {
@@ -128,8 +136,11 @@ impl Admitted<'_> {
     }
 
     pub fn answer(self, local_addr: SocketAddr, now: Instant) -> Result<Answered, AdmissionError> {
-        let (session, description) =
+        let (mut session, description) =
             Session::new(local_addr, false, now).map_err(AdmissionError::Session)?;
+        if let Some(within) = self.policy.establish_deadline {
+            session.set_establish_deadline(within);
+        }
         let local_ufrag = description.ice.ufrag.clone();
         let (mut connection, mut signals) = Connection::accept(
             session,

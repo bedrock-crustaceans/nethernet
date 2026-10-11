@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 const RELIABLE_STREAM_ID: StreamId = 1;
 const MAX_EARLY_PACKETS: usize = 8;
 const UNRELIABLE_STREAM_ID: StreamId = 3;
+const DEFAULT_ESTABLISH_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Reliable messages are segmented; unreliable ones must fit one segment (guide section 6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +37,7 @@ pub enum Channel {
 pub enum SessionEvent {
     /// Both data channels are open.
     Ready,
-    /// ICE or SCTP failed; emitted once.
+    /// ICE or SCTP failed, or the session did not become ready in time; emitted once.
     Failed,
 }
 
@@ -108,6 +109,8 @@ pub struct Session {
 
     channels: Channels,
     output: VecDeque<SessionOutput>,
+    establish_within: Duration,
+    establish_started: Option<Instant>,
 }
 
 pub use dtls::DtlsLayer;
@@ -148,9 +151,16 @@ impl Session {
             sctp: None,
             channels: Channels::default(),
             output: VecDeque::new(),
+            establish_within: DEFAULT_ESTABLISH_DEADLINE,
+            establish_started: None,
         };
 
         Ok((session, local_description))
+    }
+
+    /// Time allowed from the remote description until `Ready` before `Failed` is emitted; defaults to 10 seconds.
+    pub fn set_establish_deadline(&mut self, within: Duration) {
+        self.establish_within = within;
     }
 
     pub fn local_candidate(&self) -> &Candidate {
@@ -189,8 +199,11 @@ impl Session {
             self.ice.add_remote_candidate(candidate)?;
         }
         self.pending_role_fingerprint = Some((resolved_role, fingerprint));
+        self.establish_started.get_or_insert(now);
 
-        self.pump(now)
+        self.pump(now)?;
+        self.push_wait(now);
+        Ok(())
     }
 
     fn add_remote_candidate(
@@ -304,16 +317,27 @@ impl Session {
             sctp.handle_timeout(now);
         }
         self.pump(now)?;
+        self.push_wait(now);
+        Ok(())
+    }
 
+    fn push_wait(&mut self, now: Instant) {
         if let Some(deadline) = self.poll_timeout() {
             self.output
                 .push_back(SessionOutput::Wait(deadline.saturating_duration_since(now)));
         }
-        Ok(())
+    }
+
+    fn establish_deadline(&self) -> Option<Instant> {
+        if self.channels.ready_emitted || self.channels.failed_emitted {
+            return None;
+        }
+        self.establish_started.map(|at| at + self.establish_within)
     }
 
     fn poll_timeout(&mut self) -> Option<Instant> {
         [
+            self.establish_deadline(),
             self.ice.poll_timeout(),
             self.dtls.as_ref().and_then(|d| d.poll_timeout()),
             self.sctp.as_ref().and_then(|s| s.poll_timeout()),
@@ -420,6 +444,13 @@ impl Session {
             self.channels.ready_emitted = true;
             self.output
                 .push_back(SessionOutput::Event(SessionEvent::Ready));
+        }
+
+        if self
+            .establish_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.fail();
         }
 
         Ok(())
@@ -580,6 +611,89 @@ mod tests {
 
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
+    }
+
+    fn drain(session: &mut Session) -> (usize, Option<Duration>) {
+        let mut failed = 0;
+        let mut shortest_wait: Option<Duration> = None;
+        while let Some(output) = session.poll() {
+            match output {
+                SessionOutput::Event(SessionEvent::Failed) => failed += 1,
+                SessionOutput::Wait(wait) => {
+                    shortest_wait = Some(shortest_wait.map_or(wait, |w| w.min(wait)))
+                }
+                _ => {}
+            }
+        }
+        (failed, shortest_wait)
+    }
+
+    #[test]
+    fn a_session_that_never_becomes_ready_fails_once_at_its_deadline() {
+        let start = Instant::now();
+        let (mut session, _) = Session::new(addr(40110), true, start).unwrap();
+        let (peer, peer_description) = Session::new(addr(40111), false, start).unwrap();
+        session.set_establish_deadline(Duration::from_secs(3));
+
+        let sdp = peer_description.encode_full(&[peer.local_candidate().clone()]);
+        let (description, candidates) = Description::parse(&sdp).unwrap();
+        let offer = SessionInput::RemoteDescription(description, candidates, start);
+        session.handle(offer).unwrap();
+        let (failed, wait) = drain(&mut session);
+        assert_eq!(failed, 0);
+        assert!(wait.unwrap() <= Duration::from_secs(3));
+
+        session
+            .handle(SessionInput::Timeout(start + Duration::from_millis(2999)))
+            .unwrap();
+        assert_eq!(drain(&mut session).0, 0);
+
+        session
+            .handle(SessionInput::Timeout(start + Duration::from_secs(3)))
+            .unwrap();
+        assert_eq!(drain(&mut session).0, 1);
+
+        session
+            .handle(SessionInput::Timeout(start + Duration::from_secs(60)))
+            .unwrap();
+        let (failed, wait) = drain(&mut session);
+        assert_eq!(failed, 0);
+        assert!(wait.is_none_or(|w| w > Duration::ZERO));
+    }
+
+    #[test]
+    fn the_wait_schedules_the_establish_deadline() {
+        let start = Instant::now();
+        let (mut session, _) = Session::new(addr(40112), true, start).unwrap();
+        let (peer, peer_description) = Session::new(addr(40113), false, start).unwrap();
+        session.set_establish_deadline(Duration::from_millis(50));
+        let sdp = peer_description.encode_full(&[peer.local_candidate().clone()]);
+        let (description, candidates) = Description::parse(&sdp).unwrap();
+        session
+            .handle(SessionInput::RemoteDescription(
+                description,
+                candidates,
+                start,
+            ))
+            .unwrap();
+        let (_, wait) = drain(&mut session);
+        assert!(wait.unwrap() <= Duration::from_millis(50));
+    }
+
+    #[test]
+    fn a_ready_session_never_fails_on_the_deadline() {
+        let (mut offerer, mut answerer, now) = connected_pair();
+        offerer.set_establish_deadline(Duration::from_secs(1));
+        answerer.set_establish_deadline(Duration::from_secs(1));
+        let _ = drain(&mut offerer);
+        let _ = drain(&mut answerer);
+
+        for session in [&mut offerer, &mut answerer] {
+            session
+                .handle(SessionInput::Timeout(now + Duration::from_secs(2)))
+                .unwrap();
+            assert_eq!(drain(session).0, 0);
+        }
     }
 
     fn connected_pair() -> (Session, Session, Instant) {

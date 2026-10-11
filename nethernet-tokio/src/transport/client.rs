@@ -164,13 +164,14 @@ impl NetherClient {
             .local_addr()
             .map_err(|e| (None, NetherError::from(e)))?;
 
-        let (session, description) =
-            SansSession::new(bound_addr, true, Instant::now()).map_err(|e| {
+        let (mut session, description) = SansSession::new(bound_addr, true, Instant::now())
+            .map_err(|e| {
                 (
                     Some(SignalErrorCode::FailedToCreatePeerConnection),
                     NetherError::from(e),
                 )
             })?;
+        session.set_establish_deadline(config.timeouts.establish());
 
         let ice_mode = if signaling.disable_trickle_ice() {
             IceMode::Full

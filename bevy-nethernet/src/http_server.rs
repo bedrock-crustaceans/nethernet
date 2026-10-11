@@ -503,6 +503,7 @@ impl NetherHttpServer {
 
         let mut policy = OfferPolicy::new(IceMode::Full)
             .with_inferred_peer_candidates(self.infer_peer_candidates);
+        policy = policy.with_establish_deadline(self.timeouts.establish());
         if let Some(identity) = &self.identity {
             policy = policy.with_identity(identity);
         }
