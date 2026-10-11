@@ -1,5 +1,6 @@
 //! Inputs accepted by the HTTP signaler.
 use crate::error::SignalErrorCode;
+use crate::identity::TokenTrust;
 use crate::protocol::packet::discovery::ServerData;
 use http::Request;
 use std::net::SocketAddr;
@@ -52,6 +53,9 @@ pub enum HttpSignalerInput {
     },
 
     SetServerData(Box<ServerData>),
+
+    /// Replaces how later offers are authenticated; `None` skips validation.
+    SetTokenTrust(Option<TokenTrust>),
 
     Closed(u64),
 

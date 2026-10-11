@@ -66,6 +66,7 @@ impl Sans for HttpSignaler {
                 reason,
             } => self.reject(connection_id, reason)?,
             HttpSignalerInput::SetServerData(data) => self.server_data = Some(*data),
+            HttpSignalerInput::SetTokenTrust(trust) => self.config.token_trust = trust,
             HttpSignalerInput::Closed(connection) => self.closed(connection),
             HttpSignalerInput::Update(now) => self.handle_update(now)?,
         }
@@ -792,6 +793,54 @@ mod tests {
             panic!("expected a response");
         };
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn a_trust_set_while_running_applies_to_later_offers() {
+        let mut signaler = signaler(HttpSignalerConfig::default());
+        connect(&mut signaler, 1, "127.0.0.1:1000");
+        connect(&mut signaler, 2, "127.0.0.1:1001");
+        send(
+            &mut signaler,
+            1,
+            request(Method::POST, "/v1/join/1234", &signed_offer()),
+        );
+        assert!(matches!(next(&mut signaler), HttpSignalerOutput::Offer(_)));
+
+        signaler
+            .handle(HttpSignalerInput::SetTokenTrust(Some(
+                TokenTrust::Minecraft(crate::identity::jwk::JwkSet::default().into()),
+            )))
+            .unwrap();
+        send(
+            &mut signaler,
+            2,
+            request(Method::POST, "/v1/join/1234", &signed_offer()),
+        );
+
+        let HttpSignalerOutput::Response { response, .. } = next(&mut signaler) else {
+            panic!("expected a response");
+        };
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn clearing_the_trust_while_running_skips_validation() {
+        let mut signaler = signaler(HttpSignalerConfig::default());
+        connect(&mut signaler, 1, "127.0.0.1:1000");
+        signaler
+            .handle(HttpSignalerInput::SetTokenTrust(None))
+            .unwrap();
+        send(
+            &mut signaler,
+            1,
+            request(Method::POST, "/v1/join/1234", OFFER),
+        );
+
+        let HttpSignalerOutput::Offer(offer) = next(&mut signaler) else {
+            panic!("expected an offer");
+        };
+        assert!(offer.player.is_none());
     }
 
     #[test]

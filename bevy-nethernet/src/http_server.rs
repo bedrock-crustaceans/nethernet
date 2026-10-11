@@ -13,7 +13,7 @@ use nethernet::admission::{Answered, OfferPolicy};
 use nethernet::connection::{IceMode, Timeouts};
 use nethernet::prelude::{
     HttpSignaler, HttpSignalerConfig, HttpSignalerInput, HttpSignalerOutput, Offer, PlayerInfo,
-    RejectReason, Sans, ServerData, ServerIdentity,
+    RejectReason, Sans, ServerData, ServerIdentity, TokenTrust,
 };
 use nethernet::session::Channel;
 use std::collections::{HashMap, VecDeque};
@@ -194,6 +194,13 @@ impl NetherHttpServer {
         let _ = self
             .signaler
             .handle(HttpSignalerInput::SetServerData(Box::new(data)));
+    }
+
+    /// Replaces how later offers are authenticated; `None` skips validation.
+    pub fn set_token_trust(&mut self, trust: Option<TokenTrust>) {
+        let _ = self
+            .signaler
+            .handle(HttpSignalerInput::SetTokenTrust(trust));
     }
 
     pub fn sessions(&self) -> impl Iterator<Item = &NetherSessionId> {

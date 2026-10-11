@@ -243,6 +243,18 @@ fn an_expired_signed_token_is_refused() {
 }
 
 #[test]
+fn any_trust_still_refuses_a_token_without_an_expiry() {
+    let refused = refusal("eyJhbGciOiJSUzI1NiJ9.e30.AA", &TokenTrust::Any);
+
+    assert_eq!(refused, "the token carries no expiry");
+}
+
+#[test]
+fn any_trust_still_refuses_an_expired_token() {
+    assert!(claims_of(EXPIRED, &TokenTrust::Any).is_err());
+}
+
+#[test]
 fn a_signed_token_is_accepted_under_any_trust_without_checking_its_signature() {
     assert!(claims_of(TAMPERED, &TokenTrust::Any).is_ok());
     assert!(claims_of(WRONG_ISSUER, &TokenTrust::Any).is_ok());

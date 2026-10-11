@@ -8,9 +8,10 @@ use crate::transport::{ConnectionConfig, local_bind_addr};
 use futures::{Stream, StreamExt};
 use nethernet::admission::OfferPolicy;
 use nethernet::connection::IceMode;
+use nethernet::identity::TokenTrust;
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::task::{Context, Poll};
 use std::time::{Instant, SystemTime};
 use tokio::net::UdpSocket;
@@ -36,10 +37,14 @@ type ConnectionKey = (String, u64);
 
 type SignalDispatchers = HashMap<ConnectionKey, mpsc::UnboundedSender<Signal>>;
 
+type SharedTrust = Arc<RwLock<Option<TokenTrust>>>;
+
 /// Answers offers arriving on its signaling and yields the connected sessions.
 pub struct NetherServer {
     incoming: mpsc::UnboundedReceiver<AcceptedSession>,
     local_addr: Addr,
+    signaling: ServerSignaling,
+    token_trust: SharedTrust,
     cancel_token: CancellationToken,
     signal_handler_task: Option<JoinHandle<()>>,
 }
@@ -64,13 +69,21 @@ impl NetherServer {
         let local_addr = Addr::network(signaling.network_id());
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
+        let token_trust = Arc::new(RwLock::new(config.token_trust.clone()));
 
-        let signal_handler_task =
-            Self::start_signal_handler(signaling, incoming_tx, cancel_token.clone(), config);
+        let signal_handler_task = Self::start_signal_handler(
+            signaling.clone(),
+            incoming_tx,
+            cancel_token.clone(),
+            config,
+            token_trust.clone(),
+        );
 
         let listener = Self {
             incoming: incoming_rx,
             local_addr,
+            signaling,
+            token_trust,
             cancel_token,
             signal_handler_task: Some(signal_handler_task),
         };
@@ -83,6 +96,7 @@ impl NetherServer {
         incoming_tx: mpsc::UnboundedSender<AcceptedSession>,
         cancel_token: CancellationToken,
         config: ConnectionConfig,
+        token_trust: SharedTrust,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut dispatchers: SignalDispatchers = HashMap::new();
@@ -100,13 +114,18 @@ impl NetherServer {
                                 match signal.signal_type {
                                     SignalType::Offer => {
                                         dispatchers.retain(|_, tx| !tx.is_closed());
+                                        let mut config = config.clone();
+                                        config.token_trust = token_trust
+                                            .read()
+                                            .unwrap_or_else(PoisonError::into_inner)
+                                            .clone();
                                         if let Err(e) = Self::handle_offer(
                                             signal,
                                             &signaling,
                                             &incoming_tx,
                                             &mut dispatchers,
                                             &pending,
-                                            config.clone(),
+                                            config,
                                         )
                                         .await
                                         {
@@ -324,6 +343,21 @@ impl NetherServer {
     pub fn local_addr(&self) -> &Addr {
         &self.local_addr
     }
+
+    /// Replaces how later offers are authenticated; `None` skips validation.
+    ///
+    /// Over HTTP signaling the signaler authenticates offers, so its trust is replaced instead.
+    pub fn set_token_trust(&self, trust: Option<TokenTrust>) {
+        match &self.signaling {
+            ServerSignaling::Http(signaling) => signaling.set_token_trust(trust),
+            ServerSignaling::Lan(_) => {
+                *self
+                    .token_trust
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner) = trust;
+            }
+        }
+    }
 }
 
 fn spawn_late_signal_forwarder(
@@ -401,5 +435,33 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), signal_tx.closed())
             .await
             .expect("the forwarder should drop its receiver once the session closes");
+    }
+
+    #[tokio::test]
+    async fn a_trust_set_on_a_server_over_http_reaches_the_signaler() {
+        use crate::signaling::http::server::tests::{post_offer, signed_offer};
+        use crate::signaling::http::{HttpServerConfig, HttpSignalingServer};
+
+        let signaling = Arc::new(
+            HttpSignalingServer::bind("127.0.0.1:0".parse().unwrap(), HttpServerConfig::default())
+                .await
+                .unwrap(),
+        );
+        let server = NetherServer::bind_with(
+            signaling.clone(),
+            ConnectionConfig {
+                allow_unsigned_answers: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        server.set_token_trust(Some(TokenTrust::Minecraft(Default::default())));
+
+        assert_eq!(
+            post_offer(signaling.local_addr(), &signed_offer()).await,
+            "HTTP/1.1 401 Unauthorized"
+        );
     }
 }

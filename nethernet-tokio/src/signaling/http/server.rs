@@ -11,7 +11,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use nethernet::prelude::{
     HttpSignaler, HttpSignalerConfig, HttpSignalerInput, HttpSignalerOutput, PlayerInfo,
-    RejectReason, Sans, ServerData,
+    RejectReason, Sans, ServerData, TokenTrust,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -73,6 +73,7 @@ enum Command {
         reason: RejectReason,
     },
     SetServerData(Box<ServerData>),
+    SetTokenTrust(Option<TokenTrust>),
     Address(u64, oneshot::Sender<Option<SocketAddr>>),
     Player(u64, oneshot::Sender<Option<Arc<PlayerInfo>>>),
     Host(u64, oneshot::Sender<Option<String>>),
@@ -144,6 +145,11 @@ impl HttpSignalingServer {
         let _ = self
             .commands
             .send(Command::SetServerData(Box::new(server_data)));
+    }
+
+    /// Replaces how later offers are authenticated; `None` skips validation.
+    pub fn set_token_trust(&self, trust: Option<TokenTrust>) {
+        let _ = self.commands.send(Command::SetTokenTrust(trust));
     }
 
     fn accept(
@@ -269,6 +275,9 @@ impl HttpSignalingServer {
                         }
                         Some(Command::SetServerData(data)) => {
                             let _ = signaler.handle(HttpSignalerInput::SetServerData(data));
+                        }
+                        Some(Command::SetTokenTrust(trust)) => {
+                            let _ = signaler.handle(HttpSignalerInput::SetTokenTrust(trust));
                         }
                         Some(Command::Address(connection_id, reply)) => {
                             let _ = reply.send(addresses.get(&connection_id).copied());
@@ -534,7 +543,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
@@ -595,6 +604,45 @@ mod tests {
         assert_eq!(
             status_line(&mut reader).await,
             "HTTP/1.1 413 Payload Too Large"
+        );
+    }
+
+    pub(crate) fn signed_offer() -> String {
+        let now = std::time::SystemTime::now();
+        nethernet::identity::ServerIdentity::generate("example.com", now)
+            .unwrap()
+            .augment(
+                "v=0\r\n\
+                 m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+                 a=fingerprint:sha-256 AB:CD\r\n",
+                now,
+            )
+            .unwrap()
+    }
+
+    pub(crate) async fn post_offer(addr: SocketAddr, offer: &str) -> String {
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "POST /v1/join/1234 HTTP/1.1\r\nhost: x\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{offer}",
+            offer.len()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        status_line(&mut stream).await
+    }
+
+    #[tokio::test]
+    async fn a_trust_set_on_a_running_server_refuses_later_offers() {
+        let mut config = HttpServerConfig::default();
+        config.signaler.answer_timeout = Duration::from_millis(200);
+        let server = HttpSignalingServer::bind("127.0.0.1:0".parse().unwrap(), config)
+            .await
+            .unwrap();
+
+        server.set_token_trust(Some(TokenTrust::Minecraft(Default::default())));
+
+        assert_eq!(
+            post_offer(server.local_addr(), &signed_offer()).await,
+            "HTTP/1.1 401 Unauthorized"
         );
     }
 }
