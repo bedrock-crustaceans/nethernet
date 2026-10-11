@@ -721,6 +721,25 @@ mod tests {
     }
 
     #[test]
+    fn no_remote_address_is_reported_before_ice_selects_a_pair() {
+        let now = Instant::now();
+        let (mut offerer, _) = Session::new(addr(40100), true, now).unwrap();
+        let (answerer, answer) = Session::new(addr(40101), false, now).unwrap();
+        let answer_sdp = answer.encode_full(&[answerer.local_candidate().clone()]);
+        let (parsed_answer, answer_candidates) = Description::parse(&answer_sdp).unwrap();
+
+        offerer
+            .handle(SessionInput::RemoteDescription(
+                parsed_answer,
+                answer_candidates,
+                now,
+            ))
+            .unwrap();
+
+        assert_eq!(offerer.remote_addr(), None);
+    }
+
+    #[test]
     fn transports_follow_the_ice_selected_pair_past_a_dead_first_candidate() {
         let now = Instant::now();
         let (mut offerer, offer) = Session::new(addr(40100), true, now).unwrap();

@@ -179,7 +179,7 @@ fn drive<K: Eq + Hash + Clone>(
                     if let Some(entry) = entries.remove(&id) {
                         by_ufrag.remove(&entry.local_ufrag);
                         if let Some(addr) = entry.remote_addr {
-                            by_addr.remove(&addr);
+                            release_addr(&mut by_addr, addr, &id);
                         }
                     }
                 }
@@ -216,7 +216,7 @@ fn drive<K: Eq + Hash + Clone>(
                 && let Some(addr) = entry.connection.remote_addr()
             {
                 entry.remote_addr = Some(addr);
-                by_addr.insert(addr, id.clone());
+                claim_addr(&mut by_addr, addr, id);
             }
 
             while let Some(output) = entry.connection.poll() {
@@ -269,5 +269,45 @@ fn drive<K: Eq + Hash + Clone>(
                 return;
             }
         }
+    }
+}
+
+fn claim_addr<K: Clone>(by_addr: &mut HashMap<SocketAddr, K>, addr: SocketAddr, id: &K) {
+    by_addr.entry(addr).or_insert_with(|| id.clone());
+}
+
+fn release_addr<K: Eq>(by_addr: &mut HashMap<SocketAddr, K>, addr: SocketAddr, id: &K) {
+    if by_addr.get(&addr) == Some(id) {
+        by_addr.remove(&addr);
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+
+    fn addr(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    #[test]
+    fn a_second_session_cannot_take_a_claimed_address() {
+        let mut by_addr = HashMap::new();
+        claim_addr(&mut by_addr, addr(1), &"victim");
+        claim_addr(&mut by_addr, addr(1), &"hostile");
+
+        assert_eq!(by_addr.get(&addr(1)), Some(&"victim"));
+    }
+
+    #[test]
+    fn removing_a_session_leaves_another_sessions_address() {
+        let mut by_addr = HashMap::new();
+        claim_addr(&mut by_addr, addr(1), &"victim");
+        release_addr(&mut by_addr, addr(1), &"hostile");
+
+        assert_eq!(by_addr.get(&addr(1)), Some(&"victim"));
+
+        release_addr(&mut by_addr, addr(1), &"victim");
+        assert!(by_addr.is_empty());
     }
 }
