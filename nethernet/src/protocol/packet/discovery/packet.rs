@@ -78,7 +78,7 @@ pub fn encode(packet: &Packets, sender_id: u64) -> Result<Vec<u8>> {
 
     let data_len = payload.len() - 2;
     if data_len > u16::MAX as usize {
-        return Err(ProtocolError::MessageTooLarge(data_len));
+        return Err(ProtocolError::MessageSizeExceeded(data_len));
     }
     payload[..2].copy_from_slice(&(data_len as u16).to_le_bytes());
 

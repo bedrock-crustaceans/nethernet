@@ -94,7 +94,7 @@ impl Message {
         }
     }
 
-    /// Fails with `MessageTooLarge` beyond 255 segments.
+    /// Fails with `MessageSizeExceeded` beyond 255 segments.
     #[inline(always)]
     pub fn split_into_segments(data: Bytes) -> Result<Vec<MessageSegment>> {
         let len = data.len();
@@ -106,7 +106,7 @@ impl Message {
         let segment_count = len.div_ceil(MAX_MESSAGE_SIZE);
 
         if segment_count > 255 {
-            return Err(ProtocolError::MessageTooLarge(len));
+            return Err(ProtocolError::MessageSizeExceeded(len));
         }
 
         let mut segments = Vec::with_capacity(segment_count);
@@ -132,10 +132,10 @@ impl Message {
         Ok(segments)
     }
 
-    /// Fails with `MessageTooLarge` unless the data fits one segment.
+    /// Fails with `MessageSizeExceeded` unless the data fits one segment.
     pub fn encode_unreliable(data: Bytes) -> Result<Bytes> {
         if data.len() > MAX_MESSAGE_SIZE.saturating_sub(1) {
-            return Err(ProtocolError::MessageTooLarge(data.len()));
+            return Err(ProtocolError::MessageSizeExceeded(data.len()));
         }
         Ok(MessageSegment::new(0, data).encode())
     }

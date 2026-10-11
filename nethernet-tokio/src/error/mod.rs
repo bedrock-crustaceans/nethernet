@@ -50,8 +50,8 @@ pub enum NetherError {
     #[error("Message parse error: {0}")]
     MessageParse(String),
 
-    #[error("Message too large: exceeds maximum size of {0} bytes")]
-    MessageTooLarge(usize),
+    #[error("Message of {0} bytes exceeds the size limit")]
+    MessageSizeExceeded(usize),
 
     #[error("Operation timed out")]
     Timeout,

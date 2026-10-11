@@ -12,22 +12,22 @@ pub(crate) const MAX_BODY: usize = 1 << 20;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum FramingError {
-    #[error("too many headers")]
-    TooManyHeaders,
+    #[error("the header count exceeds the limit")]
+    HeaderCountExceeded,
     #[error("malformed message")]
     Malformed,
-    #[error("message too large")]
-    TooLarge,
+    #[error("the message exceeds the size limit")]
+    SizeExceeded,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum RequestError {
-    #[error("too many headers")]
-    TooManyHeaders,
+    #[error("the header count exceeds the limit")]
+    HeaderCountExceeded,
     #[error("malformed request")]
     Malformed,
-    #[error("request too large")]
-    TooLarge,
+    #[error("the request exceeds the size limit")]
+    SizeExceeded,
     #[error("request body has no content length")]
     LengthRequired,
 }
@@ -35,21 +35,21 @@ pub(crate) enum RequestError {
 impl From<FramingError> for RequestError {
     fn from(error: FramingError) -> Self {
         match error {
-            FramingError::TooManyHeaders => Self::TooManyHeaders,
+            FramingError::HeaderCountExceeded => Self::HeaderCountExceeded,
             FramingError::Malformed => Self::Malformed,
-            FramingError::TooLarge => Self::TooLarge,
+            FramingError::SizeExceeded => Self::SizeExceeded,
         }
     }
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum ResponseError {
-    #[error("too many headers")]
-    TooManyHeaders,
+    #[error("the header count exceeds the limit")]
+    HeaderCountExceeded,
     #[error("malformed response")]
     Malformed,
-    #[error("response too large")]
-    TooLarge,
+    #[error("the response exceeds the size limit")]
+    SizeExceeded,
     #[error("response has neither a content length nor chunked encoding")]
     UnboundedBody,
 }
@@ -57,9 +57,9 @@ pub(crate) enum ResponseError {
 impl From<FramingError> for ResponseError {
     fn from(error: FramingError) -> Self {
         match error {
-            FramingError::TooManyHeaders => Self::TooManyHeaders,
+            FramingError::HeaderCountExceeded => Self::HeaderCountExceeded,
             FramingError::Malformed => Self::Malformed,
-            FramingError::TooLarge => Self::TooLarge,
+            FramingError::SizeExceeded => Self::SizeExceeded,
         }
     }
 }
@@ -109,7 +109,7 @@ impl BodyFraming {
                     .and_then(|v| v.trim().parse().ok())
                     .ok_or(FramingError::Malformed)?;
                 if length > MAX_BODY {
-                    return Err(FramingError::TooLarge);
+                    return Err(FramingError::SizeExceeded);
                 }
                 Ok(Some(Self::Length(length)))
             }
@@ -156,9 +156,9 @@ impl ChunkedBody {
                     None => Self::Incomplete,
                 });
             }
-            let size = usize::try_from(size).map_err(|_| FramingError::TooLarge)?;
+            let size = usize::try_from(size).map_err(|_| FramingError::SizeExceeded)?;
             if size > MAX_BODY - body.len() {
-                return Err(FramingError::TooLarge);
+                return Err(FramingError::SizeExceeded);
             }
             let Some(chunk_end) = at.checked_add(size + 2).filter(|&end| end <= buf.len()) else {
                 return Ok(Self::Incomplete);
@@ -176,7 +176,7 @@ impl ChunkedBody {
         match httparse::parse_headers(rest, &mut trailers) {
             Ok(httparse::Status::Complete((len, _))) => Ok(Some(len)),
             Ok(httparse::Status::Partial) => Ok(None),
-            Err(httparse::Error::TooManyHeaders) => Err(FramingError::TooManyHeaders),
+            Err(httparse::Error::TooManyHeaders) => Err(FramingError::HeaderCountExceeded),
             Err(_) => Err(FramingError::Malformed),
         }
     }
@@ -195,7 +195,7 @@ impl RequestReader {
         let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
         let mut parsed = httparse::Request::new(&mut headers);
         let status = parsed.parse(buf).map_err(|e| match e {
-            httparse::Error::TooManyHeaders => RequestError::TooManyHeaders,
+            httparse::Error::TooManyHeaders => RequestError::HeaderCountExceeded,
             _ => RequestError::Malformed,
         })?;
         let httparse::Status::Complete(header_len) = status else {
@@ -240,7 +240,7 @@ impl ResponseReader {
         let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
         let mut parsed = httparse::Response::new(&mut headers);
         let status = parsed.parse(buf).map_err(|e| match e {
-            httparse::Error::TooManyHeaders => ResponseError::TooManyHeaders,
+            httparse::Error::TooManyHeaders => ResponseError::HeaderCountExceeded,
             _ => ResponseError::Malformed,
         })?;
         let httparse::Status::Complete(header_len) = status else {

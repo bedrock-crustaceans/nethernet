@@ -405,11 +405,11 @@ impl NetherHttpServer {
                 Err(error) => {
                     tracing::debug!("refusing an unreadable http request: {error:?}");
                     conn.refuse(match error {
-                        http_wire::RequestError::TooManyHeaders => {
+                        http_wire::RequestError::HeaderCountExceeded => {
                             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
                         }
                         http_wire::RequestError::Malformed => StatusCode::BAD_REQUEST,
-                        http_wire::RequestError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+                        http_wire::RequestError::SizeExceeded => StatusCode::PAYLOAD_TOO_LARGE,
                         http_wire::RequestError::LengthRequired => StatusCode::LENGTH_REQUIRED,
                     });
                 }

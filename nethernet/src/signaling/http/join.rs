@@ -24,8 +24,8 @@ pub enum JoinResponseError {
     #[error("server sent no answer")]
     Empty,
 
-    #[error("answer exceeds {0} bytes")]
-    TooLarge(usize),
+    #[error("the answer of {0} bytes exceeds the size limit")]
+    BodySizeExceeded(usize),
 
     #[error("server rejected the offer with code {0:?}")]
     Rejected(SignalErrorCode),
@@ -59,7 +59,7 @@ pub fn validate_join_response(status: u16, body: &str) -> Result<(), JoinRespons
         return Err(JoinResponseError::Empty);
     }
     if body.len() > MAX_ANSWER_SIZE {
-        return Err(JoinResponseError::TooLarge(body.len()));
+        return Err(JoinResponseError::BodySizeExceeded(body.len()));
     }
     if let Ok(code) = body.trim().parse::<u32>() {
         return Err(JoinResponseError::Rejected(code.into()));
@@ -134,7 +134,7 @@ mod tests {
         let body = "a".repeat(MAX_ANSWER_SIZE + 1);
         assert_eq!(
             validate_join_response(200, &body),
-            Err(JoinResponseError::TooLarge(body.len()))
+            Err(JoinResponseError::BodySizeExceeded(body.len()))
         );
     }
 

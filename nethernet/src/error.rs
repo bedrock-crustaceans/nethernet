@@ -10,8 +10,8 @@ pub enum ProtocolError {
     #[error("Message parse error: {0}")]
     MessageParse(String),
 
-    #[error("Message too large: exceeds maximum size of {0} bytes")]
-    MessageTooLarge(usize),
+    #[error("Message of {0} bytes exceeds the size limit")]
+    MessageSizeExceeded(usize),
 
     #[error("Crypto error: {0}")]
     Crypto(String),
