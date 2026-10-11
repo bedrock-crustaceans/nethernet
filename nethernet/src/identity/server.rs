@@ -19,6 +19,7 @@ pub struct ServerIdentity {
     signing: SigningKey,
     verifying: VerifyingKey,
     domain: String,
+    lifetime: Option<Duration>,
     token: String,
 }
 
@@ -60,24 +61,13 @@ impl ServerIdentity {
     ) -> Result<Self> {
         let verifying = *signing.verifying_key();
         let domain = domain.into();
-
-        let mut claims = json!({
-            "cpk": EcJwk::from(&verifying),
-            "iat": seconds(now),
-        });
-        if !domain.is_empty() {
-            claims["iss"] = json!(domain);
-        }
-        if let Some(lifetime) = lifetime {
-            claims["exp"] = json!(seconds(now + lifetime));
-        }
-
-        let token = Jws::sign(&signing, &claims.to_string())?;
+        let token = mint_token(&signing, &verifying, &domain, now, lifetime)?;
 
         Ok(Self {
             signing,
             verifying,
             domain,
+            lifetime,
             token,
         })
     }
@@ -94,8 +84,20 @@ impl ServerIdentity {
         &self.verifying
     }
 
+    /// The token minted at construction.
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// A token issued at `now`, so a long-running server never signs with an expired one.
+    pub fn token_at(&self, now: SystemTime) -> Result<String> {
+        mint_token(
+            &self.signing,
+            &self.verifying,
+            &self.domain,
+            now,
+            self.lifetime,
+        )
     }
 
     pub fn domain(&self) -> &str {
@@ -103,13 +105,17 @@ impl ServerIdentity {
     }
 
     /// The base64 identity value signing the fingerprints of `answer`.
-    pub fn identity_value(&self, answer: &str) -> Result<String> {
+    pub fn identity_value(&self, answer: &str, now: SystemTime) -> Result<String> {
         let fingerprints = sdp_fingerprints(answer)?;
-        self.identity_for_fingerprints(&fingerprints)
+        self.identity_for_fingerprints(&fingerprints, now)
     }
 
     /// The base64 identity value signing the given `(algorithm, digest)` pairs.
-    pub fn identity_for_fingerprints(&self, fingerprints: &[(String, String)]) -> Result<String> {
+    pub fn identity_for_fingerprints(
+        &self,
+        fingerprints: &[(String, String)],
+        now: SystemTime,
+    ) -> Result<String> {
         let payload = fingerprint_payload(fingerprints);
 
         Identity {
@@ -118,7 +124,7 @@ impl ServerIdentity {
                 protocol: "default".to_string(),
             },
             assertion: Assertion {
-                token: self.token.clone(),
+                token: self.token_at(now)?,
                 fingerprints: Jws::sign_detached(&self.signing, &payload)?,
             },
         }
@@ -126,8 +132,8 @@ impl ServerIdentity {
     }
 
     /// Inserts a signed `a=identity` line above the first media section of an answer.
-    pub fn augment(&self, answer: &str) -> Result<String> {
-        let attribute = format!("a=identity:{}", self.identity_value(answer)?);
+    pub fn augment(&self, answer: &str, now: SystemTime) -> Result<String> {
+        let attribute = format!("a=identity:{}", self.identity_value(answer, now)?);
         let eol = match answer.contains("\r\n") {
             true => "\r\n",
             false => "\n",
@@ -154,6 +160,26 @@ impl ServerIdentity {
     }
 }
 
+fn mint_token(
+    signing: &SigningKey,
+    verifying: &VerifyingKey,
+    domain: &str,
+    now: SystemTime,
+    lifetime: Option<Duration>,
+) -> Result<String> {
+    let mut claims = json!({
+        "cpk": EcJwk::from(verifying),
+        "iat": seconds(now),
+    });
+    if !domain.is_empty() {
+        claims["iss"] = json!(domain);
+    }
+    if let Some(lifetime) = lifetime {
+        claims["exp"] = json!(seconds(now + lifetime));
+    }
+    Jws::sign(signing, &claims.to_string())
+}
+
 fn seconds(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -177,7 +203,7 @@ mod tests {
     #[test]
     fn the_identity_is_inserted_above_the_media_description() {
         let identity = ServerIdentity::generate("example.com", UNIX_EPOCH).unwrap();
-        let answer = identity.augment(ANSWER).unwrap();
+        let answer = identity.augment(ANSWER, UNIX_EPOCH).unwrap();
 
         let lines: Vec<&str> = answer.lines().collect();
         let index = lines
@@ -198,15 +224,19 @@ mod tests {
         )];
 
         assert_eq!(
-            identity.identity_for_fingerprints(&fingerprints).unwrap(),
-            identity.identity_value(FIXTURE_ANSWER).unwrap()
+            identity
+                .identity_for_fingerprints(&fingerprints, fixture_now())
+                .unwrap(),
+            identity
+                .identity_value(FIXTURE_ANSWER, fixture_now())
+                .unwrap()
         );
     }
 
     #[test]
     fn the_assertion_is_detached() {
         let identity = ServerIdentity::generate("example.com", UNIX_EPOCH).unwrap();
-        let value = identity.identity_value(ANSWER).unwrap();
+        let value = identity.identity_value(ANSWER, UNIX_EPOCH).unwrap();
         let parsed = Identity::from_base64(&value).unwrap();
 
         assert_eq!(parsed.assertion.fingerprints.split("..").count(), 2);
@@ -355,8 +385,12 @@ D9X8Fh+xaDyPt2Z7rVGnwVihOy/Uu1zzizzcYTJMluYn8XetihGgczU=
 
     #[test]
     fn the_fixed_key_signs_a_fixed_answer_deterministically() {
-        let first = fixture_identity().identity_value(FIXTURE_ANSWER).unwrap();
-        let second = fixture_identity().identity_value(FIXTURE_ANSWER).unwrap();
+        let first = fixture_identity()
+            .identity_value(FIXTURE_ANSWER, fixture_now())
+            .unwrap();
+        let second = fixture_identity()
+            .identity_value(FIXTURE_ANSWER, fixture_now())
+            .unwrap();
 
         assert_eq!(first, second);
         assert_eq!(first, GOLDEN_IDENTITY_VALUE);
@@ -364,7 +398,9 @@ D9X8Fh+xaDyPt2Z7rVGnwVihOy/Uu1zzizzcYTJMluYn8XetihGgczU=
 
     #[test]
     fn the_fixed_answer_is_augmented_above_its_media_section() {
-        let augmented = fixture_identity().augment(FIXTURE_ANSWER).unwrap();
+        let augmented = fixture_identity()
+            .augment(FIXTURE_ANSWER, fixture_now())
+            .unwrap();
         let attribute = format!("a=identity:{}\r\n", GOLDEN_IDENTITY_VALUE);
         let (head, tail) = FIXTURE_ANSWER.split_once("m=").unwrap();
 
@@ -373,7 +409,9 @@ D9X8Fh+xaDyPt2Z7rVGnwVihOy/Uu1zzizzcYTJMluYn8XetihGgczU=
 
     #[test]
     fn the_augmented_fixed_answer_validates_under_any_trust() {
-        let augmented = fixture_identity().augment(FIXTURE_ANSWER).unwrap();
+        let augmented = fixture_identity()
+            .augment(FIXTURE_ANSWER, fixture_now())
+            .unwrap();
 
         let claims = validate_sdp(&augmented, &TokenTrust::Any, fixture_now()).unwrap();
 
@@ -382,7 +420,9 @@ D9X8Fh+xaDyPt2Z7rVGnwVihOy/Uu1zzizzcYTJMluYn8XetihGgczU=
 
     #[test]
     fn our_own_signed_answer_validates_under_any_trust_with_the_jwk_cpk() {
-        let augmented = fixture_identity().augment(FIXTURE_ANSWER).unwrap();
+        let augmented = fixture_identity()
+            .augment(FIXTURE_ANSWER, fixture_now())
+            .unwrap();
 
         let claims = validate_sdp(&augmented, &TokenTrust::Any, fixture_now()).unwrap();
 
@@ -393,7 +433,7 @@ D9X8Fh+xaDyPt2Z7rVGnwVihOy/Uu1zzizzcYTJMluYn8XetihGgczU=
     #[test]
     fn an_lf_only_answer_is_augmented_with_lf_endings() {
         let answer = FIXTURE_ANSWER.replace("\r\n", "\n");
-        let augmented = fixture_identity().augment(&answer).unwrap();
+        let augmented = fixture_identity().augment(&answer, fixture_now()).unwrap();
 
         assert!(!augmented.contains('\r'));
         let lines: Vec<&str> = augmented.lines().collect();
@@ -411,7 +451,7 @@ D9X8Fh+xaDyPt2Z7rVGnwVihOy/Uu1zzizzcYTJMluYn8XetihGgczU=
     #[test]
     fn an_answer_without_a_media_section_gets_the_identity_appended() {
         let answer = "v=0\r\na=fingerprint:sha-256 AB:CD\r\n";
-        let augmented = fixture_identity().augment(answer).unwrap();
+        let augmented = fixture_identity().augment(answer, fixture_now()).unwrap();
 
         assert!(augmented.starts_with(answer));
         let appended = &augmented[answer.len()..];
@@ -423,7 +463,7 @@ D9X8Fh+xaDyPt2Z7rVGnwVihOy/Uu1zzizzcYTJMluYn8XetihGgczU=
     #[test]
     fn an_answer_without_a_trailing_newline_gets_its_identity_glued_on() {
         let answer = "a=fingerprint:sha-256 AB:CD";
-        let augmented = fixture_identity().augment(answer).unwrap();
+        let augmented = fixture_identity().augment(answer, fixture_now()).unwrap();
 
         assert!(augmented.starts_with("a=fingerprint:sha-256 AB:CDa=identity:"));
     }
@@ -501,7 +541,7 @@ D9X8Fh+xaDyPt2Z7rVGnwVihOy/Uu1zzizzcYTJMluYn8XetihGgczU=
             Some(Duration::from_secs(100)),
         )
         .unwrap();
-        let answer = identity.augment(FIXTURE_ANSWER).unwrap();
+        let answer = identity.augment(FIXTURE_ANSWER, fixture_now()).unwrap();
         let expiry = fixture_now() + Duration::from_secs(100);
 
         assert!(validate_sdp(&answer, &TokenTrust::Any, expiry + Duration::from_secs(60)).is_ok());

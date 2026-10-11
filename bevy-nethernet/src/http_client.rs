@@ -20,7 +20,7 @@ use std::io::ErrorKind;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 #[cfg(feature = "tls")]
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 pub struct NetherHttpClientPlugin;
 
@@ -373,7 +373,7 @@ impl NetherHttpClient {
 
         let offer_data = match &self.identity {
             Some(identity) => identity
-                .augment(&offer.data)
+                .augment(&offer.data, SystemTime::now())
                 .map_err(std::io::Error::other)?,
             None => offer.data,
         };

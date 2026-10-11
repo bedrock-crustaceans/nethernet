@@ -13,7 +13,7 @@ use nethernet::protocol::{Signal, SignalType};
 use nethernet::session::{Channel, Session};
 use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const MAX_DATAGRAMS_PER_TICK: usize = 1024;
 const DEFAULT_ATTEMPTS: u32 = 3;
@@ -177,7 +177,7 @@ impl NetherClient {
         for mut signal in signals {
             if let (Some(identity), SignalType::Offer) = (&self.identity, signal.signal_type) {
                 signal.data = identity
-                    .augment(&signal.data)
+                    .augment(&signal.data, SystemTime::now())
                     .map_err(std::io::Error::other)?;
             }
             let _ = self.signaler.handle(LanSignalerInput::Signal(signal, now));

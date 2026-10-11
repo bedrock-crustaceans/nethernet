@@ -106,6 +106,7 @@ impl<'a> OfferPolicy<'a> {
             remote_description,
             remote_candidates,
             player,
+            wall,
         })
     }
 }
@@ -118,6 +119,7 @@ pub struct Admitted<'a> {
     remote_description: Description,
     remote_candidates: Vec<Candidate>,
     player: Option<PlayerInfo>,
+    wall: SystemTime,
 }
 
 impl Admitted<'_> {
@@ -142,7 +144,7 @@ impl Admitted<'_> {
 
         if let (Some(identity), Some(answer)) = (self.policy.identity, signals.first_mut()) {
             answer.data = identity
-                .augment(&answer.data)
+                .augment(&answer.data, self.wall)
                 .map_err(AdmissionError::Signing)?;
         }
 

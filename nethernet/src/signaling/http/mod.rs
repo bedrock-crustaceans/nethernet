@@ -456,7 +456,9 @@ mod tests {
     fn signed_offer() -> String {
         let identity =
             ServerIdentity::generate("example.com", std::time::SystemTime::now()).unwrap();
-        identity.augment(OFFER).unwrap()
+        identity
+            .augment(OFFER, std::time::SystemTime::now())
+            .unwrap()
     }
 
     fn next(signaler: &mut HttpSignaler) -> HttpSignalerOutput {

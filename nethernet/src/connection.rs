@@ -400,7 +400,10 @@ mod tests {
         let server = ServerIdentity::generate(domain, SystemTime::now()).unwrap();
         description.identity = Some(
             server
-                .identity_for_fingerprints(std::slice::from_ref(&description.fingerprint))
+                .identity_for_fingerprints(
+                    std::slice::from_ref(&description.fingerprint),
+                    SystemTime::now(),
+                )
                 .unwrap(),
         );
         server

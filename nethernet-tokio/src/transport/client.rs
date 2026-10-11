@@ -14,7 +14,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UdpSocket;
 use tokio_util::io::StreamReader;
@@ -176,12 +176,14 @@ impl NetherClient {
             .expect("Connection::connect always returns an offer signal first");
 
         let offer_data = match &config.identity {
-            Some(identity) => identity.augment(&offer.data).map_err(|e| {
-                (
-                    Some(SignalErrorCode::FailedToCreateOffer),
-                    NetherError::Identity(e),
-                )
-            })?,
+            Some(identity) => identity
+                .augment(&offer.data, SystemTime::now())
+                .map_err(|e| {
+                    (
+                        Some(SignalErrorCode::FailedToCreateOffer),
+                        NetherError::Identity(e),
+                    )
+                })?,
             None => offer.data,
         };
 

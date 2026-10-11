@@ -79,7 +79,7 @@ mod tests {
         let server = ServerIdentity::generate("example.com", NOW).unwrap();
         let other = ServerIdentity::generate("example.com", NOW).unwrap();
         let answer = server
-            .augment(&offer(""))
+            .augment(&offer(""), NOW)
             .unwrap()
             .replace("a=identity:\r\n", "");
 
