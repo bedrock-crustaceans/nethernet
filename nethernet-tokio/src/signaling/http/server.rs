@@ -4,7 +4,7 @@ use crate::error::{NetherError, Result};
 use crate::protocol::{Signal, SignalType};
 use crate::transport::client::parse_error_code;
 use futures::Stream;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -27,6 +27,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
 const MAX_BODY: u64 = 1 << 20;
+const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
 const MAX_IDLE: Duration = Duration::from_secs(1);
 
@@ -449,22 +450,40 @@ where
         let commands = commands.clone();
         async move {
             let (parts, body) = request.into_parts();
+            let refuse = |status: http::StatusCode| {
+                Ok::<_, hyper::Error>(
+                    hyper::Response::builder()
+                        .status(status)
+                        .body(Full::new(Bytes::new()))
+                        .expect("a status and an empty body are always a valid response"),
+                )
+            };
 
-            let body = match body.collect().await {
-                Ok(body) => body.to_bytes(),
-                Err(e) => {
+            let declared = parts
+                .headers
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok());
+            if declared.is_some_and(|len| len > MAX_BODY) {
+                return refuse(http::StatusCode::PAYLOAD_TOO_LARGE);
+            }
+
+            let collected = tokio::time::timeout(
+                BODY_TIMEOUT,
+                Limited::new(body, MAX_BODY as usize).collect(),
+            )
+            .await;
+            let body = match collected {
+                Err(_) => return refuse(http::StatusCode::REQUEST_TIMEOUT),
+                Ok(Ok(body)) => body.to_bytes(),
+                Ok(Err(e)) if e.downcast_ref::<LengthLimitError>().is_some() => {
+                    return refuse(http::StatusCode::PAYLOAD_TOO_LARGE);
+                }
+                Ok(Err(e)) => {
                     tracing::debug!("Failed to read a request body: {}", e);
                     Bytes::new()
                 }
             };
-            if body.len() as u64 > MAX_BODY {
-                return Ok::<_, hyper::Error>(
-                    hyper::Response::builder()
-                        .status(http::StatusCode::PAYLOAD_TOO_LARGE)
-                        .body(Full::new(Bytes::new()))
-                        .expect("a status and an empty body are always a valid response"),
-                );
-            }
 
             let request = http::Request::from_parts(
                 parts,
@@ -512,4 +531,70 @@ where
     connection
         .await
         .map_err(|e| NetherError::Other(format!("HTTP connection: {}", e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+    fn spawn_server() -> DuplexStream {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (commands, receiver) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let _receiver = receiver;
+            let _ = serve_http(server, 0, HttpServerConfig::default(), commands).await;
+        });
+        client
+    }
+
+    async fn status_line<R: AsyncRead + Unpin>(reader: &mut R) -> String {
+        let mut buf = vec![0u8; 64];
+        let read = tokio::time::timeout(Duration::from_secs(5), reader.read(&mut buf))
+            .await
+            .expect("the server should answer before the body ends")
+            .unwrap();
+        String::from_utf8_lossy(&buf[..read])
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn oversized_content_length_is_refused_before_the_body() {
+        let mut client = spawn_server();
+        client
+            .write_all(b"POST / HTTP/1.1\r\nhost: x\r\ncontent-length: 2147483648\r\n\r\n")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            status_line(&mut client).await,
+            "HTTP/1.1 413 Payload Too Large"
+        );
+    }
+
+    #[tokio::test]
+    async fn chunked_body_past_the_limit_is_refused_while_streaming() {
+        let (mut reader, mut writer) = tokio::io::split(spawn_server());
+        tokio::spawn(async move {
+            writer
+                .write_all(b"POST / HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\n\r\n")
+                .await?;
+            let chunk = vec![b'a'; 0x10000];
+            for _ in 0..24 {
+                writer.write_all(b"10000\r\n").await?;
+                writer.write_all(&chunk).await?;
+                writer.write_all(b"\r\n").await?;
+            }
+            std::future::pending::<()>().await;
+            Ok::<_, std::io::Error>(())
+        });
+
+        assert_eq!(
+            status_line(&mut reader).await,
+            "HTTP/1.1 413 Payload Too Large"
+        );
+    }
 }
