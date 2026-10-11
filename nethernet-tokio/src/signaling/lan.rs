@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use nethernet::signaling::lan::config::LanSignalerConfig as LanConfig;
 
-const BUFFER_SIZE: usize = 4096;
+use nethernet::protocol::constants::MAX_DATAGRAM_SIZE as BUFFER_SIZE;
 
 const MAX_IDLE: Duration = Duration::from_secs(1);
 

@@ -1,6 +1,6 @@
 //! LAN client: discovers servers by UDP broadcast and connects to one by network id.
 use crate::connection::{ConnectionEvent, SessionPool};
-use crate::socket::bind_shared_socket;
+use crate::socket::{bind_shared_socket, recv_discovery};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use nethernet::connection::{Connection, IceMode, Timeouts};
@@ -8,11 +8,10 @@ use nethernet::prelude::{
     LanSignaler, LanSignalerConfig, LanSignalerInput, LanSignalerOutput, Sans, ServerData,
     ServerIdentity,
 };
-use nethernet::protocol::constants::LAN_DISCOVERY_PORT;
+use nethernet::protocol::constants::{LAN_DISCOVERY_PORT, MAX_DATAGRAM_SIZE};
 use nethernet::protocol::{Signal, SignalType};
 use nethernet::session::{Channel, Session};
 use std::collections::{HashMap, VecDeque};
-use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
@@ -118,7 +117,7 @@ impl NetherClient {
             received: VecDeque::new(),
             received_unreliable: VecDeque::new(),
             events: VecDeque::new(),
-            buf: vec![0u8; 2048].into_boxed_slice(),
+            buf: vec![0u8; MAX_DATAGRAM_SIZE].into_boxed_slice(),
         })
     }
 
@@ -248,18 +247,11 @@ impl NetherClient {
     pub fn update(&mut self) {
         let now = Instant::now();
 
-        for _ in 0..MAX_DATAGRAMS_PER_TICK {
-            match self.socket.recv_from(&mut self.buf) {
-                Ok((len, addr)) => {
-                    let _ = self.signaler.handle(LanSignalerInput::Datagram(
-                        self.buf[..len].into(),
-                        addr,
-                        now,
-                    ));
-                }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                _ => break,
-            }
+        for (datagram, addr) in recv_discovery(&self.socket, &mut self.buf, MAX_DATAGRAMS_PER_TICK)
+        {
+            let _ = self
+                .signaler
+                .handle(LanSignalerInput::Datagram(datagram, addr, now));
         }
 
         let _ = self.signaler.handle(LanSignalerInput::Update(now));

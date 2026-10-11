@@ -2,6 +2,9 @@
 /// UDP port LAN discovery uses by default.
 pub const LAN_DISCOVERY_PORT: u16 = 7551;
 
+/// Receive buffer for discovery datagrams: the largest UDP payload.
+pub const MAX_DATAGRAM_SIZE: usize = 65535;
+
 pub const ID_REQUEST_PACKET: u16 = 0;
 pub const ID_RESPONSE_PACKET: u16 = 1;
 pub const ID_MESSAGE_PACKET: u16 = 2;
