@@ -22,6 +22,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 const RELIABLE_STREAM_ID: StreamId = 1;
+const MAX_EARLY_PACKETS: usize = 8;
 const UNRELIABLE_STREAM_ID: StreamId = 3;
 
 /// Reliable messages are segmented; unreliable ones must fit one segment (guide section 6.1).
@@ -99,6 +100,7 @@ pub struct Session {
 
     pending_role_fingerprint: Option<(ResolvedRole, (String, String))>,
     remote_max_message_size: u32,
+    early_packets: VecDeque<Vec<u8>>,
 
     remote: Option<RemoteInfo>,
     dtls: Option<DtlsLayer>,
@@ -140,6 +142,7 @@ impl Session {
             certificate: Some(certificate),
             pending_role_fingerprint: None,
             remote_max_message_size: SCTP_MAX_MESSAGE_SIZE,
+            early_packets: VecDeque::new(),
             remote: None,
             dtls: None,
             sctp: None,
@@ -182,17 +185,12 @@ impl Session {
             size => size,
         };
 
-        for candidate in &candidates {
-            self.ice.add_remote_candidate(candidate.clone())?;
+        for candidate in candidates {
+            self.ice.add_remote_candidate(candidate)?;
         }
+        self.pending_role_fingerprint = Some((resolved_role, fingerprint));
 
-        if let Some(candidate) = candidates.into_iter().next() {
-            self.start_transports(candidate.addr(), resolved_role, fingerprint, now)?;
-        } else {
-            self.pending_role_fingerprint = Some((resolved_role, fingerprint));
-        }
-
-        Ok(())
+        self.pump(now)
     }
 
     fn add_remote_candidate(
@@ -200,15 +198,25 @@ impl Session {
         candidate: Candidate,
         now: Instant,
     ) -> Result<(), ProtocolError> {
-        let addr = candidate.addr();
         self.ice.add_remote_candidate(candidate)?;
+        self.pump(now)
+    }
 
-        if self.remote.is_none()
-            && let Some((resolved_role, fingerprint)) = self.pending_role_fingerprint.take()
-        {
-            self.start_transports(addr, resolved_role, fingerprint, now)?;
+    fn start_transports_on_selected_pair(&mut self, now: Instant) -> Result<(), ProtocolError> {
+        if self.dtls.is_some() {
+            return Ok(());
         }
+        let Some(remote_addr) = self.ice.selected_remote_addr() else {
+            return Ok(());
+        };
+        let Some((resolved_role, fingerprint)) = self.pending_role_fingerprint.take() else {
+            return Ok(());
+        };
+        self.start_transports(remote_addr, resolved_role, fingerprint, now)?;
 
+        for packet in std::mem::take(&mut self.early_packets) {
+            self.read_dtls(&packet, now)?;
+        }
         Ok(())
     }
 
@@ -257,14 +265,25 @@ impl Session {
             return Ok(());
         }
 
+        if self.dtls.is_none() {
+            if self.early_packets.len() < MAX_EARLY_PACKETS {
+                self.early_packets.push_back(data.to_vec());
+            }
+            return Ok(());
+        }
+
+        self.read_dtls(data, now)?;
+        self.pump(now)?;
+        Ok(())
+    }
+
+    fn read_dtls(&mut self, data: &[u8], now: Instant) -> Result<(), ProtocolError> {
         if let Some(dtls) = &mut self.dtls {
             let events = dtls.handle_read(data, now)?;
             for event in events {
                 self.handle_dtls_event(event, now);
             }
         }
-
-        self.pump(now)?;
         Ok(())
     }
 
@@ -361,6 +380,7 @@ impl Session {
                 self.fail();
             }
         }
+        self.start_transports_on_selected_pair(now)?;
 
         let mut failed = false;
         if let (Some(sctp), Some(dtls)) = (&mut self.sctp, &mut self.dtls) {
@@ -654,6 +674,87 @@ mod tests {
         while offerer.poll().is_some() {}
         while answerer.poll().is_some() {}
         (offerer, answerer, now)
+    }
+
+    fn forward(
+        from: &mut Session,
+        to: &mut Session,
+        (from_addr, to_addr): (SocketAddr, SocketAddr),
+        ready: &mut bool,
+        now: Instant,
+    ) -> bool {
+        let outputs: Vec<_> = std::iter::from_fn(|| from.poll()).collect();
+        let progressed = !outputs.is_empty();
+        for output in outputs {
+            match output {
+                SessionOutput::Send(data, dest) if dest == to_addr => to
+                    .handle(SessionInput::Packet(data.into(), from_addr, now))
+                    .unwrap(),
+                SessionOutput::Event(SessionEvent::Ready) => *ready = true,
+                _ => {}
+            }
+        }
+        progressed
+    }
+
+    fn drive_until_ready(
+        offerer: &mut Session,
+        answerer: &mut Session,
+        mut now: Instant,
+    ) -> (bool, bool) {
+        let (mut offerer_ready, mut answerer_ready) = (false, false);
+        for _ in 0..5000 {
+            let sent = (addr(40100), addr(40101));
+            let answered = (addr(40101), addr(40100));
+            let progressed = forward(offerer, answerer, sent, &mut offerer_ready, now)
+                | forward(answerer, offerer, answered, &mut answerer_ready, now);
+            if offerer_ready && answerer_ready {
+                break;
+            }
+            if !progressed {
+                now += Duration::from_millis(5);
+                offerer.handle(SessionInput::Timeout(now)).unwrap();
+                answerer.handle(SessionInput::Timeout(now)).unwrap();
+            }
+        }
+        (offerer_ready, answerer_ready)
+    }
+
+    #[test]
+    fn transports_follow_the_ice_selected_pair_past_a_dead_first_candidate() {
+        let now = Instant::now();
+        let (mut offerer, offer) = Session::new(addr(40100), true, now).unwrap();
+        let (mut answerer, answer) = Session::new(addr(40101), false, now).unwrap();
+        let (dead, _) = Session::new(addr(40199), false, now).unwrap();
+
+        let offer_sdp = offer.encode_full(&[offerer.local_candidate().clone()]);
+        let answer_sdp = answer.encode_full(&[
+            dead.local_candidate().clone(),
+            answerer.local_candidate().clone(),
+        ]);
+        let (parsed_offer, offer_candidates) = Description::parse(&offer_sdp).unwrap();
+        let (parsed_answer, answer_candidates) = Description::parse(&answer_sdp).unwrap();
+        assert_eq!(answer_candidates[0].addr(), addr(40199));
+
+        answerer
+            .handle(SessionInput::RemoteDescription(
+                parsed_offer,
+                offer_candidates,
+                now,
+            ))
+            .unwrap();
+        offerer
+            .handle(SessionInput::RemoteDescription(
+                parsed_answer,
+                answer_candidates,
+                now,
+            ))
+            .unwrap();
+
+        let (offerer_ready, answerer_ready) = drive_until_ready(&mut offerer, &mut answerer, now);
+        assert!(offerer_ready, "offerer never became ready");
+        assert!(answerer_ready, "answerer never became ready");
+        assert_eq!(offerer.remote_addr(), Some(addr(40101)));
     }
 
     #[test]
