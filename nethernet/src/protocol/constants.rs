@@ -19,6 +19,9 @@ pub const SCTP_PORT: u16 = 5000;
 /// `max-message-size` assumed when the remote SDP omits it.
 pub const SCTP_MAX_MESSAGE_SIZE: u32 = 65536;
 
+/// `max-message-size` we advertise, matching the vanilla client.
+pub const LOCAL_SCTP_MAX_MESSAGE_SIZE: u32 = 262144;
+
 /// Labels of the two data channels NetherNet always opens (guide section 6).
 pub const RELIABLE_CHANNEL: &str = "ReliableDataChannel";
 pub const UNRELIABLE_CHANNEL: &str = "UnreliableDataChannel";

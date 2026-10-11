@@ -5,7 +5,7 @@ mod ice;
 mod sctp;
 
 use crate::error::ProtocolError;
-use crate::protocol::constants::SCTP_MAX_MESSAGE_SIZE;
+use crate::protocol::constants::{LOCAL_SCTP_MAX_MESSAGE_SIZE, SCTP_MAX_MESSAGE_SIZE};
 use crate::protocol::message::{Message as Framing, MessageSegment};
 use crate::protocol::webrtc::{Description, DtlsRole, certificate};
 use crate::sans::Sans;
@@ -94,11 +94,11 @@ impl Channels {
 pub struct Session {
     is_controlling: bool,
     local_addr: SocketAddr,
-    local_description: Description,
     ice: IceLayer,
     certificate: Option<rtc::dtls::crypto::Certificate>,
 
     pending_role_fingerprint: Option<(ResolvedRole, (String, String))>,
+    remote_max_message_size: u32,
 
     remote: Option<RemoteInfo>,
     dtls: Option<DtlsLayer>,
@@ -129,17 +129,17 @@ impl Session {
                 DtlsRole::Auto
             },
             fingerprint,
-            sctp_max_message_size: SCTP_MAX_MESSAGE_SIZE,
+            sctp_max_message_size: LOCAL_SCTP_MAX_MESSAGE_SIZE,
             identity: None,
         };
 
         let session = Self {
             is_controlling,
             local_addr,
-            local_description: local_description.clone(),
             ice,
             certificate: Some(certificate),
             pending_role_fingerprint: None,
+            remote_max_message_size: SCTP_MAX_MESSAGE_SIZE,
             remote: None,
             dtls: None,
             sctp: None,
@@ -177,6 +177,10 @@ impl Session {
 
         let resolved_role = ResolvedRole::from_remote_announced(remote.dtls_role);
         let fingerprint = remote.fingerprint.clone();
+        self.remote_max_message_size = match remote.sctp_max_message_size {
+            0 => u32::MAX,
+            size => size,
+        };
 
         for candidate in &candidates {
             self.ice.add_remote_candidate(candidate.clone())?;
@@ -231,7 +235,7 @@ impl Session {
             self.local_addr,
             remote_addr,
             resolved_role,
-            self.local_description.sctp_max_message_size,
+            self.remote_max_message_size,
             now,
         )?;
 
@@ -667,6 +671,81 @@ mod tests {
         let sent = std::iter::from_fn(|| offerer.poll())
             .any(|output| matches!(output, SessionOutput::Send(..)));
         assert!(sent, "the send stayed buffered until the next timeout");
+    }
+
+    fn reliable_messages_after_exchange(
+        receiver: &mut Session,
+        sender: &mut Session,
+        mut now: Instant,
+    ) -> Vec<Vec<u8>> {
+        let mut received = Vec::new();
+        for _ in 0..500 {
+            let mut progressed = false;
+            let outbox: Vec<_> = std::iter::from_fn(|| sender.poll()).collect();
+            for output in outbox {
+                if let SessionOutput::Send(data, to) = output {
+                    progressed = true;
+                    receiver
+                        .handle(SessionInput::Packet(data.into(), to, now))
+                        .unwrap();
+                }
+            }
+            let outbox: Vec<_> = std::iter::from_fn(|| receiver.poll()).collect();
+            for output in outbox {
+                match output {
+                    SessionOutput::Send(data, to) => {
+                        progressed = true;
+                        sender
+                            .handle(SessionInput::Packet(data.into(), to, now))
+                            .unwrap();
+                    }
+                    SessionOutput::Message(Channel::Reliable, data) => received.push(data),
+                    _ => {}
+                }
+            }
+            if !received.is_empty() {
+                break;
+            }
+            if !progressed {
+                now += Duration::from_millis(5);
+                sender.handle(SessionInput::Timeout(now)).unwrap();
+                receiver.handle(SessionInput::Timeout(now)).unwrap();
+            }
+        }
+        received
+    }
+
+    #[test]
+    fn we_advertise_the_vanilla_max_message_size() {
+        let (_, offer) = Session::new(addr(40100), true, Instant::now()).unwrap();
+        assert_eq!(offer.sctp_max_message_size, 262144);
+    }
+
+    #[test]
+    fn a_peer_may_send_one_sctp_message_up_to_our_advertised_size() {
+        let (mut offerer, mut answerer, now) = connected_pair();
+        let payload = vec![7u8; 200_000];
+
+        let stream_id = answerer.channels.stream_id(Channel::Reliable).unwrap();
+        let mut stream = answerer
+            .sctp
+            .as_mut()
+            .unwrap()
+            .association_mut()
+            .unwrap()
+            .stream(stream_id)
+            .unwrap();
+        stream
+            .write_with_ppi(
+                now,
+                &MessageSegment::new(0, Bytes::from(payload.clone())).encode(),
+                PayloadProtocolIdentifier::Binary,
+            )
+            .expect("a 200 KB message fits the offerer's advertised max-message-size");
+        answerer.pump(now).unwrap();
+
+        let received = reliable_messages_after_exchange(&mut offerer, &mut answerer, now);
+        assert_eq!(received, vec![payload]);
     }
 
     #[test]
