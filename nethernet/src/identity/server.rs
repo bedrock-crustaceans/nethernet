@@ -10,6 +10,9 @@ use p384::pkcs8::LineEnding;
 use serde_json::json;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Domain used when none is given, since peers refuse an empty one.
+pub const DEFAULT_DOMAIN: &str = "self";
+
 /// Token validity used when no lifetime is given.
 pub const DEFAULT_TOKEN_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -60,7 +63,10 @@ impl ServerIdentity {
         lifetime: Option<Duration>,
     ) -> Result<Self> {
         let verifying = *signing.verifying_key();
-        let domain = domain.into();
+        let domain = match domain.into() {
+            domain if domain.is_empty() => DEFAULT_DOMAIN.to_string(),
+            domain => domain,
+        };
         let token = mint_token(&signing, &verifying, &domain, now, lifetime)?;
 
         Ok(Self {
@@ -231,6 +237,15 @@ mod tests {
                 .identity_value(FIXTURE_ANSWER, fixture_now())
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn an_empty_domain_becomes_self_as_peers_require() {
+        let identity = ServerIdentity::generate("", UNIX_EPOCH).unwrap();
+        let value = identity.identity_value(ANSWER, UNIX_EPOCH).unwrap();
+
+        assert_eq!(identity.domain(), "self");
+        assert_eq!(Identity::from_base64(&value).unwrap().idp.domain, "self");
     }
 
     #[test]
