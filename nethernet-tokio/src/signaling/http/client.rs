@@ -77,10 +77,7 @@ impl HttpSignaling {
             .map_err(|e| NetherError::Other(format!("request server data: {}", e)))?;
 
         let status = response.status();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|e| NetherError::Other(format!("read server data: {}", e)))?;
+        let body = read_capped(response, "server data").await?;
         Ok(join::validate_status_response(status.as_u16(), &body)?)
     }
 
@@ -96,10 +93,8 @@ impl HttpSignaling {
             .map_err(|e| NetherError::Other(format!("signal offer: {}", e)))?;
 
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| NetherError::Other(format!("read answer: {}", e)))?;
+        let body = read_capped(response, "answer").await?;
+        let body = String::from_utf8_lossy(&body).into_owned();
 
         join::validate_join_response(status.as_u16(), &body).map_err(|e| match e {
             join::JoinResponseError::Rejected(code) => NetherError::Signaled(code),
@@ -108,6 +103,34 @@ impl HttpSignaling {
 
         Ok(body)
     }
+}
+
+async fn read_capped(mut response: reqwest::Response, what: &str) -> Result<Vec<u8>> {
+    let exceeded = || {
+        NetherError::Other(format!(
+            "{what} exceeds the {}-byte limit",
+            join::MAX_ANSWER_SIZE
+        ))
+    };
+    if response
+        .content_length()
+        .is_some_and(|len| len > join::MAX_ANSWER_SIZE as u64)
+    {
+        return Err(exceeded());
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| NetherError::Other(format!("read {what}: {e}")))?
+    {
+        if body.len() + chunk.len() > join::MAX_ANSWER_SIZE {
+            return Err(exceeded());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 impl HttpSignaling {

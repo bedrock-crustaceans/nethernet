@@ -108,3 +108,60 @@ async fn candidates_are_not_signaled_separately() {
 
     assert!(err.to_string().contains("not supported"), "{err}");
 }
+
+async fn endless_body_server() -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = vec![0u8; 4096];
+        let _ = stream.read(&mut request).await;
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+            .await
+            .unwrap();
+        let chunk = vec![b'a'; 0x10000];
+        for _ in 0..24 {
+            if stream.write_all(b"10000\r\n").await.is_err()
+                || stream.write_all(&chunk).await.is_err()
+                || stream.write_all(b"\r\n").await.is_err()
+            {
+                return;
+            }
+        }
+        std::future::pending::<()>().await;
+    });
+    addr
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn join_answer_past_the_limit_fails_while_streaming() {
+    let addr = endless_body_server().await;
+    let signaling = HttpSignaling::new("1234".to_string()).unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        signaling.signal(Signal::offer(
+            42,
+            "v=0\r\n".to_string(),
+            format!("http://{addr}"),
+        )),
+    )
+    .await
+    .expect("the client should give up before the body ends");
+    assert!(result.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn server_data_past_the_limit_fails_while_streaming() {
+    let addr = endless_body_server().await;
+    let signaling = HttpSignaling::new("1234".to_string()).unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        signaling.server_data(&format!("http://{addr}")),
+    )
+    .await
+    .expect("the client should give up before the body ends");
+    assert!(result.is_err());
+}
