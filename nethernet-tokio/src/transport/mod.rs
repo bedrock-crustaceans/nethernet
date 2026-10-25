@@ -2,6 +2,7 @@
 pub mod client;
 mod pending;
 pub mod server;
+pub(crate) mod shared;
 
 pub use client::NetherClient;
 pub use nethernet::connection::Timeouts;
@@ -57,6 +58,9 @@ pub struct ConnectionConfig {
 
     /// The same cap for offers from one network id.
     pub max_pending_per_network_id: usize,
+
+    /// One UDP socket bound here serves every server session; None binds an ephemeral socket per session.
+    pub media_addr: Option<SocketAddr>,
 }
 
 impl Default for ConnectionConfig {
@@ -72,6 +76,7 @@ impl Default for ConnectionConfig {
             infer_peer_candidates: true,
             max_pending: DEFAULT_MAX_PENDING,
             max_pending_per_network_id: DEFAULT_MAX_PENDING_PER_NETWORK_ID,
+            media_addr: None,
         }
     }
 }
@@ -91,6 +96,7 @@ impl fmt::Debug for ConnectionConfig {
                 "max_pending_per_network_id",
                 &self.max_pending_per_network_id,
             )
+            .field("media_addr", &self.media_addr)
             .finish()
     }
 }
