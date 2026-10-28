@@ -59,7 +59,8 @@ pub struct ConnectionConfig {
     /// The same cap for offers from one network id.
     pub max_pending_per_network_id: usize,
 
-    /// One UDP socket bound here serves every server session; None binds an ephemeral socket per session.
+    /// Server only, NetherClient ignores it: one UDP socket bound here serves every session, and
+    /// `0.0.0.0:0` gives one shared random port. None binds an ephemeral socket per session.
     pub media_addr: Option<SocketAddr>,
 }
 

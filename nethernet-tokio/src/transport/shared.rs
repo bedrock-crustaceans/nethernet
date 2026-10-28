@@ -51,8 +51,8 @@ impl SharedSocket {
         self.advertised
     }
 
-    /// Registers a session reached through the STUN username fragment `local_ufrag`.
-    pub(crate) fn route(&self, local_ufrag: String) -> SharedRoute {
+    /// Registers a session reached through the STUN username fragment `local_ufrag`; the route keeps the socket open.
+    pub(crate) fn route(self: &Arc<Self>, local_ufrag: String) -> SharedRoute {
         let (tx, rx) = mpsc::channel(ROUTE_CHANNEL_CAPACITY);
         let mut state = lock(&self.state);
         let id = state.next_id;
@@ -63,8 +63,7 @@ impl SharedSocket {
             id,
             local_ufrag,
             remote_addr: None,
-            socket: self.socket.clone(),
-            state: self.state.clone(),
+            shared: self.clone(),
             packets: rx,
         }
     }
@@ -100,8 +99,7 @@ pub(crate) struct SharedRoute {
     id: u64,
     local_ufrag: String,
     remote_addr: Option<SocketAddr>,
-    socket: Arc<UdpSocket>,
-    state: Arc<Mutex<State>>,
+    shared: Arc<SharedSocket>,
     packets: mpsc::Receiver<Datagram>,
 }
 
@@ -112,28 +110,32 @@ impl SharedRoute {
 
     pub(crate) async fn send_to(&self, data: &[u8], to: SocketAddr) -> io::Result<usize> {
         if self.remote_addr.is_none() {
-            lock(&self.state).router.note_sent(to, self.id);
+            lock(&self.shared.state).router.note_sent(to, self.id);
         }
-        self.socket.send_to(data, to).await
+        self.shared.socket.send_to(data, to).await
     }
 
-    /// Routes everything from `addr` to this session once its pair is selected.
+    /// Routes everything from `addr` to this session once its pair is selected; retried while another session holds `addr`.
     pub(crate) fn claim(&mut self, addr: SocketAddr) {
-        if self.remote_addr.is_none() {
+        if self.remote_addr.is_none() && lock(&self.shared.state).router.claim_addr(addr, self.id) {
             self.remote_addr = Some(addr);
-            lock(&self.state).router.claim_addr(addr, self.id);
         }
     }
 }
 
 impl Drop for SharedRoute {
     fn drop(&mut self) {
-        let mut state = lock(&self.state);
+        let mut state = lock(&self.shared.state);
         state.sessions.remove(&self.id);
         state
             .router
             .release(self.id, &self.local_ufrag, self.remote_addr);
     }
+}
+
+/// A dual-stack socket reports IPv4 peers as `::ffff:a.b.c.d`; keys use the plain form either way.
+fn canonical(addr: SocketAddr) -> SocketAddr {
+    SocketAddr::new(addr.ip().to_canonical(), addr.port())
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -149,6 +151,7 @@ struct Router {
 
 impl Router {
     fn route(&self, from: SocketAddr, datagram: &[u8]) -> Vec<u64> {
+        let from = canonical(from);
         if let Some(id) = self.by_addr.get(&from) {
             return vec![*id];
         }
@@ -170,19 +173,23 @@ impl Router {
         self.by_ufrag.insert(ufrag, id);
     }
 
-    fn claim_addr(&mut self, addr: SocketAddr, id: u64) {
-        self.by_addr.entry(addr).or_insert(id);
+    /// Whether `id` owns `addr` afterwards; the first session to claim an address keeps it.
+    fn claim_addr(&mut self, addr: SocketAddr, id: u64) -> bool {
+        *self.by_addr.entry(canonical(addr)).or_insert(id) == id
     }
 
     fn note_sent(&mut self, addr: SocketAddr, id: u64) {
-        self.provisional.entry(addr).or_default().insert(id);
+        self.provisional
+            .entry(canonical(addr))
+            .or_default()
+            .insert(id);
     }
 
     fn release(&mut self, id: u64, ufrag: &str, addr: Option<SocketAddr>) {
         if self.by_ufrag.get(ufrag) == Some(&id) {
             self.by_ufrag.remove(ufrag);
         }
-        if let Some(addr) = addr
+        if let Some(addr) = addr.map(canonical)
             && self.by_addr.get(&addr) == Some(&id)
         {
             self.by_addr.remove(&addr);
@@ -197,6 +204,7 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], port))
@@ -255,6 +263,38 @@ mod tests {
 
         assert_eq!(router.route(addr(1), &stun(0x0101, None)), vec![3]);
         assert_eq!(router.route(addr(1), b"dtls"), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn a_mapped_reply_reaches_the_session_that_sent_to_the_plain_address() {
+        let mut router = Router::default();
+        router.note_sent(addr(1), 5);
+        let mapped = SocketAddr::from((Ipv4Addr::LOCALHOST.to_ipv6_mapped(), 1));
+
+        assert_eq!(router.route(mapped, &stun(0x0101, None)), vec![5]);
+    }
+
+    #[test]
+    fn a_claimed_address_matches_its_mapped_form() {
+        let mut router = Router::default();
+        let mapped = SocketAddr::from((Ipv4Addr::LOCALHOST.to_ipv6_mapped(), 1));
+        assert!(router.claim_addr(mapped, 6));
+
+        assert_eq!(router.route(addr(1), b"dtls"), vec![6]);
+        router.release(6, "", Some(addr(1)));
+        assert!(router.route(mapped, b"dtls").is_empty());
+    }
+
+    #[test]
+    fn an_address_owned_by_another_session_is_not_claimed_until_released() {
+        let mut router = Router::default();
+        assert!(router.claim_addr(addr(1), 1));
+        assert!(!router.claim_addr(addr(1), 2));
+        assert_eq!(router.route(addr(1), b"dtls"), vec![1]);
+
+        router.release(1, "", Some(addr(1)));
+        assert!(router.claim_addr(addr(1), 2));
+        assert_eq!(router.route(addr(1), b"dtls"), vec![2]);
     }
 
     #[test]
