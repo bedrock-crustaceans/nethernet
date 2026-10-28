@@ -1,7 +1,7 @@
 use crate::addr::Addr;
 use crate::error::{NetherError, Result, SignalErrorCode};
 use crate::protocol::{Signal, SignalType};
-use crate::session::{AcceptedSession, Command, Session, SessionReceiver};
+use crate::session::{AcceptedSession, Command, Session, SessionReceiver, SessionSocket};
 use crate::signaling::ClientSignaling;
 use crate::transport::{ConnectionConfig, local_bind_addr};
 use bytes::Bytes;
@@ -283,7 +283,7 @@ impl NetherClient {
         let remote = Addr::new(remote_network_id.to_string(), connection_id);
 
         let (session, reliable, unreliable, ready_rx) =
-            Session::spawn(socket, connection, local, remote);
+            Session::spawn(SessionSocket::Owned(socket), connection, local, remote);
 
         spawn_late_signal_forwarder(
             signals,

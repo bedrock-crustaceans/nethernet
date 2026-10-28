@@ -5,12 +5,15 @@ pub(crate) use command::Command;
 
 use crate::addr::Addr;
 use crate::error::{NetherError, Result};
+use crate::transport::shared::SharedRoute;
 use bytes::Bytes;
 use nethernet::connection::{Connection as SansConnection, ConnectionInput};
 use nethernet::identity::PlayerInfo;
 use nethernet::sans::Sans;
 pub use nethernet::session::Channel;
 use nethernet::session::{SessionEvent, SessionOutput};
+use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -32,6 +35,40 @@ impl Drop for TaskGuard {
     fn drop(&mut self) {
         self.close_token.cancel();
         self.task.abort();
+    }
+}
+
+/// The UDP socket a session exchanges datagrams over.
+pub(crate) enum SessionSocket {
+    Owned(Arc<UdpSocket>),
+    Shared(SharedRoute),
+}
+
+impl SessionSocket {
+    async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(Box<[u8]>, SocketAddr)> {
+        match self {
+            Self::Owned(socket) => {
+                let (n, from) = socket.recv_from(buf).await?;
+                Ok((buf[..n].into(), from))
+            }
+            Self::Shared(route) => match route.recv_from().await {
+                Some(datagram) => Ok(datagram),
+                None => std::future::pending().await,
+            },
+        }
+    }
+
+    async fn send_to(&self, data: &[u8], to: SocketAddr) -> io::Result<usize> {
+        match self {
+            Self::Owned(socket) => socket.send_to(data, to).await,
+            Self::Shared(route) => route.send_to(data, to).await,
+        }
+    }
+
+    fn claim(&mut self, addr: SocketAddr) {
+        if let Self::Shared(route) = self {
+            route.claim(addr);
+        }
     }
 }
 
@@ -70,7 +107,7 @@ pub struct AcceptedSession {
 
 impl Session {
     pub(crate) fn spawn(
-        socket: Arc<UdpSocket>,
+        socket: SessionSocket,
         connection: SansConnection,
         local: Addr,
         remote: Addr,
@@ -129,7 +166,7 @@ impl Session {
 
     #[allow(clippy::too_many_arguments)]
     fn drive(
-        socket: Arc<UdpSocket>,
+        mut socket: SessionSocket,
         mut connection: SansConnection,
         mut commands: mpsc::UnboundedReceiver<Command>,
         packet_tx: mpsc::Sender<Bytes>,
@@ -151,9 +188,9 @@ impl Session {
 
                     _ = close_token.cancelled() => break,
                     received = socket.recv_from(&mut buf) => match received {
-                        Ok((n, from)) => {
+                        Ok((data, from)) => {
                             let now = Instant::now();
-                            let input = ConnectionInput::Packet(buf[..n].into(), from, now);
+                            let input = ConnectionInput::Packet(data, from, now);
                             if let Err(e) = connection.handle(input) {
                                 tracing::debug!("packet handling error: {e}");
                             }
@@ -231,6 +268,9 @@ impl Session {
                     }
                 }
 
+                if let Some(addr) = connection.remote_addr() {
+                    socket.claim(addr);
+                }
                 rtt = connection.rtt();
             }
 

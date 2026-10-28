@@ -98,6 +98,118 @@ async fn offer_is_negotiated_over_the_endpoint() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sessions_sharing_one_media_socket_each_receive_their_own_messages() {
+    let media = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let media_addr = media.local_addr().unwrap();
+    drop(media);
+
+    let signaling = HttpSignalingServer::bind("127.0.0.1:0".parse().unwrap(), server_config())
+        .await
+        .unwrap();
+    let url = format!("http://{}", signaling.local_addr());
+    let mut listener = NetherServer::bind_with(
+        signaling,
+        ConnectionConfig {
+            media_addr: Some(media_addr),
+            ..server_connection_config()
+        },
+    )
+    .await
+    .unwrap();
+
+    tokio::spawn(async move {
+        while let Ok(AcceptedSession {
+            session,
+            mut reliable,
+            ..
+        }) = listener.accept().await
+        {
+            tokio::spawn(async move {
+                while let Ok(Some(data)) = reliable.recv().await {
+                    session.send(data).await.unwrap();
+                }
+            });
+        }
+    });
+
+    let mut streams = Vec::new();
+    for _ in 0..2 {
+        let signaling = HttpSignaling::new(NETWORK_ID.to_string()).unwrap();
+        let stream = tokio::time::timeout(
+            Duration::from_secs(20),
+            NetherClient::connect_with(signaling, url.clone(), client_config()),
+        )
+        .await
+        .expect("negotiation timed out")
+        .expect("failed to connect");
+        assert_eq!(stream.remote_addr().await.socket_addr, Some(media_addr));
+        streams.push(stream);
+    }
+
+    for (i, stream) in streams.iter_mut().enumerate() {
+        let message = Bytes::from(format!("hello {i}"));
+        stream.send(message.clone()).await.unwrap();
+        let echoed = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+            .await
+            .expect("echo timed out")
+            .unwrap();
+        assert_eq!(echoed, Some(message));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_accepted_session_on_a_shared_media_socket_outlives_the_server() {
+    let signaling = HttpSignalingServer::bind("127.0.0.1:0".parse().unwrap(), server_config())
+        .await
+        .unwrap();
+    let url = format!("http://{}", signaling.local_addr());
+    let mut listener = NetherServer::bind_with(
+        signaling,
+        ConnectionConfig {
+            media_addr: Some("127.0.0.1:0".parse().unwrap()),
+            ..server_connection_config()
+        },
+    )
+    .await
+    .unwrap();
+
+    let client = tokio::spawn(async move {
+        let signaling = HttpSignaling::new(NETWORK_ID.to_string()).unwrap();
+        NetherClient::connect_with(signaling, url, client_config()).await
+    });
+    let AcceptedSession {
+        session,
+        mut reliable,
+        ..
+    } = tokio::time::timeout(Duration::from_secs(20), listener.accept())
+        .await
+        .expect("accept timed out")
+        .unwrap();
+    let mut stream = tokio::time::timeout(Duration::from_secs(20), client)
+        .await
+        .expect("negotiation timed out")
+        .unwrap()
+        .expect("failed to connect");
+    drop(listener);
+
+    tokio::spawn(async move {
+        while let Ok(Some(data)) = reliable.recv().await {
+            session.send(data).await.unwrap();
+        }
+    });
+
+    stream
+        .send(Bytes::from_static(b"still here"))
+        .await
+        .unwrap();
+    let echoed = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+        .await
+        .expect("echo timed out")
+        .unwrap();
+    assert_eq!(echoed.as_deref(), Some(&b"still here"[..]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn binding_an_http_server_without_an_identity_is_refused() {
     let signaling = HttpSignalingServer::bind("127.0.0.1:0".parse().unwrap(), server_config())
         .await

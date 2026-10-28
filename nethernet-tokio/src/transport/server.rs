@@ -1,9 +1,10 @@
 use crate::addr::Addr;
 use crate::error::{NetherError, Result, SignalErrorCode};
 use crate::protocol::{Signal, SignalType};
-use crate::session::{AcceptedSession, Command, Session};
+use crate::session::{AcceptedSession, Command, Session, SessionSocket};
 use crate::signaling::ServerSignaling;
 use crate::transport::pending::PendingOffers;
+use crate::transport::shared::SharedSocket;
 use crate::transport::{ConnectionConfig, local_bind_addr};
 use futures::{Stream, StreamExt};
 use nethernet::admission::OfferPolicy;
@@ -67,6 +68,12 @@ impl NetherServer {
             return Err(NetherError::IdentityRequired);
         }
         let local_addr = Addr::network(signaling.network_id());
+        let shared = match config.media_addr {
+            Some(addr) => Some(Arc::new(
+                SharedSocket::bind(addr, local_bind_addr().ip()).await?,
+            )),
+            None => None,
+        };
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
         let token_trust = Arc::new(RwLock::new(config.token_trust.clone()));
@@ -77,6 +84,7 @@ impl NetherServer {
             cancel_token.clone(),
             config,
             token_trust.clone(),
+            shared,
         );
 
         let listener = Self {
@@ -97,6 +105,7 @@ impl NetherServer {
         cancel_token: CancellationToken,
         config: ConnectionConfig,
         token_trust: SharedTrust,
+        shared: Option<Arc<SharedSocket>>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut dispatchers: SignalDispatchers = HashMap::new();
@@ -126,6 +135,7 @@ impl NetherServer {
                                             &mut dispatchers,
                                             &pending,
                                             config,
+                                            shared.clone(),
                                         )
                                         .await
                                         {
@@ -157,6 +167,7 @@ impl NetherServer {
         dispatchers: &mut SignalDispatchers,
         pending: &PendingOffers,
         config: ConnectionConfig,
+        shared: Option<Arc<SharedSocket>>,
     ) -> Result<()> {
         let connection_id = signal.connection_id;
         let network_id = signal.network_id.clone();
@@ -164,7 +175,7 @@ impl NetherServer {
         let cancel_token = config.cancel_token.clone();
         let result = tokio::select! {
             _ = cancel_token.cancelled() => Err((None, NetherError::ConnectionClosed)),
-            result = Self::answer_offer(signal, signaling, incoming_tx, dispatchers, pending, config.clone()) => result,
+            result = Self::answer_offer(signal, signaling, incoming_tx, dispatchers, pending, config.clone(), shared) => result,
         };
 
         match result {
@@ -185,6 +196,7 @@ impl NetherServer {
         dispatchers: &mut SignalDispatchers,
         pending: &PendingOffers,
         config: ConnectionConfig,
+        shared: Option<Arc<SharedSocket>>,
     ) -> std::result::Result<(), (Option<SignalErrorCode>, NetherError)> {
         let slot = pending
             .try_admit(
@@ -236,22 +248,27 @@ impl NetherServer {
             .admit(&signal, remote_address, SystemTime::now())
             .map_err(|e| (Some(e.code()), NetherError::from(e)))?;
 
-        let socket = Arc::new(UdpSocket::bind(local_bind_addr()).await.map_err(|e| {
-            (
-                Some(SignalErrorCode::FailedToCreatePeerConnection),
-                NetherError::from(e),
-            )
-        })?);
-        let bound_addr = socket.local_addr().map_err(|e| {
-            (
-                Some(SignalErrorCode::FailedToCreatePeerConnection),
-                NetherError::from(e),
-            )
-        })?;
+        let (bound_addr, owned) = match &shared {
+            Some(shared) => (shared.advertised_addr(), None),
+            None => {
+                let socket = UdpSocket::bind(local_bind_addr())
+                    .await
+                    .map_err(peer_connection_failed)?;
+                let bound_addr = socket.local_addr().map_err(peer_connection_failed)?;
+                (bound_addr, Some(Arc::new(socket)))
+            }
+        };
 
         let answered = admitted
             .answer(bound_addr, Instant::now())
             .map_err(|e| (Some(e.code()), NetherError::from(e)))?;
+        let socket = match (owned, &shared) {
+            (Some(socket), _) => SessionSocket::Owned(socket),
+            (None, Some(shared)) => {
+                SessionSocket::Shared(shared.route(answered.local_ufrag.clone()))
+            }
+            (None, None) => unreachable!("a socket is bound whenever none is shared"),
+        };
         let player = answered.player.map(Arc::new).or(signaled_player);
         let connection = answered.connection;
 
@@ -384,6 +401,13 @@ fn spawn_late_signal_forwarder(
             }
         }
     });
+}
+
+fn peer_connection_failed(e: std::io::Error) -> (Option<SignalErrorCode>, NetherError) {
+    (
+        Some(SignalErrorCode::FailedToCreatePeerConnection),
+        NetherError::from(e),
+    )
 }
 
 async fn wait_ready(
