@@ -1,4 +1,4 @@
-//! ICE agent limited to one UDP host candidate, with no STUN or TURN.
+//! ICE agent limited to UDP host candidates sharing one port, with no STUN or TURN.
 use crate::error::ProtocolError;
 use crate::protocol::webrtc::certificate;
 use bytes::BytesMut;
@@ -9,7 +9,7 @@ use rtc::ice::candidate::{Candidate, CandidateConfig, CandidateType};
 use rtc::ice::network_type::NetworkType;
 use rtc::sansio::Protocol;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,8 +19,10 @@ pub struct IceLayer {
 }
 
 impl IceLayer {
-    pub fn new(
+    /// Announces `local_addr` first, then one host candidate per `advertised` address on the same port.
+    pub fn with_advertised(
         local_addr: SocketAddr,
+        advertised: &[IpAddr],
         is_controlling: bool,
         now: Instant,
     ) -> Result<IceLayer, ProtocolError> {
@@ -36,22 +38,30 @@ impl IceLayer {
         let mut agent = Agent::new(now, Arc::new(config), certificate::crypto_provider()?)
             .map_err(|e| ProtocolError::Other(format!("{e}")))?;
 
-        let candidate = CandidateHostConfig {
-            base_config: CandidateConfig {
-                network: "udp".to_string(),
-                address: local_addr.ip().to_string(),
-                port: local_addr.port(),
-                component: 1,
-                ..Default::default()
-            },
-            ..Default::default()
+        let mut announced = vec![local_addr.ip()];
+        for ip in advertised {
+            if !announced.contains(ip) {
+                announced.push(*ip);
+            }
         }
-        .new_candidate_host()
-        .map_err(|e| ProtocolError::Other(format!("{e}")))?;
-
-        agent
-            .add_local_candidate(candidate)
+        for ip in announced {
+            let candidate = CandidateHostConfig {
+                base_config: CandidateConfig {
+                    network: "udp".to_string(),
+                    address: ip.to_string(),
+                    port: local_addr.port(),
+                    component: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+            .new_candidate_host()
             .map_err(|e| ProtocolError::Other(format!("{e}")))?;
+
+            agent
+                .add_local_candidate(candidate)
+                .map_err(|e| ProtocolError::Other(format!("{e}")))?;
+        }
 
         Ok(Self { agent, local_addr })
     }
@@ -62,6 +72,10 @@ impl IceLayer {
 
     pub fn local_candidate(&self) -> &Candidate {
         &self.agent.get_local_candidates()[0]
+    }
+
+    pub fn local_candidates(&self) -> &[Candidate] {
+        self.agent.get_local_candidates()
     }
 
     pub fn set_remote_credentials(
@@ -151,8 +165,8 @@ mod tests {
     #[test]
     fn two_agents_connect_over_loopback() {
         let mut now = Instant::now();
-        let mut a = IceLayer::new(addr(40000), true, now).unwrap();
-        let mut b = IceLayer::new(addr(40001), false, now).unwrap();
+        let mut a = IceLayer::with_advertised(addr(40000), &[], true, now).unwrap();
+        let mut b = IceLayer::with_advertised(addr(40001), &[], false, now).unwrap();
 
         let a_creds = a.local_credentials().clone();
         let b_creds = b.local_credentials().clone();
@@ -228,5 +242,35 @@ mod tests {
         stun_header.extend_from_slice(&0x2112A442u32.to_be_bytes());
         stun_header.extend_from_slice(&[0u8; 12]);
         assert!(is_stun_packet(&stun_header));
+    }
+
+    #[test]
+    fn every_advertised_address_becomes_a_host_candidate_on_the_shared_port() {
+        let now = Instant::now();
+        let extra: [IpAddr; 2] = ["10.0.0.5".parse().unwrap(), "100.64.1.2".parse().unwrap()];
+        let layer = IceLayer::with_advertised(addr(40010), &extra, true, now).unwrap();
+
+        let announced: Vec<(String, u16)> = layer
+            .local_candidates()
+            .iter()
+            .map(|candidate| (candidate.address().to_string(), candidate.port()))
+            .collect();
+        assert_eq!(
+            announced,
+            vec![
+                ("127.0.0.1".to_string(), 40010),
+                ("10.0.0.5".to_string(), 40010),
+                ("100.64.1.2".to_string(), 40010),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_primary_address_is_not_announced_twice() {
+        let now = Instant::now();
+        let layer =
+            IceLayer::with_advertised(addr(40011), &[Ipv4Addr::LOCALHOST.into()], true, now)
+                .unwrap();
+        assert_eq!(layer.local_candidates().len(), 1);
     }
 }

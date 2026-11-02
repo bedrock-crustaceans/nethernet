@@ -1,7 +1,7 @@
 //! LAN server: UDP discovery and signaling with sessions polled once per frame.
 use crate::connection::{ConnectionEvent, SessionPool};
 use crate::pending::{PendingLimits, admits_offer};
-use crate::socket::{bind_discovery_socket, bind_shared_socket, recv_discovery, send_discovery};
+use crate::socket::{bind_discovery_socket, bind_media, recv_discovery, send_discovery};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use nethernet::connection::{IceMode, Timeouts};
@@ -14,7 +14,7 @@ use nethernet::protocol::constants::MAX_DATAGRAM_SIZE;
 use nethernet::protocol::{Signal, SignalType};
 use nethernet::session::Channel;
 use std::collections::{HashMap, VecDeque};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -76,6 +76,7 @@ pub struct NetherServer {
     socket: UdpSocket,
     pool: SessionPool<NetherSessionId>,
     session_local_addr: SocketAddr,
+    advertised_addrs: Vec<IpAddr>,
     identity: Option<ServerIdentity>,
     token_trust: Option<TokenTrust>,
     infer_peer_candidates: bool,
@@ -99,13 +100,21 @@ impl NetherServer {
 
         let socket = bind_discovery_socket(bind_addr)?;
 
-        let (session_socket, session_local_addr) = bind_shared_socket()?;
+        let media = bind_media()?;
+        let (session_socket, session_local_addr, advertised) =
+            (media.socket, media.local_addr, media.advertised);
+        tracing::debug!(
+            "NetherNet LAN sessions listen on port {}, advertising {:?}",
+            session_local_addr.port(),
+            advertised
+        );
 
         Ok(Self {
             signaler: LanSignaler::new(network_id, config),
             socket,
             pool: SessionPool::new(session_socket),
             session_local_addr,
+            advertised_addrs: advertised,
             identity: None,
             token_trust: None,
             infer_peer_candidates: true,
@@ -338,7 +347,9 @@ impl NetherServer {
 
         let answered = policy
             .admit(&offer, signaled_from, SystemTime::now())
-            .and_then(|admitted| admitted.answer(self.session_local_addr, now));
+            .and_then(|admitted| {
+                admitted.answer_advertising(self.session_local_addr, &self.advertised_addrs, now)
+            });
         let Answered {
             connection,
             signals,
@@ -355,6 +366,15 @@ impl NetherServer {
             }
         };
 
+        tracing::debug!(
+            "answering {} with candidates {:?}",
+            offer.network_id,
+            signals
+                .iter()
+                .flat_map(|signal| signal.data.lines())
+                .filter(|line| line.contains("candidate:"))
+                .collect::<Vec<_>>()
+        );
         for signal in signals {
             let _ = self.signaler.handle(LanSignalerInput::Signal(signal, now));
         }

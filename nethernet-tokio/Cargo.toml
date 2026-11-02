@@ -9,6 +9,7 @@ nethernet.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 socket2 = "0.6.5"
+if-addrs = "0.15.0"
 tracing.workspace = true
 bytes.workspace = true
 thiserror.workspace = true

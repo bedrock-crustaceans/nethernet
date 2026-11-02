@@ -1,6 +1,6 @@
 //! LAN client: discovers servers by UDP broadcast and connects to one by network id.
 use crate::connection::{ConnectionEvent, SessionPool};
-use crate::socket::{bind_shared_socket, recv_discovery};
+use crate::socket::{bind_media, recv_discovery};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use nethernet::connection::{Connection, IceMode, Timeouts};
@@ -13,7 +13,7 @@ use nethernet::protocol::constants::{LAN_DISCOVERY_PORT, MAX_DATAGRAM_SIZE};
 use nethernet::protocol::{Signal, SignalType};
 use nethernet::session::{Channel, Session};
 use std::collections::{HashMap, VecDeque};
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant, SystemTime};
 
 const MAX_DATAGRAMS_PER_TICK: usize = 1024;
@@ -61,6 +61,7 @@ pub struct NetherClient {
     socket: UdpSocket,
     pool: SessionPool<()>,
     session_local_addr: SocketAddr,
+    advertised_addrs: Vec<IpAddr>,
     connected: bool,
     connecting_deadline: Option<Instant>,
     answered: bool,
@@ -98,13 +99,16 @@ impl NetherClient {
         socket.set_nonblocking(true)?;
         socket.set_broadcast(true)?;
 
-        let (session_socket, session_local_addr) = bind_shared_socket()?;
+        let media = bind_media()?;
+        let (session_socket, session_local_addr, advertised) =
+            (media.socket, media.local_addr, media.advertised);
 
         Ok(Self {
             signaler: LanSignaler::new(network_id, config),
             socket,
             pool: SessionPool::new(session_socket),
             session_local_addr,
+            advertised_addrs: advertised,
             connected: false,
             connecting_deadline: None,
             answered: false,
@@ -169,9 +173,13 @@ impl NetherClient {
 
     fn begin_attempt(&mut self) -> std::io::Result<()> {
         self.attempts_left = self.attempts_left.saturating_sub(1);
-        let (mut session, description) =
-            Session::new(self.session_local_addr, true, Instant::now())
-                .map_err(std::io::Error::other)?;
+        let (mut session, description) = Session::with_advertised(
+            self.session_local_addr,
+            &self.advertised_addrs,
+            true,
+            Instant::now(),
+        )
+        .map_err(std::io::Error::other)?;
         session.set_establish_deadline(self.timeouts.establish());
         let local_ufrag = description.ice.ufrag.clone();
 

@@ -18,7 +18,7 @@ use rtc::ice::state::ConnectionState as IceConnectionState;
 use rtc::sctp::{Event as SctpEvent, PayloadProtocolIdentifier, StreamId};
 use sctp::SctpLayer;
 use std::collections::VecDeque;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 const RELIABLE_STREAM_ID: StreamId = 1;
@@ -122,7 +122,18 @@ impl Session {
         is_controlling: bool,
         now: Instant,
     ) -> Result<(Session, Description), ProtocolError> {
-        let ice = IceLayer::new(local_addr, is_controlling, now)?;
+        Self::with_advertised(local_addr, &[], is_controlling, now)
+    }
+
+    /// Like [`Session::new`], but also announces a host candidate on the same port for every
+    /// `advertised` address, so a peer can reach whichever interface it has a route to.
+    pub fn with_advertised(
+        local_addr: SocketAddr,
+        advertised: &[IpAddr],
+        is_controlling: bool,
+        now: Instant,
+    ) -> Result<(Session, Description), ProtocolError> {
+        let ice = IceLayer::with_advertised(local_addr, advertised, is_controlling, now)?;
         let certificate = certificate::generate()?;
         let fingerprint = certificate::fingerprint(&certificate)?;
 
@@ -165,6 +176,10 @@ impl Session {
 
     pub fn local_candidate(&self) -> &Candidate {
         self.ice.local_candidate()
+    }
+
+    pub fn local_candidates(&self) -> &[Candidate] {
+        self.ice.local_candidates()
     }
 
     /// The selected ICE remote address, else the first candidate's.

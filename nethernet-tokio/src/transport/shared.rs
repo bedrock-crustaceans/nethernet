@@ -1,4 +1,5 @@
 //! One UDP socket serving every session of a server, each datagram routed to the session it belongs to.
+use super::advertisable_addresses;
 use nethernet::util::stun;
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -15,6 +16,7 @@ type Datagram = (Box<[u8]>, SocketAddr);
 pub(crate) struct SharedSocket {
     socket: Arc<UdpSocket>,
     advertised: SocketAddr,
+    advertised_ips: Vec<IpAddr>,
     state: Arc<Mutex<State>>,
     task: JoinHandle<()>,
 }
@@ -31,16 +33,29 @@ impl SharedSocket {
     pub(crate) async fn bind(addr: SocketAddr, advertised_ip: IpAddr) -> io::Result<Self> {
         let socket = Arc::new(UdpSocket::bind(addr).await?);
         let bound = socket.local_addr()?;
-        let advertised = if bound.ip().is_unspecified() {
-            SocketAddr::new(advertised_ip, bound.port())
+        let (advertised, advertised_ips) = if bound.ip().is_unspecified() {
+            (
+                SocketAddr::new(advertised_ip, bound.port()),
+                advertisable_addresses(advertised_ip),
+            )
         } else {
-            bound
+            (bound, Vec::new())
         };
+        tracing::debug!(
+            "NetherNet shared media socket on port {}, advertising {:?}",
+            advertised.port(),
+            if advertised_ips.is_empty() {
+                vec![advertised.ip()]
+            } else {
+                advertised_ips.clone()
+            }
+        );
         let state = Arc::new(Mutex::new(State::default()));
         let task = tokio::spawn(Self::dispatch(socket.clone(), state.clone()));
         Ok(Self {
             socket,
             advertised,
+            advertised_ips,
             state,
             task,
         })
@@ -49,6 +64,11 @@ impl SharedSocket {
     /// The address answers name as the local candidate.
     pub(crate) fn advertised_addr(&self) -> SocketAddr {
         self.advertised
+    }
+
+    /// Every address answers name as a local candidate on the advertised port.
+    pub(crate) fn advertised_ips(&self) -> &[IpAddr] {
+        &self.advertised_ips
     }
 
     /// Registers a session reached through the STUN username fragment `local_ufrag`; the route keeps the socket open.

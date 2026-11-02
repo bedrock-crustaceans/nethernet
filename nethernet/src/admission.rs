@@ -9,7 +9,7 @@ use crate::sans::Sans;
 use crate::session::Session;
 use crate::util::candidate;
 use rtc::ice::candidate::Candidate;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant, SystemTime};
 use thiserror::Error;
 
@@ -136,8 +136,19 @@ impl Admitted<'_> {
     }
 
     pub fn answer(self, local_addr: SocketAddr, now: Instant) -> Result<Answered, AdmissionError> {
+        self.answer_advertising(local_addr, &[], now)
+    }
+
+    /// Answers with a host candidate for `local_addr` and one for each `advertised` address.
+    pub fn answer_advertising(
+        self,
+        local_addr: SocketAddr,
+        advertised: &[IpAddr],
+        now: Instant,
+    ) -> Result<Answered, AdmissionError> {
         let (mut session, description) =
-            Session::new(local_addr, false, now).map_err(AdmissionError::Session)?;
+            Session::with_advertised(local_addr, advertised, false, now)
+                .map_err(AdmissionError::Session)?;
         if let Some(within) = self.policy.establish_deadline {
             session.set_establish_deadline(within);
         }
@@ -248,6 +259,26 @@ mod tests {
         let answer = &answered.signals[0];
         assert_eq!(answer.signal_type, SignalType::Answer);
         assert!(validate_sdp(&answer.data, &TokenTrust::Any, SystemTime::now()).is_ok());
+    }
+
+    #[test]
+    fn an_answer_announces_every_advertised_address() {
+        let advertised: [IpAddr; 2] = ["10.0.0.5".parse().unwrap(), "100.64.1.2".parse().unwrap()];
+        let answered = OfferPolicy::new(IceMode::Full)
+            .admit(&loopback_offer(), None, SystemTime::now())
+            .unwrap()
+            .answer_advertising(loopback(40304), &advertised, Instant::now())
+            .unwrap();
+
+        let (_, candidates) = Description::parse(&answered.signals[0].data).unwrap();
+        let announced: Vec<String> = candidates
+            .iter()
+            .map(|candidate| format!("{}:{}", candidate.address(), candidate.port()))
+            .collect();
+        assert_eq!(
+            announced,
+            ["127.0.0.1:40304", "10.0.0.5:40304", "100.64.1.2:40304"]
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@ use crate::error::{NetherError, Result, SignalErrorCode};
 use crate::protocol::{Signal, SignalType};
 use crate::session::{AcceptedSession, Command, Session, SessionReceiver, SessionSocket};
 use crate::signaling::ClientSignaling;
-use crate::transport::{ConnectionConfig, local_bind_addr};
+use crate::transport::{ConnectionConfig, advertisable_addresses, local_bind_addr};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use nethernet::connection::{Connection as SansConnection, ConnectionInput, IceMode};
@@ -12,6 +12,7 @@ use nethernet::sans::Sans;
 use nethernet::session::Session as SansSession;
 use rand::Rng;
 use std::io;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -156,21 +157,29 @@ impl NetherClient {
         config: ConnectionConfig,
     ) -> std::result::Result<Self, (Option<SignalErrorCode>, NetherError)> {
         let socket = Arc::new(
-            UdpSocket::bind(local_bind_addr())
+            UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
                 .await
                 .map_err(|e| (None, NetherError::from(e)))?,
         );
-        let bound_addr = socket
+        let port = socket
             .local_addr()
-            .map_err(|e| (None, NetherError::from(e)))?;
+            .map_err(|e| (None, NetherError::from(e)))?
+            .port();
+        let primary = local_bind_addr().ip();
+        let bound_addr = SocketAddr::new(primary, port);
 
-        let (mut session, description) = SansSession::new(bound_addr, true, Instant::now())
-            .map_err(|e| {
-                (
-                    Some(SignalErrorCode::FailedToCreatePeerConnection),
-                    NetherError::from(e),
-                )
-            })?;
+        let (mut session, description) = SansSession::with_advertised(
+            bound_addr,
+            &advertisable_addresses(primary),
+            true,
+            Instant::now(),
+        )
+        .map_err(|e| {
+            (
+                Some(SignalErrorCode::FailedToCreatePeerConnection),
+                NetherError::from(e),
+            )
+        })?;
         session.set_establish_deadline(config.timeouts.establish());
 
         let ice_mode = if signaling.disable_trickle_ice() {

@@ -1,3 +1,4 @@
+use nethernet::util::endpoint::advertisable;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
@@ -12,10 +13,39 @@ pub(crate) fn local_bind_addr() -> SocketAddr {
     SocketAddr::new(probe().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)), 0)
 }
 
-pub(crate) fn bind_shared_socket() -> std::io::Result<(UdpSocket, SocketAddr)> {
-    let socket = UdpSocket::bind(local_bind_addr())?;
-    let addr = socket.local_addr()?;
-    Ok((socket, addr))
+/// Socket for a server's sessions: bound to every interface, with the addresses to announce for it.
+pub(crate) struct ServerMedia {
+    pub socket: UdpSocket,
+    pub local_addr: SocketAddr,
+    pub advertised: Vec<IpAddr>,
+}
+
+/// The IPv4 addresses a peer may be able to reach this host on, default route first.
+pub(crate) fn advertisable_addresses(primary: IpAddr) -> Vec<IpAddr> {
+    let mut found = vec![primary];
+    let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
+    for interface in interfaces {
+        let ip = interface.ip();
+        if ip.is_ipv4()
+            && !interface.is_loopback()
+            && advertisable(ip, false)
+            && !found.contains(&ip)
+        {
+            found.push(ip);
+        }
+    }
+    found
+}
+
+pub(crate) fn bind_media() -> std::io::Result<ServerMedia> {
+    let primary = local_bind_addr().ip();
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    let port = socket.local_addr()?.port();
+    Ok(ServerMedia {
+        socket,
+        local_addr: SocketAddr::new(primary, port),
+        advertised: advertisable_addresses(primary),
+    })
 }
 
 pub(crate) fn bind_discovery_socket(addr: SocketAddr) -> std::io::Result<UdpSocket> {
@@ -127,5 +157,33 @@ mod tests {
             received.iter().any(|(data, _)| data.as_ref() == [2u8; 16]),
             "the datagram after a failed receive was left for the next tick"
         );
+    }
+}
+
+#[cfg(test)]
+mod advertise_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_route_address_leads_and_nothing_repeats() {
+        let primary: IpAddr = "192.0.2.10".parse().unwrap();
+        let found = advertisable_addresses(primary);
+        assert_eq!(found[0], primary);
+        let mut sorted = found.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), found.len());
+        assert!(found.iter().all(|ip| ip.is_ipv4() && !ip.is_loopback()));
+    }
+
+    #[test]
+    fn server_media_binds_every_interface_on_the_announced_port() {
+        let media = bind_media().unwrap();
+        assert!(media.socket.local_addr().unwrap().ip().is_unspecified());
+        assert_eq!(
+            media.socket.local_addr().unwrap().port(),
+            media.local_addr.port()
+        );
+        assert_eq!(media.advertised[0], media.local_addr.ip());
     }
 }

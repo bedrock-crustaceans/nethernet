@@ -10,6 +10,7 @@ pub use server::NetherServer;
 
 use nethernet::identity::{ServerIdentity, TokenTrust};
 use nethernet::protocol::constants::{DEFAULT_MAX_PENDING, DEFAULT_MAX_PENDING_PER_NETWORK_ID};
+use nethernet::util::endpoint::advertisable;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -23,6 +24,22 @@ pub(crate) fn local_bind_addr() -> SocketAddr {
 
     SocketAddr::new(probe().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)), 0)
 }
+/// The IPv4 addresses a peer may be able to reach this host on, default route first.
+pub(crate) fn advertisable_addresses(primary: IpAddr) -> Vec<IpAddr> {
+    let mut found = vec![primary];
+    for interface in if_addrs::get_if_addrs().unwrap_or_default() {
+        let ip = interface.ip();
+        if ip.is_ipv4()
+            && !interface.is_loopback()
+            && advertisable(ip, false)
+            && !found.contains(&ip)
+        {
+            found.push(ip);
+        }
+    }
+    found
+}
+
 use tokio_util::sync::CancellationToken;
 
 /// Settings shared by NetherClient::connect_with and NetherServer::bind_with.

@@ -117,7 +117,7 @@ impl Connection {
         kind: SignalKind,
     ) -> Vec<Signal> {
         let sdp = match ice_mode {
-            IceMode::Full => description.encode_full(&[session.local_candidate().clone()]),
+            IceMode::Full => description.encode_full(session.local_candidates()),
             IceMode::Trickle => description.encode_trickle(),
         };
 
@@ -127,11 +127,13 @@ impl Connection {
         }];
 
         if ice_mode == IceMode::Trickle {
-            signals.push(Signal::candidate(
-                connection_id,
-                format_ice_candidate(0, session.local_candidate(), &description.ice.ufrag),
-                remote_network_id,
-            ));
+            for candidate in session.local_candidates() {
+                signals.push(Signal::candidate(
+                    connection_id,
+                    format_ice_candidate(0, candidate, &description.ice.ufrag),
+                    remote_network_id.clone(),
+                ));
+            }
         }
 
         signals

@@ -2,7 +2,7 @@
 use crate::connection::{ConnectionEvent, SessionPool};
 use crate::http_stream::{ClientTls, Drain, HttpStream};
 use crate::http_wire;
-use crate::socket::bind_shared_socket;
+use crate::socket::bind_media;
 use crate::tcp_wire::Inbound;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
@@ -362,9 +362,11 @@ impl NetherHttpClient {
         let server_url = self.server_url.clone();
         let (target, addr) = Self::resolve(&server_url)?;
 
-        let (session_socket, local_addr) = bind_shared_socket()?;
+        let media = bind_media()?;
+        let (session_socket, local_addr) = (media.socket, media.local_addr);
         let (mut session, description) =
-            Session::new(local_addr, true, Instant::now()).map_err(std::io::Error::other)?;
+            Session::with_advertised(local_addr, &media.advertised, true, Instant::now())
+                .map_err(std::io::Error::other)?;
         session.set_establish_deadline(self.timeouts.establish());
         let local_ufrag = description.ice.ufrag.clone();
 

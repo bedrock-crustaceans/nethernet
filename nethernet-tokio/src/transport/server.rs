@@ -5,12 +5,13 @@ use crate::session::{AcceptedSession, Command, Session, SessionSocket};
 use crate::signaling::ServerSignaling;
 use crate::transport::pending::PendingOffers;
 use crate::transport::shared::SharedSocket;
-use crate::transport::{ConnectionConfig, local_bind_addr};
+use crate::transport::{ConnectionConfig, advertisable_addresses, local_bind_addr};
 use futures::{Stream, StreamExt};
 use nethernet::admission::OfferPolicy;
 use nethernet::connection::IceMode;
 use nethernet::identity::TokenTrust;
 use std::collections::HashMap;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, PoisonError, RwLock};
 use std::task::{Context, Poll};
@@ -248,20 +249,39 @@ impl NetherServer {
             .admit(&signal, remote_address, SystemTime::now())
             .map_err(|e| (Some(e.code()), NetherError::from(e)))?;
 
-        let (bound_addr, owned) = match &shared {
-            Some(shared) => (shared.advertised_addr(), None),
+        let (bound_addr, advertised, owned) = match &shared {
+            Some(shared) => (
+                shared.advertised_addr(),
+                shared.advertised_ips().to_vec(),
+                None,
+            ),
             None => {
-                let socket = UdpSocket::bind(local_bind_addr())
+                let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
                     .await
                     .map_err(peer_connection_failed)?;
-                let bound_addr = socket.local_addr().map_err(peer_connection_failed)?;
-                (bound_addr, Some(Arc::new(socket)))
+                let port = socket.local_addr().map_err(peer_connection_failed)?.port();
+                let primary = local_bind_addr().ip();
+                (
+                    SocketAddr::new(primary, port),
+                    advertisable_addresses(primary),
+                    Some(Arc::new(socket)),
+                )
             }
         };
 
         let answered = admitted
-            .answer(bound_addr, Instant::now())
+            .answer_advertising(bound_addr, &advertised, Instant::now())
             .map_err(|e| (Some(e.code()), NetherError::from(e)))?;
+        tracing::debug!(
+            "answering {} with candidates {:?}",
+            network_id,
+            answered
+                .signals
+                .iter()
+                .flat_map(|signal| signal.data.lines())
+                .filter(|line| line.contains("candidate:"))
+                .collect::<Vec<_>>()
+        );
         let socket = match (owned, &shared) {
             (Some(socket), _) => SessionSocket::Owned(socket),
             (None, Some(shared)) => {

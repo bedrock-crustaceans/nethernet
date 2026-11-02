@@ -4,7 +4,7 @@ use crate::http_stream::{Drain, HttpStream, ServerTls, Shutdown};
 use crate::http_wire;
 use crate::pending::{PendingLimits, admits_offer};
 use crate::server::NetherSessionId;
-use crate::socket::bind_shared_socket;
+use crate::socket::bind_media;
 use crate::tcp_wire::Inbound;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
@@ -18,7 +18,7 @@ use nethernet::prelude::{
 use nethernet::session::Channel;
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
-use std::net::{SocketAddr, TcpListener};
+use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -98,6 +98,7 @@ pub struct NetherHttpServer {
     signaler: HttpSignaler,
     pool: SessionPool<NetherSessionId>,
     session_local_addr: SocketAddr,
+    advertised_addrs: Vec<IpAddr>,
     identity: Option<ServerIdentity>,
     warned_missing_identity: bool,
     allow_unsigned_answers: bool,
@@ -127,13 +128,21 @@ impl NetherHttpServer {
         let listener = TcpListener::bind(bind_addr)?;
         listener.set_nonblocking(true)?;
 
-        let (session_socket, session_local_addr) = bind_shared_socket()?;
+        let media = bind_media()?;
+        let (session_socket, session_local_addr, advertised) =
+            (media.socket, media.local_addr, media.advertised);
+        tracing::debug!(
+            "NetherNet HTTP sessions listen on port {}, advertising {:?}",
+            session_local_addr.port(),
+            advertised
+        );
 
         Ok(Self {
             listener,
             signaler: HttpSignaler::new(config),
             pool: SessionPool::new(session_socket),
             session_local_addr,
+            advertised_addrs: advertised,
             identity: None,
             warned_missing_identity: false,
             allow_unsigned_answers: false,
@@ -511,7 +520,9 @@ impl NetherHttpServer {
         let signaled_player = offer.player.clone().map(|player| Arc::new(*player));
         let answered = policy
             .admit(&offer.signal(), offer.client_address, SystemTime::now())
-            .and_then(|admitted| admitted.answer(self.session_local_addr, now));
+            .and_then(|admitted| {
+                admitted.answer_advertising(self.session_local_addr, &self.advertised_addrs, now)
+            });
         match answered {
             Ok(Answered {
                 connection,
@@ -527,6 +538,15 @@ impl NetherHttpServer {
                     });
                     return;
                 };
+                tracing::debug!(
+                    "answering {} with candidates {:?}",
+                    offer.network_id,
+                    answer
+                        .data
+                        .lines()
+                        .filter(|line| line.contains("candidate:"))
+                        .collect::<Vec<_>>()
+                );
                 let _ = self.signaler.handle(HttpSignalerInput::Answer {
                     connection_id: offer.connection_id,
                     sdp: answer.data,
