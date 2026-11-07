@@ -70,10 +70,10 @@ impl Description {
         }
         let media = &session.media_descriptions[0];
 
-        let ufrag = attribute(media, "ice-ufrag")?.to_string();
-        let pwd = attribute(media, "ice-pwd")?.to_string();
+        let ufrag = attribute_or_session(media, &session, "ice-ufrag")?.to_string();
+        let pwd = attribute_or_session(media, &session, "ice-pwd")?.to_string();
 
-        let fingerprint_attr = attribute(media, "fingerprint")?;
+        let fingerprint_attr = attribute_or_session(media, &session, "fingerprint")?;
         let (algorithm, value) = fingerprint_attr.split_once(' ').ok_or_else(|| {
             ProtocolError::Other(format!("invalid fingerprint: {fingerprint_attr}"))
         })?;
@@ -206,6 +206,20 @@ fn attribute<'a>(media: &'a MediaDescription, key: &str) -> Result<&'a str, Prot
         Some(Some(value)) => Ok(value),
         Some(None) => Err(ProtocolError::Other(format!("empty {key} attribute"))),
         None => Err(ProtocolError::Other(format!("missing {key} attribute"))),
+    }
+}
+
+fn attribute_or_session<'a>(
+    media: &'a MediaDescription,
+    session: &'a SessionDescription,
+    key: &str,
+) -> Result<&'a str, ProtocolError> {
+    match media.attribute(key) {
+        Some(Some(value)) => Ok(value),
+        _ => match session.attribute(key) {
+            Some(value) => Ok(value.as_str()),
+            None => Err(ProtocolError::Other(format!("missing {key} attribute"))),
+        },
     }
 }
 

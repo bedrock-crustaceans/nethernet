@@ -12,7 +12,7 @@ pub use envelope::{
     Assertion, Identity, Idp, canonical_fingerprint_json, fingerprint_payload, sdp_fingerprints,
 };
 pub use player::PlayerInfo;
-pub use server::ServerIdentity;
+pub use server::{CpkEncoding, ServerIdentity};
 pub use trust::{TokenTrust, validate_sdp, verify_answer};
 
 /// Endpoint publishing the JWKS that signs Minecraft multiplayer tokens.

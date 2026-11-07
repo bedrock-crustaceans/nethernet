@@ -9,6 +9,7 @@ pub use rtc::dtls::endpoint::EndpointEvent;
 use rtc::dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 use rtc::shared::{TransportProtocol, error::Error as SharedError};
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -33,6 +34,7 @@ impl ResolvedRole {
 pub struct DtlsLayer {
     endpoint: Endpoint,
     remote_addr: SocketAddr,
+    pending: VecDeque<Vec<u8>>,
 }
 
 impl DtlsLayer {
@@ -76,6 +78,7 @@ impl DtlsLayer {
         Ok(Self {
             endpoint,
             remote_addr,
+            pending: VecDeque::new(),
         })
     }
 
@@ -84,15 +87,31 @@ impl DtlsLayer {
         data: &[u8],
         now: Instant,
     ) -> Result<Vec<EndpointEvent>, ProtocolError> {
-        self.endpoint
+        let events = self
+            .endpoint
             .read(now, self.remote_addr, None, BytesMut::from(data))
-            .map_err(|e| ProtocolError::Other(format!("{e}")))
+            .map_err(|e| ProtocolError::Other(format!("{e}")))?;
+        self.flush_pending(now);
+        Ok(events)
     }
 
     pub fn write(&mut self, data: &[u8], now: Instant) -> Result<(), ProtocolError> {
-        self.endpoint
-            .write(now, self.remote_addr, data)
-            .map_err(|e| ProtocolError::Other(format!("{e}")))
+        self.pending.push_back(data.to_vec());
+        self.flush_pending(now);
+        Ok(())
+    }
+
+    fn flush_pending(&mut self, now: Instant) {
+        while let Some(queued) = self.pending.pop_front() {
+            if self
+                .endpoint
+                .write(now, self.remote_addr, &queued)
+                .is_err()
+            {
+                self.pending.push_front(queued);
+                return;
+            }
+        }
     }
 
     pub fn poll_transmit(&mut self) -> Option<(Vec<u8>, SocketAddr)> {

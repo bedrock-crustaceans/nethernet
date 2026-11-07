@@ -13,7 +13,7 @@ pub use addr::Addr;
 pub use builders::*;
 pub use credentials::{Credentials, IceServer};
 pub use error::{NetherError, Result};
-pub use nethernet::identity::{PlayerInfo, ServerIdentity, TokenTrust};
+pub use nethernet::identity::{CpkEncoding, PlayerInfo, ServerIdentity, TokenTrust};
 pub use protocol::packet::discovery::{MessagePacket, RequestPacket, ResponsePacket, ServerData};
 pub use protocol::{Message, MessageSegment, Signal, SignalType};
 pub use session::{AcceptedSession, Session, SessionReceiver};

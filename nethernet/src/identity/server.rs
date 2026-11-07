@@ -6,7 +6,9 @@ use crate::identity::{Assertion, Identity, Idp, fingerprint_payload, sdp_fingerp
 use p384::SecretKey;
 use p384::ecdsa::{SigningKey, VerifyingKey};
 use p384::elliptic_curve::Generate;
-use p384::pkcs8::LineEnding;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use p384::pkcs8::{EncodePublicKey as _, LineEnding};
 use serde_json::json;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,6 +18,16 @@ pub const DEFAULT_DOMAIN: &str = "self";
 /// Token validity used when no lifetime is given.
 pub const DEFAULT_TOKEN_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// How the token names its public key in the `cpk` claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CpkEncoding {
+    /// A JWK object.
+    Jwk,
+    /// A base64 SPKI DER string, the form game clients send and servers such as PowerNukkitX decode.
+    #[default]
+    Der,
+}
+
 /// Server key and token; keep the key stable across restarts so clients can trust it (guide section 5.2).
 #[derive(Debug, Clone)]
 pub struct ServerIdentity {
@@ -23,6 +35,7 @@ pub struct ServerIdentity {
     verifying: VerifyingKey,
     domain: String,
     lifetime: Option<Duration>,
+    cpk: CpkEncoding,
     token: String,
 }
 
@@ -62,18 +75,29 @@ impl ServerIdentity {
         now: SystemTime,
         lifetime: Option<Duration>,
     ) -> Result<Self> {
+        Self::from_key_with_cpk(signing, domain, now, lifetime, CpkEncoding::default())
+    }
+
+    pub fn from_key_with_cpk(
+        signing: SigningKey,
+        domain: impl Into<String>,
+        now: SystemTime,
+        lifetime: Option<Duration>,
+        cpk: CpkEncoding,
+    ) -> Result<Self> {
         let verifying = *signing.verifying_key();
         let domain = match domain.into() {
             domain if domain.is_empty() => DEFAULT_DOMAIN.to_string(),
             domain => domain,
         };
-        let token = mint_token(&signing, &verifying, &domain, now, lifetime)?;
+        let token = mint_token(&signing, &verifying, &domain, now, lifetime, cpk)?;
 
         Ok(Self {
             signing,
             verifying,
             domain,
             lifetime,
+            cpk,
             token,
         })
     }
@@ -103,6 +127,7 @@ impl ServerIdentity {
             &self.domain,
             now,
             self.lifetime,
+            self.cpk,
         )
     }
 
@@ -172,9 +197,19 @@ fn mint_token(
     domain: &str,
     now: SystemTime,
     lifetime: Option<Duration>,
+    cpk: CpkEncoding,
 ) -> Result<String> {
+    let cpk = match cpk {
+        CpkEncoding::Jwk => json!(EcJwk::from(verifying)),
+        CpkEncoding::Der => {
+            let der = verifying
+                .to_public_key_der()
+                .map_err(|e| IdentityError::ClientPublicKey(e.to_string()))?;
+            json!(STANDARD.encode(der.as_bytes()))
+        }
+    };
     let mut claims = json!({
-        "cpk": EcJwk::from(verifying),
+        "cpk": cpk,
         "iat": seconds(now),
     });
     if !domain.is_empty() {
@@ -302,7 +337,18 @@ D9X8Fh+xaDyPt2Z7rVGnwVihOy/Uu1zzizzcYTJMluYn8XetihGgczU=
     }
 
     fn fixture_identity() -> ServerIdentity {
-        ServerIdentity::from_pem(SEC1_PEM, "example.com", fixture_now()).unwrap()
+        ServerIdentity::from_key_with_cpk(
+            fixture_signing_key(),
+            "example.com",
+            fixture_now(),
+            Some(DEFAULT_TOKEN_LIFETIME),
+            CpkEncoding::Jwk,
+        )
+        .unwrap()
+    }
+
+    fn fixture_signing_key() -> SigningKey {
+        SecretKey::from_pem(SEC1_PEM).unwrap().into()
     }
 
     fn fixture_cpk_key() -> VerifyingKey {
@@ -362,6 +408,39 @@ D9X8Fh+xaDyPt2Z7rVGnwVihOy/Uu1zzizzcYTJMluYn8XetihGgczU=
             Some(fixture_now() + DEFAULT_TOKEN_LIFETIME)
         );
         assert_eq!(jws.header.alg, "ES384");
+    }
+
+    #[test]
+    fn a_token_carries_cpk_as_a_base64_der_string_by_default() {
+        let identity = ServerIdentity::from_key(
+            fixture_signing_key(),
+            "example.com",
+            fixture_now(),
+            Some(DEFAULT_TOKEN_LIFETIME),
+        )
+        .unwrap();
+        let jws = Jws::parse(identity.token()).unwrap();
+        let claims = jws.claims().unwrap();
+
+        assert!(claims.values()["cpk"].is_string());
+        assert_eq!(claims.client_public_key().unwrap(), fixture_cpk_key());
+    }
+
+    #[test]
+    fn an_answer_with_the_default_der_cpk_validates_under_any_trust() {
+        let identity = ServerIdentity::from_key(
+            fixture_signing_key(),
+            "example.com",
+            fixture_now(),
+            Some(DEFAULT_TOKEN_LIFETIME),
+        )
+        .unwrap();
+        let augmented = identity.augment(FIXTURE_ANSWER, fixture_now()).unwrap();
+
+        let claims = validate_sdp(&augmented, &TokenTrust::Any, fixture_now()).unwrap();
+
+        assert!(claims.values()["cpk"].is_string());
+        assert_eq!(claims.client_public_key().unwrap(), fixture_cpk_key());
     }
 
     #[test]

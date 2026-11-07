@@ -14,10 +14,13 @@ use std::time::{Duration, Instant};
 
 pub const SCTP_PORT: u16 = 5000;
 
+const SERVER_INIT_FALLBACK: Duration = Duration::from_secs(2);
+
 pub struct SctpLayer {
     endpoint: Endpoint,
     remote_addr: SocketAddr,
     association: Option<(AssociationHandle, Association)>,
+    fallback_init: Option<(Instant, TransportConfig)>,
     pending_transmits: VecDeque<Vec<u8>>,
 }
 
@@ -40,19 +43,21 @@ impl SctpLayer {
             (role == ResolvedRole::Server).then(|| Arc::new(ServerConfig::new(transport.clone()))),
         );
 
-        let association = if role == ResolvedRole::Client {
-            let (handle, assoc) = endpoint
-                .connect(now, ClientConfig::new(transport), remote_addr)
-                .map_err(|e| ProtocolError::Other(format!("{e}")))?;
-            Some((handle, assoc))
-        } else {
-            None
+        let (association, fallback_init) = match role {
+            ResolvedRole::Client => {
+                let (handle, assoc) = endpoint
+                    .connect(now, ClientConfig::new(transport), remote_addr)
+                    .map_err(|e| ProtocolError::Other(format!("{e}")))?;
+                (Some((handle, assoc)), None)
+            }
+            ResolvedRole::Server => (None, Some((now + SERVER_INIT_FALLBACK, transport))),
         };
 
         Ok(Self {
             endpoint,
             remote_addr,
             association,
+            fallback_init,
             pending_transmits: VecDeque::new(),
         })
     }
@@ -67,6 +72,7 @@ impl SctpLayer {
 
         match event {
             DatagramEvent::NewAssociation(assoc) => {
+                self.fallback_init = None;
                 self.association = Some((handle, assoc));
             }
             DatagramEvent::AssociationEvent(event) => {
@@ -108,6 +114,7 @@ impl SctpLayer {
     }
 
     pub fn handle_timeout(&mut self, now: Instant) {
+        self.start_fallback_init(now);
         if let Some((handle, assoc)) = &mut self.association {
             assoc.handle_timeout(now);
             while let Some(event) = assoc.poll_endpoint_event() {
@@ -117,9 +124,37 @@ impl SctpLayer {
     }
 
     pub fn poll_timeout(&self) -> Option<Instant> {
-        self.association
+        let association = self
+            .association
             .as_ref()
-            .and_then(|(_, assoc)| assoc.poll_timeout())
+            .and_then(|(_, assoc)| assoc.poll_timeout());
+        let fallback = self.fallback_init.as_ref().map(|(at, _)| *at);
+        match (association, fallback) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    fn start_fallback_init(&mut self, now: Instant) {
+        if self.association.is_some() {
+            self.fallback_init = None;
+            return;
+        }
+        let Some((at, _)) = &self.fallback_init else {
+            return;
+        };
+        if now < *at {
+            return;
+        }
+        let Some((_, transport)) = self.fallback_init.take() else {
+            return;
+        };
+        if let Ok((handle, assoc)) =
+            self.endpoint
+                .connect(now, ClientConfig::new(transport), self.remote_addr)
+        {
+            self.association = Some((handle, assoc));
+        }
     }
 }
 
@@ -132,6 +167,20 @@ mod tests {
 
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
+    }
+
+    #[test]
+    fn a_server_that_hears_nothing_starts_the_association_itself() {
+        let now = Instant::now();
+        let mut server =
+            SctpLayer::new(addr(40031), addr(40030), ResolvedRole::Server, 65536, now).unwrap();
+
+        server.handle_timeout(now + Duration::from_secs(1));
+        assert!(server.poll_transmit(now + Duration::from_secs(1)).is_none());
+
+        let later = now + SERVER_INIT_FALLBACK + Duration::from_secs(1);
+        server.handle_timeout(later);
+        assert!(server.poll_transmit(later).is_some());
     }
 
     #[test]

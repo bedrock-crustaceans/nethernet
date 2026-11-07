@@ -14,7 +14,7 @@ pub mod prelude {
     pub use crate::connection::Timeouts;
     pub use crate::error::{ProtocolError, SignalErrorCode};
     pub use crate::identity::{
-        Identity, PlayerInfo, ServerIdentity, TokenTrust,
+        CpkEncoding, Identity, PlayerInfo, ServerIdentity, TokenTrust,
         error::IdentityError,
         jwk::{Jwk, JwkSet, MinecraftKeys},
         jwt::Claims,
