@@ -103,11 +103,7 @@ impl DtlsLayer {
 
     fn flush_pending(&mut self, now: Instant) {
         while let Some(queued) = self.pending.pop_front() {
-            if self
-                .endpoint
-                .write(now, self.remote_addr, &queued)
-                .is_err()
-            {
+            if self.endpoint.write(now, self.remote_addr, &queued).is_err() {
                 self.pending.push_front(queued);
                 return;
             }
